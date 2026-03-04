@@ -1,0 +1,3 @@
+{{- if .Values.components.semanticEngineWorker.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/semantic-engine-worker.yaml") }}
+{{- end }}

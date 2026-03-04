@@ -1,0 +1,2421 @@
+/**
+ * 日志浏览器页面 - 侧边栏上下文版本
+ * 
+ * 优化点：
+ * 1. 修复Pod标签显示问题
+ * 2. 采用侧边框形式展示上下文信息
+ * 3. 侧边框显示全面的日志内容
+ * 4. 上下文日志条数可选择
+ * 5. Trace类型日志单行完整显示
+ * 6. 健康检查日志过滤优化
+ * 7. 实时日志流 (WebSocket)
+ * 8. 统一跳转功能
+ * 9. 数据导出功能（按当前筛选）
+ */
+import React, { useState, useMemo, useEffect, useRef, useCallback, useDeferredValue } from 'react';
+import { useLocation } from 'react-router-dom';
+import { useEvents, useLogFacets, useLogContext, useAnalyzeLog, useRealtimeLogs } from '../hooks/useApi';
+import { useNavigation } from '../hooks/useNavigation';
+import LoadingState from '../components/common/LoadingState';
+import ErrorState from '../components/common/ErrorState';
+import EmptyState from '../components/common/EmptyState';
+import { AISuggestionCard } from '../components/common/AISuggestionCard';
+import Tooltip from '../components/common/Tooltip';
+import VirtualLogList from '../components/logs/VirtualLogList';
+import { api } from '../utils/api';
+import type { LogsQueryParams } from '../utils/api';
+import { copyTextToClipboard } from '../utils/clipboard';
+import { formatTime } from '../utils/formatters';
+import { exportLogsToCSV, exportToJSON, generateExportFilename } from '../utils/export';
+import {
+  Search,
+  RefreshCw,
+  Download,
+  X,
+  Copy,
+  ChevronDown,
+  ChevronRight,
+  Tag,
+  LayoutGrid,
+  PanelLeft,
+  Server,
+  Check,
+  FilterX,
+  MapPin,
+  Clock,
+  Sparkles,
+  Activity,
+  Radio,
+  Pause,
+  FileJson,
+  FileSpreadsheet,
+  ChevronsLeft,
+  ChevronsRight,
+  GripVertical,
+} from 'lucide-react';
+
+const LOG_LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
+const PAGE_SIZE = 200;
+const DEFAULT_LOGS_TIME_WINDOW = '24 HOUR';
+type ResizableColumn = 'time' | 'service' | 'pod' | 'level' | 'action';
+type ColumnWidths = Record<ResizableColumn, number>;
+const DEFAULT_COLUMN_WIDTHS: ColumnWidths = {
+  time: 210,
+  service: 130,
+  pod: 180,
+  level: 80,
+  action: 110,
+};
+const COLUMN_MIN_WIDTH: ColumnWidths = {
+  time: 170,
+  service: 100,
+  pod: 140,
+  level: 64,
+  action: 90,
+};
+const COLUMN_MAX_WIDTH: ColumnWidths = {
+  time: 360,
+  service: 260,
+  pod: 320,
+  level: 140,
+  action: 200,
+};
+
+// 日志级别颜色配置
+const LEVEL_COLORS: Record<string, { bg: string; text: string; border: string; dot: string; solid: string }> = {
+  TRACE: { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-300', dot: 'bg-gray-400', solid: '#9ca3af' },
+  DEBUG: { bg: 'bg-indigo-100', text: 'text-indigo-700', border: 'border-indigo-300', dot: 'bg-indigo-500', solid: '#6366f1' },
+  INFO: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-300', dot: 'bg-blue-500', solid: '#3b82f6' },
+  WARN: { bg: 'bg-amber-100', text: 'text-amber-700', border: 'border-amber-300', dot: 'bg-amber-500', solid: '#f59e0b' },
+  ERROR: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300', dot: 'bg-red-500', solid: '#ef4444' },
+  FATAL: { bg: 'bg-red-200', text: 'text-red-800', border: 'border-red-400', dot: 'bg-red-600', solid: '#dc2626' },
+};
+
+// 标签颜色配置
+const TAG_COLORS = [
+  { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-700', keyColor: 'text-blue-500' },
+  { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-700', keyColor: 'text-green-500' },
+  { bg: 'bg-purple-50', border: 'border-purple-200', text: 'text-purple-700', keyColor: 'text-purple-500' },
+  { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', keyColor: 'text-amber-500' },
+  { bg: 'bg-pink-50', border: 'border-pink-200', text: 'text-pink-700', keyColor: 'text-pink-500' },
+  { bg: 'bg-cyan-50', border: 'border-cyan-200', text: 'text-cyan-700', keyColor: 'text-cyan-500' },
+  { bg: 'bg-indigo-50', border: 'border-indigo-200', text: 'text-indigo-700', keyColor: 'text-indigo-500' },
+  { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-700', keyColor: 'text-rose-500' },
+];
+
+// 获取标签颜色
+function getTagColor(key: string) {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash) + key.charCodeAt(i);
+    hash = hash & hash;
+  }
+  return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length];
+}
+
+// 提取 Pod 标签 - 修复版
+function extractPodLabels(event: any): Record<string, string> {
+  try {
+    // 直接从 labels 字段获取（后端已解析）
+    if (event.labels && typeof event.labels === 'object') {
+      return event.labels;
+    }
+    
+    // 尝试多种可能的路径获取标签
+    const labels = event.attributes?.k8s?.labels || 
+                   event.attributes?.labels ||
+                   event.context?.k8s?.labels ||
+                   event.context?.labels ||
+                   {};
+    
+    return labels;
+  } catch (e) {
+    console.error('Error extracting labels:', e);
+    return {};
+  }
+}
+
+// 提取主机信息
+function extractHost(event: any): string {
+  return event.node_name ||
+         event.attributes?.k8s?.node || 
+         event.attributes?.host || 
+         event.context?.k8s?.node ||
+         event.context?.host ||
+         event.host ||
+         event.host_ip ||
+         '-';
+}
+
+// 提取容器信息
+function extractContainer(event: any): string {
+  return event.container_name ||
+         event.attributes?.k8s?.container_name || 
+         event.attributes?.container || 
+         event.context?.k8s?.container_name ||
+         event.context?.container ||
+         event.container ||
+         '-';
+}
+
+// 提取命名空间
+function extractNamespace(event: any): string {
+  return event.namespace ||
+         event.attributes?.k8s?.namespace || 
+         event.attributes?.namespace || 
+         event.context?.k8s?.namespace ||
+         event.context?.namespace ||
+         '-';
+}
+
+function extractLogMeta(event: any): { stream?: string; collector_time?: string; line_count?: number } {
+  const fromAttributes = (event?.attributes?.log_meta && typeof event.attributes.log_meta === 'object')
+    ? event.attributes.log_meta
+    : {};
+  const fromEvent = (event?.log_meta && typeof event.log_meta === 'object')
+    ? event.log_meta
+    : {};
+
+  return {
+    ...fromAttributes,
+    ...fromEvent,
+  };
+}
+
+function formatCollectorTime(value?: string): string {
+  if (!value) {
+    return '-';
+  }
+  const ts = Date.parse(value);
+  if (Number.isNaN(ts)) {
+    return value;
+  }
+  return formatTime(value);
+}
+
+const SQL_KEYWORDS = new Set([
+  'SELECT', 'FROM', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'ON',
+  'GROUP', 'ORDER', 'BY', 'LIMIT', 'HAVING', 'DISTINCT', 'INSERT', 'INTO', 'VALUES',
+  'UPDATE', 'SET', 'DELETE', 'UNION', 'ALL', 'AS',
+]);
+
+type HighlightMode = 'normal' | 'enhanced';
+type HighlightTokenType = 'timestamp' | 'level' | 'sql' | 'class';
+
+interface HighlightRenderOptions {
+  mode: HighlightMode;
+  onTokenClick?: (token: string, type: HighlightTokenType) => void;
+}
+
+interface TopologyJumpContext {
+  sourceService: string;
+  targetService: string;
+  timeWindow: string;
+}
+
+const TIMESTAMP_TOKEN_REGEX = /\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z)?\b/;
+const LEVEL_TOKEN_REGEX = /\b(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b/i;
+const CLASS_TOKEN_REGEX = /\b(?:[A-Za-z_][\w$]*\.){1,}[A-Za-z_][\w$]*(?:\([^)]+\))?\b/;
+const TOKEN_SPLIT_REGEX = /(\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z)?\b|\b(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b|\b(?:SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|FULL|OUTER|ON|GROUP|ORDER|BY|LIMIT|HAVING|DISTINCT|INSERT|INTO|VALUES|UPDATE|SET|DELETE|UNION|ALL|AS)\b|\b(?:[A-Za-z_][\w$]*\.){1,}[A-Za-z_][\w$]*(?:\([^)]+\))?\b)/gi;
+
+function resolveTimeWindowRange(timeWindow: string): { start: string; end: string } | null {
+  const normalized = (timeWindow || '').trim().toUpperCase();
+  const matched = normalized.match(/^(\d+)\s*(MINUTE|MINUTES|HOUR|HOURS|DAY|DAYS)$/);
+  if (!matched) {
+    return null;
+  }
+
+  const amount = Number(matched[1]);
+  const unit = matched[2];
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return null;
+  }
+
+  let ms = 0;
+  if (unit.startsWith('MINUTE')) {
+    ms = amount * 60 * 1000;
+  } else if (unit.startsWith('HOUR')) {
+    ms = amount * 60 * 60 * 1000;
+  } else if (unit.startsWith('DAY')) {
+    ms = amount * 24 * 60 * 60 * 1000;
+  }
+
+  if (ms <= 0) {
+    return null;
+  }
+
+  const end = new Date();
+  const start = new Date(end.getTime() - ms);
+  return {
+    start: start.toISOString(),
+    end: end.toISOString(),
+  };
+}
+
+function toLocalDatetimeInputValue(isoValue: string): string {
+  const raw = String(isoValue || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hour = pad(date.getHours());
+  const minute = pad(date.getMinutes());
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+function fromLocalDatetimeInputValue(localValue: string): string {
+  const raw = String(localValue || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toISOString();
+}
+
+function normalizeTimeRange(startIso: string, endIso: string): { start: string; end: string } {
+  if (!startIso || !endIso) {
+    return { start: startIso, end: endIso };
+  }
+
+  const startTs = Date.parse(startIso);
+  const endTs = Date.parse(endIso);
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || startTs <= endTs) {
+    return { start: startIso, end: endIso };
+  }
+
+  return { start: endIso, end: startIso };
+}
+
+function extractTraceIdFromLog(event: any): string {
+  if (!event) {
+    return '';
+  }
+  const directTraceId = String(event.trace_id || '').trim();
+  if (directTraceId) {
+    return directTraceId;
+  }
+  const attributeTraceId = String(event.attributes?.trace_id || event.attributes?.traceId || '').trim();
+  if (attributeTraceId) {
+    return attributeTraceId;
+  }
+  return '';
+}
+
+function compareLogEventsDesc(a: any, b: any): number {
+  const aTimestamp = String(a?.timestamp || '');
+  const bTimestamp = String(b?.timestamp || '');
+  const aTs = Date.parse(aTimestamp);
+  const bTs = Date.parse(bTimestamp);
+  const aValid = Number.isFinite(aTs);
+  const bValid = Number.isFinite(bTs);
+
+  if (aValid && bValid && aTs !== bTs) {
+    return bTs - aTs;
+  }
+  if (aValid !== bValid) {
+    return aValid ? -1 : 1;
+  }
+
+  if (!aValid && !bValid && aTimestamp !== bTimestamp) {
+    return bTimestamp.localeCompare(aTimestamp);
+  }
+
+  const aId = String(a?.id || '');
+  const bId = String(b?.id || '');
+  if (aId !== bId) {
+    return bId.localeCompare(aId);
+  }
+
+  return 0;
+}
+
+function getLevelTokenClass(levelToken: string): string {
+  const normalized = levelToken.toUpperCase();
+  if (normalized === 'ERROR' || normalized === 'FATAL') {
+    return 'text-red-700 font-semibold';
+  }
+  if (normalized === 'WARN' || normalized === 'WARNING') {
+    return 'text-amber-700 font-semibold';
+  }
+  if (normalized === 'DEBUG') {
+    return 'text-indigo-700 font-semibold';
+  }
+  if (normalized === 'INFO') {
+    return 'text-blue-700 font-semibold';
+  }
+  return 'text-slate-700 font-semibold';
+}
+
+function renderHighlightedToken(
+  token: string,
+  tokenType: HighlightTokenType,
+  className: string,
+  key: string,
+  options: HighlightRenderOptions
+): React.ReactNode {
+  if (options.mode === 'enhanced' && options.onTokenClick) {
+    return (
+      <button
+        key={key}
+        type="button"
+        onClick={() => options.onTokenClick?.(token, tokenType)}
+        className={`${className} rounded px-0.5 -mx-0.5 hover:bg-slate-200/70 underline decoration-dotted underline-offset-2`}
+        title={`点击快速过滤: ${token}`}
+      >
+        {token}
+      </button>
+    );
+  }
+
+  return (
+    <span key={key} className={className}>
+      {token}
+    </span>
+  );
+}
+
+function renderHighlightedLine(line: string, lineIndex: number, options: HighlightRenderOptions): React.ReactNode {
+  const parts = line.split(TOKEN_SPLIT_REGEX);
+
+  return parts.map((part, tokenIndex) => {
+    if (!part) {
+      return null;
+    }
+
+    const key = `l${lineIndex}-t${tokenIndex}`;
+    if (TIMESTAMP_TOKEN_REGEX.test(part)) {
+      return renderHighlightedToken(
+        part,
+        'timestamp',
+        options.mode === 'enhanced' ? 'text-cyan-900 font-bold bg-cyan-100/80' : 'text-cyan-700 font-semibold',
+        key,
+        options
+      );
+    }
+
+    if (LEVEL_TOKEN_REGEX.test(part)) {
+      const levelClass = options.mode === 'enhanced'
+        ? `${getLevelTokenClass(part)} bg-slate-200/70`
+        : getLevelTokenClass(part);
+      return renderHighlightedToken(part, 'level', levelClass, key, options);
+    }
+
+    if (CLASS_TOKEN_REGEX.test(part)) {
+      return renderHighlightedToken(
+        part,
+        'class',
+        options.mode === 'enhanced' ? 'text-emerald-800 font-semibold bg-emerald-100/70' : 'text-emerald-700',
+        key,
+        options
+      );
+    }
+
+    if (SQL_KEYWORDS.has(part.toUpperCase())) {
+      return renderHighlightedToken(
+        part,
+        'sql',
+        options.mode === 'enhanced' ? 'text-violet-900 font-bold bg-violet-100/80' : 'text-violet-700 font-semibold',
+        key,
+        options
+      );
+    }
+
+    return <React.Fragment key={key}>{part}</React.Fragment>;
+  });
+}
+
+function renderHighlightedLogMessage(message: string, options: HighlightRenderOptions): React.ReactNode {
+  const lines = String(message || '').split('\n');
+
+  return lines.map((line, lineIndex) => (
+    <React.Fragment key={`line-${lineIndex}`}>
+      {renderHighlightedLine(line, lineIndex, options)}
+      {lineIndex < lines.length - 1 ? '\n' : ''}
+    </React.Fragment>
+  ));
+}
+
+// 检查日志是否匹配选中的标签
+function matchesSelectedLabels(event: any, selectedLabels: Record<string, string[]>): boolean {
+  if (Object.keys(selectedLabels).length === 0) return true;
+  
+  const labels = extractPodLabels(event);
+  return Object.entries(selectedLabels).every(([key, values]) => {
+    if (values.length === 0) return true;
+    return values.includes(labels[key]);
+  });
+}
+
+const LogsExplorer: React.FC = () => {
+  const tableRef = useRef<HTMLDivElement>(null);
+  const location = useLocation();
+  const navigation = useNavigation();
+
+  // ========== 状态管理 ==========
+  
+  // 实时模式状态
+  const [realtimeMode, setRealtimeMode] = useState(false);
+  
+  // 搜索和筛选状态
+  const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery.trim().toLowerCase());
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [selectedLevels, setSelectedLevels] = useState<string[]>([]);
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  const [traceIdFilter, setTraceIdFilter] = useState('');
+  const [podNameFilter, setPodNameFilter] = useState('');
+  const [selectedHosts, setSelectedHosts] = useState<string[]>([]);
+  const [selectedLabels, setSelectedLabels] = useState<Record<string, string[]>>({});
+  
+  // UI 状态
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [showFilterPanel, setShowFilterPanel] = useState(true);
+  const [filterPanelCollapsed, setFilterPanelCollapsed] = useState(false);
+  const [filterPanelWidth, setFilterPanelWidth] = useState(260);
+  const [columnWidths, setColumnWidths] = useState<ColumnWidths>(DEFAULT_COLUMN_WIDTHS);
+  const [isResizing, setIsResizing] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  
+  // 侧边栏状态
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(450);
+  const [sidebarTab, setSidebarTab] = useState<'context' | 'detail' | 'json' | 'ai'>('context');
+  const [contextBeforeCount, setContextBeforeCount] = useState(5);
+  const [contextAfterCount, setContextAfterCount] = useState(5);
+
+  // AI 分析状态
+  const aiAnalysis = useAnalyzeLog();
+  const [aiMode, setAiMode] = useState<'log' | 'trace'>('log');
+  const [aiUseLLM, setAiUseLLM] = useState(true);
+  const [savingAiCase, setSavingAiCase] = useState(false);
+  const [aiCaseNotice, setAiCaseNotice] = useState<string | null>(null);
+  
+  // 详情面板状态
+  const [wordWrap, setWordWrap] = useState(true);
+  const [highlightMode, setHighlightMode] = useState<HighlightMode>('normal');
+  const [topologyJumpContext, setTopologyJumpContext] = useState<TopologyJumpContext | null>(null);
+
+  // 时间筛选状态
+  const [startTime, setStartTime] = useState<string>('');
+  const [endTime, setEndTime] = useState<string>('');
+  const [showTimeFilter, setShowTimeFilter] = useState(false);
+  
+  // 筛选框折叠状态
+  const [collapsedFilters, setCollapsedFilters] = useState<Record<string, boolean>>({
+    levels: false,
+    services: true,
+    hosts: true,
+    labels: true,
+  });
+
+  // 可用选项
+  const [availableServices, setAvailableServices] = useState<string[]>([]);
+  const [serviceCountMap, setServiceCountMap] = useState<Record<string, number>>({});
+  const [levelCountMap, setLevelCountMap] = useState<Record<string, number>>({});
+  const [availableHosts, setAvailableHosts] = useState<string[]>([]);
+  const [availableLabels, setAvailableLabels] = useState<Record<string, string[]>>({});
+
+  // 健康检查过滤与导出
+  const [excludeHealthCheck, setExcludeHealthCheck] = useState(true);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [pagedEvents, setPagedEvents] = useState<any[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [anchorTime, setAnchorTime] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadedPageCount, setLoadedPageCount] = useState(0);
+  const loadingMoreRef = useRef(false);
+
+  const applyTimeRange = useCallback((nextStart: string, nextEnd: string) => {
+    const normalized = normalizeTimeRange(nextStart, nextEnd);
+    setStartTime(normalized.start);
+    setEndTime(normalized.end);
+  }, []);
+
+  // 根据 URL 参数初始化筛选器，支持日志/拓扑/AI 页面直接跳转定位
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const service = params.get('service');
+    const level = params.get('level');
+    const search = params.get('search');
+    const traceId = params.get('trace_id');
+    const pod = params.get('pod');
+    const logId = params.get('id');
+    const sourceService = params.get('source_service') || '';
+    const targetService = params.get('target_service') || '';
+    const timeWindow = params.get('time_window') || '';
+
+    const normalizedLevel = (level || '').toUpperCase();
+    const appliedService = service || sourceService;
+    const appliedSearch = search || (targetService ? targetService : '');
+
+    setSelectedServices(appliedService ? [appliedService] : []);
+    setSelectedLevels(LOG_LEVELS.includes(normalizedLevel) ? [normalizedLevel] : []);
+    setSearchQuery(appliedSearch);
+    setTraceIdFilter(traceId || '');
+    setPodNameFilter(pod || '');
+
+    if (sourceService || targetService || timeWindow) {
+      setTopologyJumpContext({
+        sourceService: sourceService || '-',
+        targetService: targetService || '-',
+        timeWindow: timeWindow || '-',
+      });
+    } else {
+      setTopologyJumpContext(null);
+    }
+
+    if (timeWindow) {
+      const range = resolveTimeWindowRange(timeWindow);
+      if (range) {
+        setStartTime(range.start);
+        setEndTime(range.end);
+      }
+    }
+
+    if (logId) {
+      setExpandedLogId(logId);
+      setShowSidebar(true);
+      setSidebarTab('detail');
+    } else {
+      setExpandedLogId(null);
+    }
+  }, [location.search]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // ========== 数据获取 ==========
+  
+  const apiParams = useMemo(() => {
+    const params: any = { limit: PAGE_SIZE };
+    if (selectedLevels.length === 1) params.level = selectedLevels[0];
+    if (selectedLevels.length > 1) params.levels = selectedLevels.join(',');
+    if (selectedServices.length === 1) params.service_name = selectedServices[0];
+    if (selectedServices.length > 1) params.service_names = selectedServices.join(',');
+    if (traceIdFilter) params.trace_id = traceIdFilter;
+    if (podNameFilter) params.pod_name = podNameFilter;
+    if (debouncedSearchQuery) params.search = debouncedSearchQuery;
+    if (startTime) params.start_time = startTime;
+    if (endTime) params.end_time = endTime;
+    if (excludeHealthCheck) params.exclude_health_check = true;
+    if (topologyJumpContext) {
+      params.source_service = topologyJumpContext.sourceService;
+      params.target_service = topologyJumpContext.targetService;
+      params.time_window = topologyJumpContext.timeWindow;
+    } else if (!startTime && !endTime) {
+      // 无显式时间范围时默认限制到最近 24 小时，降低慢查询/超时概率。
+      params.time_window = DEFAULT_LOGS_TIME_WINDOW;
+    }
+    return params;
+  }, [selectedLevels, selectedServices, traceIdFilter, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, topologyJumpContext]);
+
+  const { data, loading, error, refetch } = useEvents(apiParams);
+  const facetParams = useMemo(() => {
+    const params: any = {};
+    if (selectedLevels.length === 1) params.level = selectedLevels[0];
+    if (selectedLevels.length > 1) params.levels = selectedLevels.join(',');
+    if (selectedServices.length === 1) params.service_name = selectedServices[0];
+    if (selectedServices.length > 1) params.service_names = selectedServices.join(',');
+    if (traceIdFilter) params.trace_id = traceIdFilter;
+    if (podNameFilter) params.pod_name = podNameFilter;
+    if (debouncedSearchQuery) params.search = debouncedSearchQuery;
+    if (startTime) params.start_time = startTime;
+    if (endTime) params.end_time = endTime;
+    if (excludeHealthCheck) params.exclude_health_check = true;
+    if (topologyJumpContext) {
+      params.source_service = topologyJumpContext.sourceService;
+      params.target_service = topologyJumpContext.targetService;
+      params.time_window = topologyJumpContext.timeWindow;
+    } else if (!startTime && !endTime) {
+      params.time_window = DEFAULT_LOGS_TIME_WINDOW;
+    }
+    params.limit_services = 300;
+    params.limit_levels = 20;
+    return params;
+  }, [selectedLevels, selectedServices, traceIdFilter, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, topologyJumpContext]);
+  const { data: facetsData } = useLogFacets(facetParams);
+
+  useEffect(() => {
+    if (!data) {
+      return;
+    }
+    setPagedEvents(data.events || []);
+    setNextCursor(data.next_cursor || null);
+    setAnchorTime(data.anchor_time || null);
+    setLoadedPageCount((data.events || []).length > 0 ? 1 : 0);
+  }, [data]);
+
+  // 实时日志流
+  const realtimeFilters = useMemo(() => ({
+    service_name: selectedServices.length === 1 ? selectedServices[0] : undefined,
+    level: selectedLevels.length === 1 ? selectedLevels[0] : undefined,
+    exclude_health_check: excludeHealthCheck,
+  }), [selectedServices, selectedLevels, excludeHealthCheck]);
+
+  const {
+    logs: realtimeLogs,
+    isConnected: realtimeConnected,
+    clearLogs: clearRealtimeLogs,
+  } = useRealtimeLogs({
+    enabled: realtimeMode,
+    maxLogs: 500,
+    filters: realtimeFilters,
+  });
+
+  // 合并实时日志和静态日志
+  const allEvents = useMemo(() => {
+    const staticEvents = pagedEvents;
+    if (!realtimeMode || realtimeLogs.length === 0) {
+      return staticEvents;
+    }
+
+    const merged = new Map<string, any>();
+    [...realtimeLogs, ...staticEvents].forEach((event: any) => {
+      const key = String(event.id || `${event.timestamp}-${event.service_name}-${event.level}-${event.message}`);
+      if (!merged.has(key)) {
+        merged.set(key, event);
+      }
+    });
+
+    return Array.from(merged.values()).sort(compareLogEventsDesc);
+  }, [realtimeMode, realtimeLogs, pagedEvents]);
+
+  // 获取当前选中日志的上下文
+  const currentSelectedLog = useMemo(() => {
+    if (!expandedLogId || !allEvents.length) return null;
+    return allEvents.find((e: any) => e.id === expandedLogId);
+  }, [expandedLogId, allEvents]);
+  const selectedTraceId = useMemo(() => extractTraceIdFromLog(currentSelectedLog), [currentSelectedLog]);
+
+  useEffect(() => {
+    if (aiMode === 'trace' && !selectedTraceId) {
+      setAiMode('log');
+    }
+  }, [aiMode, selectedTraceId]);
+
+  useEffect(() => {
+    setAiCaseNotice(null);
+  }, [expandedLogId, aiMode, aiAnalysis.data]);
+
+  const logContextParams = useMemo(() => {
+    if (!currentSelectedLog) return null;
+    const resolvedPodName = String(currentSelectedLog.pod_name || '').trim();
+    const resolvedNamespace = String(currentSelectedLog.namespace || '').trim();
+    // 优先使用 log_id 精确锚定；pod_name/timestamp 作为兜底模式。
+    return {
+      log_id: String(currentSelectedLog.id || '').trim() || undefined,
+      pod_name: resolvedPodName && resolvedPodName.toLowerCase() !== 'unknown' ? resolvedPodName : undefined,
+      namespace: resolvedNamespace && resolvedNamespace.toLowerCase() !== 'unknown' ? resolvedNamespace : undefined,
+      timestamp: currentSelectedLog.timestamp,
+      before_count: contextBeforeCount,
+      after_count: contextAfterCount,
+    };
+  }, [currentSelectedLog, contextBeforeCount, contextAfterCount]);
+
+  const { data: logContextData, loading: logContextLoading } = useLogContext(logContextParams);
+
+  // 点击外部关闭时间筛选器
+  const timeFilterRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (timeFilterRef.current && !timeFilterRef.current.contains(event.target as Node)) {
+        setShowTimeFilter(false);
+      }
+    };
+
+    if (showTimeFilter) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showTimeFilter]);
+
+  // ========== 数据提取与处理 ==========
+  
+  useEffect(() => {
+    if (facetsData?.services && facetsData.services.length > 0) {
+      setAvailableServices(facetsData.services.map((item: any) => item.value));
+      const nextServiceCounts: Record<string, number> = {};
+      facetsData.services.forEach((item: any) => {
+        const key = String(item?.value || '').trim();
+        if (!key) {
+          return;
+        }
+        nextServiceCounts[key] = Number(item?.count || 0);
+      });
+      setServiceCountMap(nextServiceCounts);
+    }
+
+    if (facetsData?.levels && facetsData.levels.length > 0) {
+      const nextLevelCounts: Record<string, number> = {};
+      facetsData.levels.forEach((item: any) => {
+        const key = String(item?.value || '').trim().toUpperCase();
+        if (!key) {
+          return;
+        }
+        nextLevelCounts[key] = Number(item?.count || 0);
+      });
+      setLevelCountMap(nextLevelCounts);
+    } else {
+      setLevelCountMap({});
+    }
+  }, [facetsData]);
+
+  useEffect(() => {
+    if (pagedEvents.length > 0) {
+      const services = new Set<string>();
+      const hosts = new Set<string>();
+      const labelsMap: Record<string, Set<string>> = {};
+
+      pagedEvents.forEach((event: any) => {
+        services.add(event.service_name);
+        hosts.add(extractHost(event));
+        
+        const labels = extractPodLabels(event);
+        Object.entries(labels).forEach(([key, value]) => {
+          if (!labelsMap[key]) labelsMap[key] = new Set();
+          if (typeof value === 'string') {
+            labelsMap[key].add(value);
+          }
+        });
+      });
+
+      if (!facetsData?.services || facetsData.services.length === 0) {
+        setAvailableServices(Array.from(services).sort());
+        setServiceCountMap({});
+      }
+      setAvailableHosts(Array.from(hosts).sort());
+      
+      const labels: Record<string, string[]> = {};
+      Object.entries(labelsMap).forEach(([key, set]) => {
+        labels[key] = Array.from(set).sort();
+      });
+      setAvailableLabels(labels);
+    } else {
+      if (!facetsData?.services || facetsData.services.length === 0) {
+        setAvailableServices([]);
+        setServiceCountMap({});
+      }
+      setAvailableHosts([]);
+      setAvailableLabels({});
+    }
+  }, [pagedEvents, facetsData]);
+
+  const applyClientFilters = useCallback((events: any[]) => {
+    let filtered = events;
+
+    if (deferredSearchQuery) {
+      filtered = filtered.filter((event: any) =>
+        event.message?.toLowerCase().includes(deferredSearchQuery) ||
+        event.service_name?.toLowerCase().includes(deferredSearchQuery) ||
+        event.pod_name?.toLowerCase().includes(deferredSearchQuery)
+      );
+    }
+
+    if (selectedLevels.length > 0) {
+      filtered = filtered.filter((event: any) => selectedLevels.includes(event.level));
+    }
+
+    if (selectedServices.length > 0) {
+      filtered = filtered.filter((event: any) => selectedServices.includes(event.service_name));
+    }
+
+    if (selectedHosts.length > 0) {
+      filtered = filtered.filter((event: any) => selectedHosts.includes(extractHost(event)));
+    }
+
+    if (Object.keys(selectedLabels).length > 0) {
+      filtered = filtered.filter((event: any) => matchesSelectedLabels(event, selectedLabels));
+    }
+
+    return filtered;
+  }, [deferredSearchQuery, selectedLevels, selectedServices, selectedHosts, selectedLabels]);
+
+  // 过滤日志
+  const filteredEvents = useMemo(() => {
+    if (!allEvents.length) {
+      return [];
+    }
+
+    return applyClientFilters(allEvents);
+  }, [allEvents, applyClientFilters]);
+
+  // ========== 事件处理 ==========
+  
+  const toggleLevel = (level: string) => {
+    setSelectedLevels(prev =>
+      prev.includes(level) ? prev.filter(l => l !== level) : [...prev, level]
+    );
+  };
+
+  const toggleService = (service: string) => {
+    setSelectedServices(prev =>
+      prev.includes(service) ? prev.filter(s => s !== service) : [...prev, service]
+    );
+  };
+
+  const toggleHost = (host: string) => {
+    setSelectedHosts(prev =>
+      prev.includes(host) ? prev.filter(h => h !== host) : [...prev, host]
+    );
+  };
+
+  const toggleLabel = (key: string, value: string) => {
+    setSelectedLabels(prev => {
+      const current = prev[key] || [];
+      const updated = current.includes(value)
+        ? current.filter(v => v !== value)
+        : [...current, value];
+      
+      if (updated.length === 0) {
+        const { [key]: _, ...rest } = prev;
+        return rest;
+      }
+      
+      return { ...prev, [key]: updated };
+    });
+  };
+
+  const isLabelSelected = (key: string, value: string): boolean => {
+    return selectedLabels[key]?.includes(value) || false;
+  };
+
+  const toggleFilterCollapse = (filterKey: string) => {
+    setCollapsedFilters(prev => ({
+      ...prev,
+      [filterKey]: !prev[filterKey]
+    }));
+  };
+
+  const selectLog = (logId: string) => {
+    setExpandedLogId(logId);
+    setShowSidebar(true);
+    setSidebarTab('context');
+  };
+
+  const closeSidebar = () => {
+    setShowSidebar(false);
+    setExpandedLogId(null);
+  };
+
+  const clearAllFilters = () => {
+    setSearchQuery('');
+    setSelectedLevels([]);
+    setSelectedServices([]);
+    setTraceIdFilter('');
+    setPodNameFilter('');
+    setSelectedHosts([]);
+    setSelectedLabels({});
+    setStartTime('');
+    setEndTime('');
+  };
+
+  const clearLabelFilter = (key: string, value?: string) => {
+    if (value) {
+      setSelectedLabels(prev => {
+        const current = prev[key] || [];
+        const updated = current.filter(v => v !== value);
+        if (updated.length === 0) {
+          const { [key]: _, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [key]: updated };
+      });
+    } else {
+      setSelectedLabels(prev => {
+        const { [key]: _, ...rest } = prev;
+        return rest;
+      });
+    }
+  };
+
+  const hasActiveFilters = selectedLevels.length > 0 || selectedServices.length > 0 ||
+                          selectedHosts.length > 0 || Object.keys(selectedLabels).length > 0 ||
+                          searchQuery.length > 0 || traceIdFilter.length > 0 ||
+                          podNameFilter.length > 0 || startTime || endTime;
+  const activeFilterCount = selectedLevels.length +
+    selectedServices.length +
+    selectedHosts.length +
+    Object.values(selectedLabels).reduce((sum, values) => sum + values.length, 0) +
+    (searchQuery.length > 0 ? 1 : 0) +
+    (traceIdFilter.length > 0 ? 1 : 0) +
+    (podNameFilter.length > 0 ? 1 : 0) +
+    (startTime || endTime ? 1 : 0);
+  const hasMorePages = !realtimeMode && Boolean(nextCursor);
+  const columnTemplate = `${columnWidths.time}px ${columnWidths.service}px ${columnWidths.pod}px ${columnWidths.level}px minmax(320px, 1fr) ${columnWidths.action}px`;
+
+  const loadMoreLogs = useCallback(async () => {
+    if (loadingMoreRef.current || !nextCursor) {
+      return;
+    }
+
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const result = await api.getEvents({
+        ...apiParams,
+        cursor: nextCursor,
+        anchor_time: anchorTime || undefined,
+      });
+
+      setPagedEvents((prev) => {
+        const merged = new Map<string, any>();
+        [...prev, ...(result.events || [])].forEach((event: any) => {
+          const key = String(event.id || `${event.timestamp}-${event.service_name}-${event.level}-${event.message}`);
+          if (!merged.has(key)) {
+            merged.set(key, event);
+          }
+        });
+        return Array.from(merged.values()).sort(compareLogEventsDesc);
+      });
+      setNextCursor(result.next_cursor || null);
+      if (result.anchor_time) {
+        setAnchorTime(result.anchor_time);
+      }
+      if ((result.events || []).length > 0) {
+        setLoadedPageCount((prev) => prev + 1);
+      }
+    } catch (err) {
+      console.error('Load more logs failed:', err);
+      alert('加载更多失败，请稍后重试');
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [nextCursor, apiParams, anchorTime]);
+
+  const exportLogs = useCallback(async (format: 'csv' | 'json' = 'csv') => {
+    if (exporting) {
+      return;
+    }
+
+    setShowExportMenu(false);
+    setExporting(true);
+
+    try {
+      const exportParams: LogsQueryParams = {
+        ...apiParams,
+        limit: 10000,
+      };
+      const serverResult = await api.getEvents(exportParams);
+      let exportData = applyClientFilters(serverResult.events || []);
+
+      // 实时模式下优先导出当前视图（含前端接收但未落库的新日志）。
+      if (realtimeMode && realtimeLogs.length > 0) {
+        exportData = applyClientFilters(allEvents as any[]);
+      }
+
+      if (exportData.length === 0) {
+        alert('没有可导出的日志');
+        return;
+      }
+
+      const filename = generateExportFilename('logs', format);
+      if (format === 'csv') {
+        exportLogsToCSV(exportData, filename);
+      } else {
+        exportToJSON(exportData, filename);
+      }
+    } catch (err) {
+      console.error('Export logs failed:', err);
+      alert('导出失败，请稍后重试');
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting, apiParams, applyClientFilters, realtimeMode, realtimeLogs.length, allEvents]);
+
+  const openFilterPanel = useCallback(() => {
+    setShowFilterPanel(true);
+    setFilterPanelCollapsed(false);
+  }, []);
+
+  const copyToClipboard = useCallback(async (content: string, successText = '已复制到剪贴板') => {
+    const copied = await copyTextToClipboard(content);
+    if (copied) {
+      setCopyNotice(successText);
+      window.setTimeout(() => setCopyNotice(null), 1800);
+      return;
+    }
+    setCopyNotice('复制失败，请检查浏览器剪贴板权限');
+    window.setTimeout(() => setCopyNotice(null), 2400);
+  }, []);
+
+  const saveCurrentAICase = useCallback(async (log: any) => {
+    const suggestion = aiAnalysis.data;
+    if (!suggestion?.overview) {
+      setAiCaseNotice('请先完成一次 AI 分析，再保存到知识库');
+      return;
+    }
+
+    setSavingAiCase(true);
+    setAiCaseNotice(null);
+    try {
+      const traceId = extractTraceIdFromLog(log);
+      const llmModel = String((suggestion as any)?.model || '');
+      const llmMethod = String((suggestion as any)?.analysis_method || '');
+      await api.saveCase({
+        problem_type: suggestion.overview.problem || 'unknown',
+        severity: suggestion.overview.severity || 'medium',
+        summary: suggestion.overview.description || suggestion.overview.problem || 'AI 分析知识条目',
+        log_content: String(log?.message || ''),
+        service_name: String(log?.service_name || ''),
+        root_causes: (suggestion.rootCauses || []).map((item: any) => item.title).filter(Boolean),
+        solutions: suggestion.solutions || [],
+        context: {
+          ...(log?.attributes || {}),
+          trace_id: traceId || undefined,
+          ai_mode: aiMode,
+          ai_analysis_method: llmMethod || undefined,
+          ai_saved_from: 'logs-explorer',
+        },
+        llm_provider: llmMethod === 'llm' ? 'runtime' : '',
+        llm_model: llmModel,
+        llm_metadata: {
+          analysis_method: llmMethod || undefined,
+          latency_ms: (suggestion as any)?.latency_ms,
+          cached: (suggestion as any)?.cached,
+        },
+        source: 'logs-explorer',
+        tags: ['logs', aiMode],
+      });
+      setAiCaseNotice('已保存到知识库');
+    } catch (err: any) {
+      console.error('Save AI case failed:', err);
+      setAiCaseNotice(err?.message || '保存知识库条目失败');
+    } finally {
+      setSavingAiCase(false);
+    }
+  }, [aiAnalysis.data, aiMode]);
+
+  const applyQuickTokenFilter = useCallback((token: string, tokenType: HighlightTokenType) => {
+    const trimmed = token.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    if (tokenType === 'level') {
+      const normalized = trimmed.toUpperCase() === 'WARNING' ? 'WARN' : trimmed.toUpperCase();
+      if (LOG_LEVELS.includes(normalized)) {
+        setSelectedLevels([normalized]);
+      }
+      openFilterPanel();
+      return;
+    }
+
+    setSearchQuery(trimmed);
+    openFilterPanel();
+  }, [openFilterPanel]);
+
+  // 拖拽调整侧栏面板宽度
+  const handleResizeStart = useCallback((e: React.MouseEvent, isSidebar: boolean = false) => {
+    e.preventDefault();
+    setIsResizing(true);
+    const startX = e.clientX;
+    const startWidth = isSidebar ? sidebarWidth : filterPanelWidth;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - startX;
+      if (isSidebar) {
+        const newWidth = Math.max(350, Math.min(800, startWidth - delta));
+        setSidebarWidth(newWidth);
+      } else {
+        const newWidth = Math.max(200, Math.min(400, startWidth + delta));
+        setFilterPanelWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [filterPanelWidth, sidebarWidth]);
+
+  // 拖拽调整日志表格列宽（时间/服务/Pod/级别/操作）
+  const handleColumnResizeStart = useCallback((e: React.MouseEvent, column: ResizableColumn) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsResizing(true);
+    const startX = e.clientX;
+    const startWidth = columnWidths[column];
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const delta = event.clientX - startX;
+      const nextWidth = Math.max(
+        COLUMN_MIN_WIDTH[column],
+        Math.min(COLUMN_MAX_WIDTH[column], startWidth + delta),
+      );
+      setColumnWidths((prev) => ({
+        ...prev,
+        [column]: nextWidth,
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [columnWidths]);
+
+  // ========== 渲染辅助组件 ==========
+
+  const renderFilterGroup = (
+    key: string,
+    title: string,
+    icon: React.ReactNode,
+    selectedCount: number,
+    onClear: () => void,
+    children: React.ReactNode
+  ) => {
+    const isCollapsed = collapsedFilters[key];
+    
+    return (
+      <div className="border-b border-gray-100 last:border-0">
+        <button
+          onClick={() => toggleFilterCollapse(key)}
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400">{icon}</span>
+            <span className="text-sm font-semibold text-gray-800">{title}</span>
+            {selectedCount > 0 && (
+              <span className="bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium">
+                {selectedCount}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {selectedCount > 0 && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClear();
+                }}
+                className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+              >
+                清除
+              </button>
+            )}
+            {isCollapsed ? (
+              <ChevronRight className="w-4 h-4 text-gray-400" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-gray-400" />
+            )}
+          </div>
+        </button>
+        
+        {!isCollapsed && (
+          <div className="px-4 pb-4">
+            {children}
+          </div>
+        )}
+
+      </div>
+    );
+  };
+
+  // 渲染侧边栏内容
+  const renderSidebar = () => {
+    if (!currentSelectedLog) return null;
+    
+    const log = currentSelectedLog;
+    const labels = extractPodLabels(log);
+    const host = extractHost(log);
+    const container = extractContainer(log);
+    const namespace = extractNamespace(log);
+    const levelColors = LEVEL_COLORS[log.level] || LEVEL_COLORS.INFO;
+    const logMeta = extractLogMeta(log);
+
+    return (
+      <div 
+        className="bg-white border-l border-gray-200 flex flex-col shrink-0"
+        style={{ width: sidebarWidth }}
+      >
+        {/* 侧边栏头部 */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
+          <div className="flex items-center gap-3">
+            <span className={`w-2 h-2 rounded-full`} style={{ backgroundColor: levelColors.solid }} />
+            <h3 className="text-sm font-semibold text-gray-900">日志详情</h3>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setSidebarTab('context')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                sidebarTab === 'context' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              上下文
+            </button>
+            <button
+              onClick={() => setSidebarTab('detail')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                sidebarTab === 'detail' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              详情
+            </button>
+            <button
+              onClick={() => setSidebarTab('json')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                sidebarTab === 'json' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              JSON
+            </button>
+            <button
+              onClick={() => setSidebarTab('ai')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                sidebarTab === 'ai' ? 'bg-purple-100 text-purple-700' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 inline mr-1" />
+              AI
+            </button>
+            <button
+              onClick={closeSidebar}
+              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded ml-2"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* 侧边栏内容 */}
+        <div className="flex-1 overflow-y-auto">
+          {sidebarTab === 'context' && (
+            <div className="p-4 space-y-4">
+              {/* 上下文条数选择 */}
+              <div className="flex items-center gap-4 pb-4 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">前文</span>
+                  <select
+                    value={contextBeforeCount}
+                    onChange={(e) => setContextBeforeCount(Number(e.target.value))}
+                    className="text-xs border border-gray-300 rounded px-2 py-1"
+                  >
+                    <option value={3}>3</option>
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                  </select>
+                  <span className="text-xs text-gray-500">条</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">后文</span>
+                  <select
+                    value={contextAfterCount}
+                    onChange={(e) => setContextAfterCount(Number(e.target.value))}
+                    className="text-xs border border-gray-300 rounded px-2 py-1"
+                  >
+                    <option value={3}>3</option>
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                  </select>
+                  <span className="text-xs text-gray-500">条</span>
+                </div>
+                {logContextLoading && (
+                  <span className="text-xs text-blue-600">加载中...</span>
+                )}
+              </div>
+
+              {/* 上下文日志列表 - 优先 log_id 精确锚定，pod_name + timestamp 兜底 */}
+              <div className="space-y-1">
+                {/* 前文日志 */}
+                {logContextData?.before?.map((ctxLog: any, idx: number) => (
+                  <div 
+                    key={`before-${idx}`} 
+                    className="p-3 rounded-lg bg-gray-50 border border-gray-100 hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs text-gray-400 font-mono">{formatTime(ctxLog.timestamp)}</span>
+                      <span 
+                        className="w-2 h-2 rounded-full" 
+                        style={{ backgroundColor: LEVEL_COLORS[ctxLog.level]?.solid || '#9ca3af' }}
+                      />
+                      <span className="text-xs font-medium text-gray-600">{ctxLog.level}</span>
+                    </div>
+                    <div className="text-sm text-gray-700 font-mono whitespace-pre-wrap break-words leading-5">
+                      {ctxLog.message}
+                    </div>
+                  </div>
+                ))}
+                
+                {/* 当前日志 */}
+                <div 
+                  className="p-3 rounded-lg border-l-4 bg-blue-50/50"
+                  style={{ borderLeftColor: levelColors.solid }}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-semibold font-mono" style={{ color: levelColors.solid }}>
+                      {formatTime(log.timestamp)}
+                    </span>
+                    <span 
+                      className="w-2 h-2 rounded-full" 
+                      style={{ backgroundColor: levelColors.solid }}
+                    />
+                    <span className="text-xs font-bold" style={{ color: levelColors.solid }}>{log.level}</span>
+                    <span className="text-xs text-gray-500">当前</span>
+                    {logMeta.stream && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">
+                        {String(logMeta.stream).toUpperCase()}
+                      </span>
+                    )}
+                    {typeof logMeta.line_count === 'number' && logMeta.line_count > 1 && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                        {logMeta.line_count} lines
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-sm text-gray-900 font-mono whitespace-pre-wrap break-words leading-5">
+                    {log.message}
+                  </div>
+                </div>
+                
+                {/* 后文日志 */}
+                {logContextData?.after?.map((ctxLog: any, idx: number) => (
+                  <div 
+                    key={`after-${idx}`} 
+                    className="p-3 rounded-lg bg-gray-50 border border-gray-100 hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs text-gray-400 font-mono">{formatTime(ctxLog.timestamp)}</span>
+                      <span 
+                        className="w-2 h-2 rounded-full" 
+                        style={{ backgroundColor: LEVEL_COLORS[ctxLog.level]?.solid || '#9ca3af' }}
+                      />
+                      <span className="text-xs font-medium text-gray-600">{ctxLog.level}</span>
+                    </div>
+                    <div className="text-sm text-gray-700 font-mono whitespace-pre-wrap break-words leading-5">
+                      {ctxLog.message}
+                    </div>
+                  </div>
+                ))}
+                
+                {/* 空状态显示 */}
+                {!logContextLoading && !logContextData?.before?.length && !logContextData?.after?.length && (
+                  <div className="text-center text-sm text-gray-400 py-8">
+                    暂无上下文日志
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {sidebarTab === 'detail' && (
+            <div className="p-4 space-y-4">
+              {/* 基本信息 */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <div className="text-[11px] text-gray-400 uppercase mb-1">时间戳</div>
+                  <div className="text-xs font-mono text-gray-800 break-all">{log.timestamp}</div>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <div className="text-[11px] text-gray-400 uppercase mb-1">级别</div>
+                  <span 
+                    className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold rounded text-white"
+                    style={{ backgroundColor: levelColors.solid }}
+                  >
+                    {log.level}
+                  </span>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <div className="text-[11px] text-gray-400 uppercase mb-1">服务</div>
+                  <div className="text-sm text-blue-600 font-semibold">{log.service_name}</div>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <div className="text-[11px] text-gray-400 uppercase mb-1">Pod</div>
+                  <div className="text-xs font-mono text-gray-700">{log.pod_name}</div>
+                </div>
+              </div>
+
+              {/* 日志消息 */}
+              <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-gray-600 uppercase">日志消息</span>
+                    {logMeta.stream && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">
+                        {String(logMeta.stream).toUpperCase()}
+                      </span>
+                    )}
+                    {typeof logMeta.line_count === 'number' && logMeta.line_count > 1 && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                        {logMeta.line_count} lines
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setHighlightMode(prev => prev === 'normal' ? 'enhanced' : 'normal')}
+                      className={`text-xs px-2 py-1 rounded ${
+                        highlightMode === 'enhanced'
+                          ? 'bg-violet-100 text-violet-700'
+                          : 'text-gray-500 hover:bg-gray-100'
+                      }`}
+                    >
+                      高亮: {highlightMode === 'enhanced' ? '增强' : '普通'}
+                    </button>
+                    <button
+                      onClick={() => setWordWrap(!wordWrap)}
+                      className={`text-xs px-2 py-1 rounded ${wordWrap ? 'bg-blue-100 text-blue-600' : 'text-gray-500 hover:bg-gray-100'}`}
+                    >
+                      换行
+                    </button>
+                    <button
+                      onClick={() => {
+                        void copyToClipboard(log.message, '日志内容已复制');
+                      }}
+                      className="text-xs text-gray-500 hover:text-blue-600"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+                {highlightMode === 'enhanced' && (
+                  <div className="px-3 py-1.5 bg-violet-50 border-b border-violet-100 text-[11px] text-violet-700">
+                    增强高亮已启用，可点击时间戳 / 级别 / 类名 / SQL 关键字快速过滤
+                  </div>
+                )}
+                {logMeta.collector_time && (
+                  <div className="px-3 py-1.5 bg-slate-50 border-b border-slate-100 text-[11px] text-slate-500 font-mono">
+                    collector_time: {formatCollectorTime(logMeta.collector_time)}
+                  </div>
+                )}
+                <div className="p-3">
+                  <pre 
+                    className={`text-sm text-gray-800 font-mono bg-slate-50 p-3 rounded border border-slate-200 ${
+                      wordWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-auto'
+                    }`}
+                  >
+                    {renderHighlightedLogMessage(log.message, {
+                      mode: highlightMode,
+                      onTokenClick: highlightMode === 'enhanced' ? applyQuickTokenFilter : undefined,
+                    })}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Kubernetes 信息 */}
+              <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
+                  <span className="text-xs font-semibold text-gray-600 uppercase">Kubernetes 信息</span>
+                </div>
+                <div className="p-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <span className="text-[11px] text-gray-400 uppercase">节点</span>
+                    <div className="text-xs font-mono text-gray-700">{host}</div>
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-gray-400 uppercase">容器</span>
+                    <div className="text-xs font-mono text-gray-700">{container}</div>
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-gray-400 uppercase">命名空间</span>
+                    <div className="text-xs font-mono text-gray-700">{namespace}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Pod 标签 */}
+              {Object.keys(labels).length > 0 && (
+                <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                  <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-600 uppercase">Pod 标签</span>
+                    <span className="text-xs text-gray-400">点击筛选</span>
+                  </div>
+                  <div className="p-3">
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(labels).map(([key, value]) => {
+                        const colors = getTagColor(key);
+                        const isSelected = isLabelSelected(key, value as string);
+                        
+                        return (
+                          <button
+                            key={key}
+                            onClick={() => toggleLabel(key, value as string)}
+                            className={`inline-flex items-center px-2 py-1 text-xs rounded-md border transition-all ${
+                              isSelected 
+                                ? 'bg-blue-100 border-blue-300 text-blue-700 ring-1 ring-blue-300' 
+                                : `${colors.bg} ${colors.border} ${colors.text} hover:shadow-sm`
+                            }`}
+                          >
+                            <span className={`${colors.keyColor} font-medium`}>{key}</span>
+                            <span className="mx-1 text-gray-300">|</span>
+                            <span className="font-semibold">{String(value)}</span>
+                            {isSelected && <Check className="w-3 h-3 ml-1" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {sidebarTab === 'json' && (
+            <div className="p-4">
+              <div className="bg-slate-900 rounded-lg overflow-hidden">
+                <div className="flex items-center justify-between px-3 py-2 bg-slate-800 border-b border-slate-700">
+                  <span className="text-xs text-slate-400">JSON</span>
+                  <button
+                    onClick={() => {
+                      void copyToClipboard(JSON.stringify(log, null, 2), 'JSON 已复制');
+                    }}
+                    className="text-xs text-slate-400 hover:text-white"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <pre className="text-xs text-slate-100 p-3 overflow-auto max-h-[600px] font-mono">
+                  {JSON.stringify(log, null, 2)}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          {sidebarTab === 'ai' && (
+            <div className="h-full flex flex-col">
+              <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 space-y-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAiMode('log')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                      aiMode === 'log' ? 'bg-purple-100 text-purple-700' : 'bg-white text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    日志分析
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiMode('trace')}
+                    disabled={!selectedTraceId}
+                    className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                      aiMode === 'trace'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-white text-gray-600 hover:bg-gray-100'
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    title={selectedTraceId ? '使用 trace_id 执行追踪分析' : '当前日志无 trace_id'}
+                  >
+                    Trace 分析
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600">LLM 大模型</span>
+                    <button
+                      type="button"
+                      onClick={() => setAiUseLLM((prev) => !prev)}
+                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                        aiUseLLM ? 'bg-purple-600' : 'bg-gray-300'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                          aiUseLLM ? 'translate-x-5' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (aiMode === 'trace' && selectedTraceId) {
+                        navigation.goToAIAnalysis({
+                          traceId: selectedTraceId,
+                          serviceName: log.service_name,
+                          autoAnalyze: false,
+                        });
+                        return;
+                      }
+                      navigation.goToAIAnalysis({ logData: log as any, autoAnalyze: false });
+                    }}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    打开完整分析页
+                  </button>
+                </div>
+
+                {selectedTraceId ? (
+                  <div className="text-[11px] text-gray-500 font-mono break-all">trace_id: {selectedTraceId}</div>
+                ) : (
+                  <div className="text-[11px] text-amber-600">当前日志无 trace_id，仅支持日志分析</div>
+                )}
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+                <AISuggestionCard
+                  loading={aiAnalysis.loading}
+                  error={aiAnalysis.error?.message}
+                  analysisLabel={aiMode === 'trace' ? 'Trace' : '日志'}
+                  suggestion={aiAnalysis.data || undefined}
+                  onAnalyze={async () => {
+                    try {
+                      await aiAnalysis.analyze(log as any, {
+                        mode: aiMode,
+                        useLLM: aiUseLLM,
+                        traceId: selectedTraceId || undefined,
+                      });
+                    } catch (err) {
+                      console.error('AI analysis failed:', err);
+                    }
+                  }}
+                />
+                <div className="px-4 pb-4">
+                  <button
+                    type="button"
+                    onClick={() => saveCurrentAICase(log)}
+                    disabled={!aiAnalysis.data || savingAiCase}
+                    className="w-full px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {savingAiCase ? '保存中...' : '一键保存当前分析到知识库'}
+                  </button>
+                  {aiCaseNotice && (
+                    <div className="mt-2 text-xs text-gray-600">{aiCaseNotice}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ========== 主渲染 ==========
+  
+  if (loading && pagedEvents.length === 0) return <LoadingState message="加载日志数据..." />;
+  if (error) return <ErrorState message={error.message} onRetry={refetch} />;
+
+  return (
+    <div className="flex flex-col h-full bg-[#f8fafc] overflow-hidden">
+      {/* 顶部工具栏 */}
+      <div className="bg-white border-b border-gray-200 px-4 py-3 shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 shrink-0">
+            <h1 className="text-base font-semibold text-gray-900">日志浏览器</h1>
+            <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
+              {realtimeMode ? (
+                <>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span>
+                    实时 {filteredEvents.length.toLocaleString()} 条
+                  </span>
+                </>
+              ) : (
+                `筛选后 ${filteredEvents.length.toLocaleString()} / 已加载 ${allEvents.length.toLocaleString()}${hasMorePages ? '+' : ''}`
+              )}
+            </span>
+            {loading && (
+              <span className="text-[11px] text-blue-600">刷新中...</span>
+            )}
+          </div>
+
+          <div className="flex-1 max-w-xl">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索日志内容、服务名、Pod名..."
+                className="w-full pl-9 pr-9 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {/* 实时模式按钮 */}
+            <button
+              onClick={() => {
+                setRealtimeMode(!realtimeMode);
+                if (!realtimeMode) {
+                  clearRealtimeLogs();
+                }
+              }}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
+                realtimeMode 
+                  ? 'bg-green-100 text-green-700 ring-2 ring-green-300' 
+                  : 'hover:bg-gray-100 text-gray-600'
+              }`}
+              title={realtimeMode ? '暂停实时日志' : '开启实时日志'}
+            >
+              {realtimeMode ? (
+                <>
+                  <Pause className="w-4 h-4" />
+                  <span className="text-sm">暂停</span>
+                </>
+              ) : (
+                <>
+                  <Radio className="w-4 h-4" />
+                  <span className="text-sm">实时</span>
+                </>
+              )}
+              {realtimeMode && realtimeConnected && (
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+              )}
+            </button>
+
+            {/* 时间筛选器 */}
+            <div className="relative" ref={timeFilterRef}>
+              <button
+                onClick={() => setShowTimeFilter(!showTimeFilter)}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
+                  showTimeFilter || startTime || endTime ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-100 text-gray-600'
+                }`}
+              >
+                <Clock className="w-4 h-4" />
+                <span className="text-sm">时间</span>
+                {(startTime || endTime) && (
+                  <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                )}
+              </button>
+
+              {/* 时间筛选下拉面板 */}
+              {showTimeFilter && (
+                <div className="absolute top-full right-0 mt-2 w-80 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-medium text-gray-900">时间范围</h3>
+                      <button
+                        onClick={() => {
+                          setStartTime('');
+                          setEndTime('');
+                        }}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                      >
+                        清除
+                      </button>
+                    </div>
+
+                    {/* 快捷时间选项 */}
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        { label: '最近5分钟', value: '5m' },
+                        { label: '最近15分钟', value: '15m' },
+                        { label: '最近30分钟', value: '30m' },
+                        { label: '最近1小时', value: '1h' },
+                        { label: '最近3小时', value: '3h' },
+                        { label: '最近6小时', value: '6h' },
+                        { label: '最近12小时', value: '12h' },
+                        { label: '最近24小时', value: '24h' },
+                      ].map((preset) => (
+                        <button
+                          key={preset.value}
+                          onClick={() => {
+                            const end = new Date();
+                            const start = new Date();
+                            const value = parseInt(preset.value);
+                            if (preset.value.includes('h')) {
+                              start.setHours(start.getHours() - value);
+                            } else {
+                              start.setMinutes(start.getMinutes() - value);
+                            }
+                            applyTimeRange(start.toISOString(), end.toISOString());
+                          }}
+                          className="px-2 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition-colors"
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="border-t border-gray-200 pt-3">
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">开始时间</label>
+                          <input
+                            type="datetime-local"
+                            value={toLocalDatetimeInputValue(startTime)}
+                            onChange={(e) => {
+                              const nextStart = fromLocalDatetimeInputValue(e.target.value);
+                              applyTimeRange(nextStart, endTime);
+                            }}
+                            className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">结束时间</label>
+                          <input
+                            type="datetime-local"
+                            value={toLocalDatetimeInputValue(endTime)}
+                            onChange={(e) => {
+                              const nextEnd = fromLocalDatetimeInputValue(e.target.value);
+                              applyTimeRange(startTime, nextEnd);
+                            }}
+                            className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => setShowTimeFilter(false)}
+                      className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors"
+                    >
+                      应用
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setExcludeHealthCheck(!excludeHealthCheck)}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-2 transition-colors ${
+                  excludeHealthCheck ? 'bg-green-100 text-green-700' : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                <Activity className="w-4 h-4" />
+                <span className="text-sm">健康检查</span>
+              </button>
+              <Tooltip
+                title="健康检查过滤"
+                lines={[
+                  '开启后会过滤 /health、readiness、liveness 等健康探测日志。',
+                  '建议排障时开启，避免心跳日志稀释错误信号。',
+                  '若排查探活失败问题，请临时关闭该过滤。',
+                ]}
+                widthClass="w-[320px]"
+              />
+            </div>
+
+            <button
+              onClick={() => {
+                if (!showFilterPanel) {
+                  setShowFilterPanel(true);
+                  setFilterPanelCollapsed(false);
+                } else if (filterPanelCollapsed) {
+                  setFilterPanelCollapsed(false);
+                } else {
+                  setShowFilterPanel(false);
+                }
+              }}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
+                showFilterPanel ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-100 text-gray-600'
+              }`}
+              title={showFilterPanel ? (filterPanelCollapsed ? '展开筛选面板' : '隐藏筛选面板') : '显示筛选面板'}
+            >
+              <PanelLeft className="w-4 h-4" />
+              <span className="text-sm">{showFilterPanel ? (filterPanelCollapsed ? '展开筛选' : '筛选') : '筛选'}</span>
+              {activeFilterCount > 0 && (
+                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-white/80 px-1 text-[10px] font-semibold text-blue-700">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+            
+            <button
+              onClick={refetch}
+              className="p-2 hover:bg-gray-100 text-gray-600 rounded-lg transition-colors"
+              title="刷新"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+
+            {/* 导出按钮 */}
+            <div className="relative">
+              <button
+                onClick={() => setShowExportMenu(!showExportMenu)}
+                disabled={exporting}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg hover:bg-gray-100 text-gray-600 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                title="按当前筛选导出"
+              >
+                <Download className="w-4 h-4" />
+                <span className="text-sm">{exporting ? '导出中...' : '导出'}</span>
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+              
+              {showExportMenu && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 z-50 min-w-[140px]">
+                  <button
+                    onClick={() => {
+                      void exportLogs('csv');
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    导出 CSV（筛选）
+                  </button>
+                  <button
+                    onClick={() => {
+                      void exportLogs('json');
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  >
+                    <FileJson className="w-4 h-4" />
+                    导出 JSON（筛选）
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* 活跃筛选标签 */}
+        {hasActiveFilters && (
+          <div className="flex items-center gap-2 mt-3 flex-wrap">
+            {selectedLevels.map(level => (
+              <span key={level} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-blue-100 text-blue-700 rounded-md font-medium">
+                {level}
+                <button onClick={() => toggleLevel(level)} className="hover:text-blue-900">
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+            {selectedServices.map(service => (
+              <span key={service} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-green-100 text-green-700 rounded-md font-medium">
+                {service}
+                <button onClick={() => toggleService(service)} className="hover:text-green-900">
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+            {Object.entries(selectedLabels).map(([key, values]) =>
+              values.map(value => {
+                const colors = getTagColor(key);
+                return (
+                  <span
+                    key={`${key}:${value}`}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium border ${colors.bg} ${colors.border} ${colors.text}`}
+                  >
+                    <Tag className="w-3 h-3" />
+                    <span className={colors.keyColor}>{key}</span>
+                    <span className="text-gray-400">:</span>
+                    {value}
+                    <button
+                      onClick={() => clearLabelFilter(key, value)}
+                      className="hover:text-gray-900"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                );
+              })
+            )}
+            {(startTime || endTime) && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-purple-100 text-purple-700 rounded-md font-medium">
+                <Clock className="w-3 h-3" />
+                {startTime && endTime
+                  ? `${new Date(startTime).toLocaleString()} - ${new Date(endTime).toLocaleString()}`
+                  : startTime
+                  ? `从 ${new Date(startTime).toLocaleString()}`
+                  : `到 ${new Date(endTime!).toLocaleString()}`}
+                <button
+                  onClick={() => {
+                    setStartTime('');
+                    setEndTime('');
+                  }}
+                  className="hover:text-purple-900"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )}
+            <button
+              onClick={clearAllFilters}
+              className="text-xs text-red-600 hover:text-red-700 flex items-center gap-1 font-medium"
+            >
+              <FilterX className="w-3 h-3" />
+              清除全部
+            </button>
+          </div>
+        )}
+        {topologyJumpContext && (
+          <div className="mt-3 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs text-cyan-800">
+                来自拓扑链路跳转：<span className="font-semibold">{topologyJumpContext.sourceService}</span> →{' '}
+                <span className="font-semibold">{topologyJumpContext.targetService}</span>，窗口{' '}
+                <span className="font-semibold">{topologyJumpContext.timeWindow}</span>
+              </div>
+              <button
+                onClick={() => setTopologyJumpContext(null)}
+                className="text-cyan-700 hover:text-cyan-900"
+                title="隐藏拓扑上下文"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+        {copyNotice && (
+          <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            {copyNotice}
+          </div>
+        )}
+      </div>
+
+      {/* 主内容区 */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* 左侧筛选面板 */}
+        {showFilterPanel && (
+          <>
+            {filterPanelCollapsed ? (
+              <div className="w-12 bg-white border-r border-gray-200 shrink-0 flex flex-col items-center py-3 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setFilterPanelCollapsed(false)}
+                  className="p-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                  title="展开筛选面板"
+                >
+                  <ChevronsRight className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterPanelCollapsed(false);
+                    setShowTimeFilter(true);
+                  }}
+                  className="relative p-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                  title="快速打开时间筛选"
+                >
+                  <Clock className="w-4 h-4" />
+                  {(startTime || endTime) && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-blue-500" />}
+                </button>
+                <div className="text-[10px] text-gray-500 [writing-mode:vertical-rl] tracking-wide">
+                  筛选 {activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div
+                  className="bg-white border-r border-gray-200 overflow-y-auto shrink-0 flex flex-col"
+                  style={{ width: filterPanelWidth }}
+                >
+                  <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-gray-700">
+                      <PanelLeft className="w-3.5 h-3.5" />
+                      筛选条件
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setFilterPanelCollapsed(true)}
+                      className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                      title="收起筛选面板"
+                    >
+                      <ChevronsLeft className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 py-2">
+                    {/* 日志级别筛选 */}
+                    {renderFilterGroup(
+                      'levels',
+                      '日志级别',
+                      <LayoutGrid className="w-4 h-4" />,
+                      selectedLevels.length,
+                      () => setSelectedLevels([]),
+                      <div className="space-y-1">
+                        {LOG_LEVELS.map((level) => {
+                          const colors = LEVEL_COLORS[level];
+                          const isSelected = selectedLevels.includes(level);
+                          const levelCount = levelCountMap[level] || 0;
+                          return (
+                            <button
+                              key={level}
+                              onClick={() => toggleLevel(level)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all ${
+                                isSelected
+                                  ? `${colors.bg} ${colors.text} font-medium`
+                                  : 'hover:bg-gray-100 text-gray-600'
+                              }`}
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full"
+                                style={{ backgroundColor: colors.solid }}
+                              />
+                              <span>{level}</span>
+                              <span className="ml-auto inline-flex items-center gap-1.5">
+                                <span className="text-[10px] text-gray-500 font-mono">{levelCount.toLocaleString()}</span>
+                                {isSelected && <Check className="w-4 h-4" />}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* 服务筛选 */}
+                    {availableServices.length > 0 && renderFilterGroup(
+                      'services',
+                      '服务',
+                      <Server className="w-4 h-4" />,
+                      selectedServices.length,
+                      () => setSelectedServices([]),
+                      <div className="space-y-1 max-h-48 overflow-y-auto">
+                        {availableServices.map((service) => {
+                          const isSelected = selectedServices.includes(service);
+                          const serviceCount = serviceCountMap[service] || 0;
+                          return (
+                            <button
+                              key={service}
+                              onClick={() => toggleService(service)}
+                              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-all ${
+                                isSelected
+                                  ? 'bg-blue-50 text-blue-700 font-medium'
+                                  : 'hover:bg-gray-100 text-gray-600'
+                              }`}
+                            >
+                              <span className="truncate">{service}</span>
+                              <span className="ml-2 inline-flex items-center gap-1.5 shrink-0">
+                                <span className="text-[10px] text-gray-500 font-mono">{serviceCount.toLocaleString()}</span>
+                                {isSelected && <Check className="w-4 h-4" />}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* 主机筛选 */}
+                    {availableHosts.length > 0 && renderFilterGroup(
+                      'hosts',
+                      '主机',
+                      <MapPin className="w-4 h-4" />,
+                      selectedHosts.length,
+                      () => setSelectedHosts([]),
+                      <div className="space-y-1 max-h-48 overflow-y-auto">
+                        {availableHosts.map((host) => {
+                          const isSelected = selectedHosts.includes(host);
+                          return (
+                            <button
+                              key={host}
+                              onClick={() => toggleHost(host)}
+                              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-all ${
+                                isSelected
+                                  ? 'bg-blue-50 text-blue-700 font-medium'
+                                  : 'hover:bg-gray-100 text-gray-600'
+                              }`}
+                            >
+                              <span className="truncate font-mono text-xs">{host}</span>
+                              {isSelected && <Check className="w-4 h-4 shrink-0" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Label 筛选 */}
+                    {Object.entries(availableLabels).length > 0 && renderFilterGroup(
+                      'labels',
+                      '标签',
+                      <Tag className="w-4 h-4" />,
+                      Object.values(selectedLabels).flat().length,
+                      () => setSelectedLabels({}),
+                      <div className="space-y-3">
+                        {Object.entries(availableLabels).slice(0, 5).map(([key, values]) => (
+                          <div key={key}>
+                            <div className="text-xs text-gray-500 mb-1.5 font-medium">{key}</div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {values.slice(0, 8).map((value) => {
+                                const isSelected = isLabelSelected(key, value);
+                                return (
+                                  <button
+                                    key={value}
+                                    onClick={() => toggleLabel(key, value)}
+                                    className={`px-2 py-1 text-xs rounded-md transition-all ${
+                                      isSelected
+                                        ? 'bg-blue-100 text-blue-700 font-medium ring-1 ring-blue-300'
+                                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                  >
+                                    {value.length > 15 ? `${value.substring(0, 15)}...` : value}
+                                    {isSelected && <Check className="w-3 h-3 inline ml-1" />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  className="w-1 cursor-col-resize hover:bg-blue-400 transition-colors shrink-0"
+                  onMouseDown={(e) => handleResizeStart(e, false)}
+                />
+              </>
+            )}
+          </>
+        )}
+
+        {/* 中间日志列表 */}
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <div className="bg-gray-50 border-b border-gray-200 shrink-0 overflow-x-auto">
+            <div className="px-4 py-1.5 text-[11px] text-gray-500 border-b border-gray-200">
+              提示: 拖拽列标题右侧 <GripVertical className="inline h-3 w-3 -mt-0.5" /> 可手动调整列宽
+            </div>
+            <div className="grid gap-2 px-4 py-2.5 min-w-max" style={{ gridTemplateColumns: columnTemplate }}>
+              <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                时间
+                <button
+                  type="button"
+                  onMouseDown={(e) => handleColumnResizeStart(e, 'time')}
+                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                  title="拖拽调整时间列宽"
+                >
+                  |
+                </button>
+              </div>
+              <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                服务
+                <button
+                  type="button"
+                  onMouseDown={(e) => handleColumnResizeStart(e, 'service')}
+                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                  title="拖拽调整服务列宽"
+                >
+                  |
+                </button>
+              </div>
+              <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                Pod
+                <button
+                  type="button"
+                  onMouseDown={(e) => handleColumnResizeStart(e, 'pod')}
+                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                  title="拖拽调整 Pod 列宽"
+                >
+                  |
+                </button>
+              </div>
+              <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                级别
+                <button
+                  type="button"
+                  onMouseDown={(e) => handleColumnResizeStart(e, 'level')}
+                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                  title="拖拽调整级别列宽"
+                >
+                  |
+                </button>
+              </div>
+
+              <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider">消息</div>
+              <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center">
+                操作
+                <button
+                  type="button"
+                  onMouseDown={(e) => handleColumnResizeStart(e, 'action')}
+                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                  title="拖拽调整操作列宽"
+                >
+                  |
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 日志列表 */}
+          <div 
+            ref={tableRef}
+            className="flex-1 overflow-y-auto overflow-x-auto"
+          >
+            {filteredEvents.length > 0 ? (
+              <VirtualLogList
+                logs={filteredEvents as any}
+                height={600}
+                columnTemplate={columnTemplate}
+                selectedLogId={expandedLogId}
+                onSelectLog={selectLog}
+                onGoToTopology={(serviceName) => navigation.goToTopology({ serviceName })}
+                onGoToAIAnalysis={(log) => navigation.goToAIAnalysis({ logData: log, autoAnalyze: false })}
+                onGoToTraces={(traceId) => navigation.goToTraces({ traceId })}
+                onNearEnd={() => {
+                  if (!realtimeMode && hasMorePages && !loadingMore) {
+                    void loadMoreLogs();
+                  }
+                }}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full">
+                <EmptyState
+                  icon={<Search className="w-12 h-12 text-gray-300" />}
+                  title="没有找到匹配的日志"
+                  description="尝试调整搜索条件或过滤选项"
+                />
+              </div>
+            )}
+          </div>
+
+          {!realtimeMode && (
+            <div className="shrink-0 border-t border-gray-200 bg-white px-4 py-2.5 flex items-center justify-between">
+              <span className="text-xs text-gray-500">
+                已加载 {allEvents.length.toLocaleString()} 条（{loadedPageCount} 页）
+                {hasMorePages ? '，滚动到底会自动加载' : '，已到当前查询末尾'}
+                {anchorTime ? `，锚点 ${new Date(anchorTime).toLocaleString()}` : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => void loadMoreLogs()}
+                disabled={!hasMorePages || loadingMore}
+                className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loadingMore ? '加载中...' : hasMorePages ? '加载更多' : '无更多数据'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* 右侧侧边栏 */}
+        {showSidebar && (
+          <>
+            <div
+              className="w-1 cursor-col-resize hover:bg-blue-400 transition-colors shrink-0"
+              onMouseDown={(e) => handleResizeStart(e, true)}
+            />
+            {renderSidebar()}
+          </>
+        )}
+      </div>
+
+      {/* 调整大小时的遮罩 */}
+      {isResizing && (
+        <div className="fixed inset-0 z-50 cursor-col-resize" />
+      )}
+    </div>
+  );
+};
+
+export default LogsExplorer;

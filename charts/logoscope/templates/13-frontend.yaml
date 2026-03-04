@@ -1,0 +1,3 @@
+{{- if .Values.components.frontend.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/frontend.yaml") }}
+{{- end }}

@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semantic-engine-worker
+  namespace: islap
+  labels:
+    app: semantic-engine-worker
+spec:
+  replicas: 1  # ⭐ P0优化：增加副本数以提高消费能力
+  selector:
+    matchLabels:
+      app: semantic-engine-worker
+  template:
+    metadata:
+      labels:
+        app: semantic-engine-worker
+    spec:
+      containers:
+      - name: worker
+        image: localhost:5000/logoscope/semantic-engine:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "start.py", "worker"]
+        env:
+        - name: APP_NAME
+          value: "semantic-engine-worker"
+        - name: APP_VERSION
+          value: "1.0.0"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONFAULTHANDLER
+          value: "1"
+        - name: PYTHONPATH
+          value: "/app/shared_lib"
+        - name: TZ
+          value: "UTC"
+        # 数据库配置
+        - name: CLICKHOUSE_HOST
+          value: "clickhouse"  # 使用ClusterIP
+        - name: CLICKHOUSE_PORT
+          value: "9000"
+        - name: CLICKHOUSE_DATABASE
+          value: "logs"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          value: ""
+        - name: NEO4J_HOST
+          value: "neo4j"  # 使用ClusterIP
+        - name: NEO4J_PORT
+          value: "7687"
+        - name: NEO4J_USER
+          value: "neo4j"
+        - name: NEO4J_PASSWORD
+          value: "password"
+        - name: NEO4J_DATABASE
+          value: "neo4j"
+        # 队列配置
+        - name: QUEUE_TYPE
+          value: "redis"
+        # Redis配置
+        - name: REDIS_HOST
+          value: "redis"  # 使用Service名
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: REDIS_STREAM_LOGS
+          value: "logs.raw"
+        - name: REDIS_STREAM_METRICS
+          value: "metrics.raw"
+        - name: REDIS_STREAM_TRACES
+          value: "traces.raw"
+        # ⭐ P0优化：批量消费配置
+        - name: REDIS_BATCH_SIZE
+          value: "10000"  # ⭐ P0优化：每次批量读取10000条消息
+        - name: REDIS_BLOCK_MS
+          value: "50"   # 阻塞等待50ms
+        - name: DLQ_ENABLED
+          value: "true"
+        - name: DLQ_MAX_RETRIES
+          value: "3"
+        - name: REDIS_PENDING_RECOVERY_ENABLED
+          value: "true"
+        - name: REDIS_PENDING_IDLE_MS
+          value: "60000"
+        - name: REDIS_PENDING_BATCH_SIZE
+          value: "100"
+        - name: REDIS_PENDING_RECOVERY_INTERVAL_SEC
+          value: "30"
+        # ⭐ P0优化：ClickHouse 批量写入配置
+        - name: CH_BATCH_SIZE
+          value: "5000"  # 每次批量写入5000条
+        - name: CH_FLUSH_INTERVAL
+          value: "0.3"   # 每0.3秒刷新一次
+        # 日志配置
+        - name: LOG_LEVEL
+          value: "info"
+        - name: ENABLE_PSEUDO_TRACE_ID_FALLBACK
+          value: "false"
+        # OpenTelemetry 分布式追踪配置
+        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "semantic-engine-worker"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=semantic-engine-worker,deployment.environment=production"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        # Worker进程不需要HTTP健康检查
+        # 但可以添加命令检查
+        # livenessProbe:
+        #   exec:
+        #     command:
+        #     - /bin/sh
+        #     - -c
+        #     - "ps aux | grep python | grep worker"
+        #   initialDelaySeconds: 30
+        #   periodSeconds: 30
+      # 重启策略
+      restartPolicy: Always

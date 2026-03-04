@@ -1,0 +1,3 @@
+{{- if .Values.components.ingestService.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/ingest-service.yaml") }}
+{{- end }}

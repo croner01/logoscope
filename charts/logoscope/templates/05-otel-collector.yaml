@@ -1,0 +1,3 @@
+{{- if .Values.components.otelCollector.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/otel-collector.yaml") }}
+{{- end }}

@@ -1,0 +1,27 @@
+Tracker,Priority,Status,Subject,Description,Category,Target version,Start date,Due date,Estimated time,Tags
+Feature,High,New,[EPIC-M1] 拓扑与链路统一数据契约,"目标：统一新业务埋点与老业务无埋点的数据模型；基于现有 topology-service/graph/hybrid_topology.py 与 confidence_calculator.py 扩展；输出统一 Node/Edge 契约与质量字段",topology-tracing,TraceTopology-2026Q2,2026-03-02,2026-03-13,0,epic;m1;contract
+Feature,High,New,[EPIC-M2] 老业务无改动接入与推断链路,"目标：老业务不改代码也可入图；接入网关或访问日志与基础流量证据；形成 inferred edge 并可展示证据等级",topology-tracing,TraceTopology-2026Q2,2026-03-16,2026-03-27,0,epic;m2;legacy
+Feature,High,New,[EPIC-M3] 拓扑页面对标商用品质升级,"目标：在现有 frontend/src/pages/TopologyPage.tsx 基础上增强 Focus/Isolate/Depth；边质量 RED 展示；日志与追踪钻取",topology-tracing,TraceTopology-2026Q2,2026-03-30,2026-04-10,0,epic;m3;ui
+Feature,Normal,New,[EPIC-M4] 发布门禁与价值度量闭环,"目标：将 scripts/trace-e2e-smoke.sh 与质量指标纳入发布前门禁；建立 MTTR 和关联率等价值指标",topology-tracing,TraceTopology-2026Q2,2026-04-13,2026-04-24,0,epic;m4;value
+Feature,High,New,[M1-01] 定义统一 Node/Edge Schema v1,"交付：Node 主键 service.namespace+service.name+env；Edge 主键 src+dst+protocol+endpoint_pattern；字段包含 confidence evidence_type coverage quality_score；验收：设计评审通过并发布 schema 文档",topology-tracing,TraceTopology-2026Q2,2026-03-02,2026-03-03,8,m1;schema
+Feature,High,New,[M1-02] Query API 扩展拓扑返回字段,"交付：/api/v1/topology/hybrid 返回 evidence_type coverage quality_score p95 p99 timeout_rate；验收：接口契约测试通过且向后兼容",topology-tracing,TraceTopology-2026Q2,2026-03-03,2026-03-05,12,m1;query-service;api
+Feature,High,New,[M1-03] 统一质量评分算法 v1,"交付：在 confidence_calculator 上增加质量分计算；输入 error_rate p95 timeout retries pending dlq；验收：固定样本回放结果稳定且评分可解释",topology-tracing,TraceTopology-2026Q2,2026-03-04,2026-03-06,10,m1;topology-service;quality
+Feature,Normal,New,[M1-04] 建立 edge 聚合数据视图,"交付：按 1m 聚合 edge RED 指标；支持 traces 与 logs 双源；验收：窗口查询 P95<500ms 且结果可用于拓扑页面",topology-tracing,TraceTopology-2026Q2,2026-03-05,2026-03-10,14,m1;storage;clickhouse
+Feature,Normal,New,[M1-05] 前端类型与状态管理更新,"交付：frontend/src/utils/api.ts 与 hooks 类型扩展；验收：拓扑页面正常渲染新字段且 typecheck 通过",topology-tracing,TraceTopology-2026Q2,2026-03-09,2026-03-11,8,m1;frontend;type
+Feature,High,New,[M1-06] 契约与回归测试补齐,"交付：新增 API/构建器单测与回归用例；验收：核心路径覆盖并在 CI 稳定通过",topology-tracing,TraceTopology-2026Q2,2026-03-10,2026-03-13,12,m1;test
+Feature,High,New,[M2-01] 接入无埋点证据源管道,"交付：接入 ingress/access log 或 mesh 指标到统一证据输入；验收：至少 2 个老业务服务可产出 inferred edges",topology-tracing,TraceTopology-2026Q2,2026-03-16,2026-03-18,14,m2;legacy;ingest
+Feature,High,New,[M2-02] 推断关联器实现 request_id 与时间窗策略,"交付：实现 request_id 优先与时间窗回退策略；验收：离线样本准确率达到目标阈值并产出误判统计",topology-tracing,TraceTopology-2026Q2,2026-03-17,2026-03-20,16,m2;inference
+Feature,Normal,New,[M2-03] Trace-Lite 查询接口,"交付：新增 inferred 调用片段查询接口；返回证据链与置信度说明；验收：页面可钻取且与原 trace 区分展示",topology-tracing,TraceTopology-2026Q2,2026-03-19,2026-03-23,12,m2;api;trace-lite
+Feature,High,New,[M2-04] 异步边质量接入 pending 与 DLQ,"交付：把 traces.raw pending 与 traces.dlq 指标并入边质量；验收：故障注入后质量分和告警状态变化符合预期",topology-tracing,TraceTopology-2026Q2,2026-03-20,2026-03-25,10,m2;async;quality
+Feature,Normal,New,[M2-05] 数据质量看板与告警规则,"交付：新增 coverage inferred_ratio false_positive_rate 指标；验收：阈值告警可触发并可抑制",topology-tracing,TraceTopology-2026Q2,2026-03-24,2026-03-27,10,m2;ops;alert
+Feature,High,New,[M2-06] 老业务接入试点与验收,"交付：选 2 个老业务服务完成无改动接入；验收：拓扑图可见服务关系且可下钻日志",topology-tracing,TraceTopology-2026Q2,2026-03-24,2026-03-27,8,m2;pilot;legacy
+Feature,High,New,[M3-01] Focus Node 与 Depth Filter 交互,"交付：支持以服务为中心查看 1-3 跳；验收：大图场景可读性提升且操作响应<200ms",topology-tracing,TraceTopology-2026Q2,2026-03-30,2026-04-02,12,m3;frontend;focus
+Feature,High,New,[M3-02] Isolate 模式与证据图例,"交付：隔离选中服务及其边；增加 Observed 与 Inferred 图例；验收：用户可在单屏区分证据等级",topology-tracing,TraceTopology-2026Q2,2026-03-31,2026-04-03,10,m3;frontend;isolate
+Feature,Normal,New,[M3-03] 边 RED 面板与 Top 问题排序,"交付：边详情显示 rps error_rate p95 p99 timeout_rate；验收：支持按异常优先排序并一键钻取",topology-tracing,TraceTopology-2026Q2,2026-04-01,2026-04-07,14,m3;frontend;edge-quality
+Feature,Normal,New,[M3-04] 变更叠加与时间对齐,"交付：叠加部署版本与关键变更事件；验收：可对齐质量波动并支持时间窗口回放",topology-tracing,TraceTopology-2026Q2,2026-04-04,2026-04-08,10,m3;change;overlay
+Feature,High,New,[M3-05] 日志与追踪双向跳转增强,"交付：节点和边面板支持 Logs/Traces 一键跳转；验收：从拓扑到根因定位不超过 3 次点击",topology-tracing,TraceTopology-2026Q2,2026-04-07,2026-04-10,10,m3;navigation
+Feature,High,New,[M3-06] 页面性能与回归测试,"交付：图渲染与交互优化；验收：200 节点 400 边下交互流畅且回归测试通过",topology-tracing,TraceTopology-2026Q2,2026-04-08,2026-04-10,10,m3;perf;test
+Feature,High,New,[M4-01] 将 trace smoke 接入发布门禁,"交付：在发布流程执行 scripts/trace-e2e-smoke.sh；验收：失败阻断发布并留存报告",topology-tracing,TraceTopology-2026Q2,2026-04-13,2026-04-15,8,m4;release;gate
+Feature,Normal,New,[M4-02] 价值指标看板上线,"交付：MTTR MTTD trace-log 关联率 拓扑覆盖率 发布回归通过率；验收：支持周报导出",topology-tracing,TraceTopology-2026Q2,2026-04-14,2026-04-18,12,m4;value;kpi
+Feature,Normal,New,[M4-03] 运维手册与Runbook补齐,"交付：异常场景处置步骤与回滚方案；验收：值班同学可按文档完成演练",topology-tracing,TraceTopology-2026Q2,2026-04-17,2026-04-21,8,m4;runbook
+Feature,High,New,[M4-04] 灰度发布与复盘,"交付：在 2 个业务域灰度启用并复盘；验收：形成优化清单与下一季度路线图",topology-tracing,TraceTopology-2026Q2,2026-04-21,2026-04-24,10,m4;rollout;review

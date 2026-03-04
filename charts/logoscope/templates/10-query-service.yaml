@@ -1,0 +1,3 @@
+{{- if .Values.components.queryService.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/query-service.yaml") }}
+{{- end }}

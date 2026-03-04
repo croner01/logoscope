@@ -1,0 +1,46 @@
+namespace:
+  create: false
+
+components:
+  aiService:
+    enabled: true
+  clickhouse:
+    enabled: true
+  fluentBit:
+    enabled: true
+  frontend:
+    enabled: true
+  ingestService:
+    enabled: true
+  neo4j:
+    enabled: true
+  otelCollector:
+    enabled: true
+  otelGateway:
+    enabled: true
+  queryService:
+    enabled: true
+  redis:
+    enabled: true
+  semanticEngine:
+    enabled: true
+  semanticEngineWorker:
+    enabled: true
+  topologyService:
+    enabled: true
+  valueKpiCronjob:
+    enabled: true
+
+# 将 deploy/*.yaml 中硬编码镜像替换为以下目标镜像。
+# 如需升级，只改这里即可。
+imageReplacements:
+  localhost:5000/logoscope/ai-service:latest: localhost:5000/logoscope/ai-service:latest
+  localhost:5000/logoscope/clickhouse-server:25.6: localhost:5000/logoscope/clickhouse-server:25.6
+  localhost:5000/logoscope/fluent-bit:3.1.3: localhost:5000/logoscope/fluent-bit:3.1.3
+  localhost:5000/logoscope/frontend:latest: localhost:5000/logoscope/frontend:20260304-spanfix2
+  localhost:5000/logoscope/ingest-service:latest: localhost:5000/logoscope/ingest-service:latest
+  localhost:5000/logoscope/neo4j:4.4-community: localhost:5000/logoscope/neo4j:4.4-community
+  localhost:5000/logoscope/opentelemetry-collector:0.111.0: localhost:5000/logoscope/opentelemetry-collector:0.111.0
+  localhost:5000/logoscope/query-service:latest: localhost:5000/logoscope/query-service:20260304-spanfix3
+  localhost:5000/logoscope/semantic-engine:latest: localhost:5000/logoscope/semantic-engine:20260304-spanfix3
+  localhost:5000/logoscope/topology-service:latest: localhost:5000/logoscope/topology-service:latest

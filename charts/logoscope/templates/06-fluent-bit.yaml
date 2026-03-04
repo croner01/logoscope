@@ -1,0 +1,3 @@
+{{- if .Values.components.fluentBit.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/fluent-bit.yaml") }}
+{{- end }}

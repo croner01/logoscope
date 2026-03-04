@@ -1,0 +1,3 @@
+{{- if .Values.components.neo4j.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/neo4j.yaml") }}
+{{- end }}

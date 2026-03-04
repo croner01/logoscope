@@ -1,0 +1,3 @@
+{{- if .Values.components.valueKpiCronjob.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/value-kpi-cronjob.yaml") }}
+{{- end }}

@@ -1,0 +1,3 @@
+{{- if .Values.components.redis.enabled }}
+{{ include "logoscope.renderManifest" (dict "ctx" . "path" "files/manifests/redis.yaml") }}
+{{- end }}

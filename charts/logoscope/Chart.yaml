@@ -1,0 +1,7 @@
+apiVersion: v2
+name: logoscope
+description: Logoscope observability platform umbrella chart (all core services)
+type: application
+version: 0.1.0
+appVersion: "20260304-spanfix3"
+kubeVersion: ">=1.24.0-0"
