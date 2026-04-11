@@ -1141,6 +1141,8 @@ async def _emit_followup_runtime_event(
         if timed_out and exit_code_value == -9 and not next_suggestion:
             next_suggestion = "建议先缩小时间窗口或 limit，再提高 timeout 重试。"
         if reason_code in {"duplicate_skipped", "duplicate_skipped_attempt"}:
+            reused_evidence_ids = _as_list(safe_payload.get("reused_evidence_ids"))
+            has_reuse_source = bool(command_run_id) or any(_as_str(item).strip() for item in reused_evidence_ids)
             finished_key = "|".join(
                 [
                     tool_call_id,
@@ -1170,10 +1172,16 @@ async def _emit_followup_runtime_event(
                     "risk_level": str(safe_payload.get("risk_level") or "").strip(),
                     "message": str(safe_payload.get("message") or "").strip(),
                     "reason_code": reason_code,
-                    "evidence_reuse": bool(safe_payload.get("evidence_reuse")) or reason_code == "duplicate_skipped",
-                    "reused_evidence_ids": _as_list(safe_payload.get("reused_evidence_ids")),
+                    "evidence_reuse": (
+                        bool(safe_payload.get("evidence_reuse"))
+                        or (reason_code == "duplicate_skipped" and has_reuse_source)
+                    ),
+                    "reused_evidence_ids": reused_evidence_ids,
                     "evidence_slot_id": str(safe_payload.get("evidence_slot_id") or "").strip(),
-                    "evidence_outcome": str(safe_payload.get("evidence_outcome") or "reused").strip(),
+                    "evidence_outcome": str(
+                        safe_payload.get("evidence_outcome")
+                        or ("reused" if has_reuse_source else "missing")
+                    ).strip(),
                     "info_gain_score": _as_float(safe_payload.get("info_gain_score"), 0.0),
                 },
             )
@@ -1554,6 +1562,11 @@ async def _run_followup_runtime_task(
         for item in _as_list(summary_payload.get("executed_commands"))
         if _normalize_followup_command_line(item)
     ]
+    previous_action_observations = [
+        item
+        for item in _as_list(summary_payload.get("action_observations"))
+        if isinstance(item, dict)
+    ]
     runtime_service._update_run_summary(  # noqa: SLF001
         run,
         followup_runtime_worker="running",
@@ -1566,6 +1579,11 @@ async def _run_followup_runtime_task(
         followup_request.analysis_context = {
             **(followup_request.analysis_context or {}),
             "_runtime_executed_commands": previous_executed_commands,
+        }
+    if previous_action_observations:
+        followup_request.analysis_context = {
+            **(followup_request.analysis_context or {}),
+            "_runtime_prior_action_observations": previous_action_observations[-200:],
         }
     runtime_state: Dict[str, Any] = {
         "thought_index": 0,
@@ -5994,6 +6012,11 @@ async def _run_follow_up_analysis_core(
         for item in _as_list(analysis_context.get("_runtime_executed_commands"))
         if _normalize_followup_command_line(item)
     }
+    prior_action_observations = [
+        item
+        for item in _as_list(analysis_context.get("_runtime_prior_action_observations"))
+        if isinstance(item, dict)
+    ]
     react_exec_bundle = await _run_followup_auto_exec_react_loop(
         session_id=analysis_session_id,
         message_id=assistant_message_id,
@@ -6001,6 +6024,7 @@ async def _run_follow_up_analysis_core(
         analysis_context=analysis_context,
         allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
         executed_commands=executed_commands_set,
+        initial_action_observations=prior_action_observations,
         initial_evidence_gaps=evidence_gap_queue_for_execution,
         initial_summary=answer_summary_seed,
         emit_iteration_thoughts=bool(show_thought),
@@ -6118,6 +6142,7 @@ async def _run_follow_up_analysis_core(
                 react_loop=react_loop,
             ),
             react_loop=react_loop,
+            actions=followup_actions,
         )
     )
 

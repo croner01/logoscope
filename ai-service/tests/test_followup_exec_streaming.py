@@ -9,6 +9,7 @@ import pytest
 from ai.agent_runtime.exec_client import ExecServiceClientError
 from ai.followup_orchestration_helpers import (
     _build_non_executable_command_templates,
+    _build_structured_template_actions,
     _emit_followup_event,
     _run_followup_auto_exec_react_loop,
     _run_followup_readonly_auto_exec,
@@ -55,6 +56,58 @@ def test_non_executable_templates_use_anchor_window_when_available():
     assert any("--since-time=2026-04-11T12:58:33Z" in item for item in templates)
     assert any("toDateTime64('2026-04-11T12:58:33Z', 9, 'UTC')" in item for item in templates)
     assert any("toDateTime64('2026-04-11T13:08:33Z', 9, 'UTC')" in item for item in templates)
+
+
+def test_structured_template_actions_keep_stable_id_and_skip_existing_command():
+    existing_actions = [
+        {
+            "id": "tmpl-f5604f7c",
+            "source": "template_command",
+            "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+            "command_type": "query",
+            "executable": True,
+            "command_spec": {
+                "tool": "generic_exec",
+                "args": {
+                    "command_argv": [
+                        "kubectl",
+                        "-n",
+                        "islap",
+                        "logs",
+                        "-l",
+                        "app=query-service",
+                        "--since=15m",
+                        "--tail=200",
+                    ],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 30,
+                },
+            },
+        },
+        {
+            "id": "rf-1",
+            "source": "reflection",
+            "title": "检查 clickhouse 慢查询",
+            "purpose": "query_log",
+            "command_type": "unknown",
+            "executable": False,
+        },
+    ]
+    built_once = _build_structured_template_actions(
+        actions=existing_actions,
+        analysis_context={"namespace": "islap", "service_name": "query-service"},
+        max_items=2,
+    )
+    built_twice = _build_structured_template_actions(
+        actions=existing_actions,
+        analysis_context={"namespace": "islap", "service_name": "query-service"},
+        max_items=2,
+    )
+    assert len(built_once) == 1
+    assert built_once[0]["id"].startswith("tmpl-")
+    assert built_once[0]["id"] == built_twice[0]["id"]
+    assert "clickhouse-client" in str(built_once[0]["command"])
 
 
 def test_followup_readonly_auto_exec_streams_exec_runtime_events(monkeypatch):
@@ -815,6 +868,15 @@ def test_followup_readonly_auto_exec_skips_already_executed_command(monkeypatch)
             ],
             run_blocking=None,
             executed_commands=executed,
+            prior_observations=[
+                {
+                    "action_id": "act-prev-001",
+                    "command": "echo stream-ok",
+                    "status": "executed",
+                    "exit_code": 0,
+                    "command_run_id": "cmdrun-prev-001",
+                }
+            ],
             event_callback=None,
             logger=None,
         )
@@ -826,9 +888,12 @@ def test_followup_readonly_auto_exec_skips_already_executed_command(monkeypatch)
     assert observations[0]["status"] == "skipped"
     assert "同一 run 已执行过该命令" in str(observations[0]["message"])
     assert observations[0]["reason_code"] == "duplicate_skipped"
+    assert observations[0]["command_run_id"] == "cmdrun-prev-001"
+    assert observations[0]["reused_evidence_ids"] == ["cmdrun-prev-001"]
+    assert observations[0]["evidence_reuse"] is True
 
 
-def test_select_followup_react_iteration_actions_does_not_retry_duplicate_skipped():
+def test_select_followup_react_iteration_actions_does_not_retry_duplicate_skipped_with_valid_source():
     actions = [
         {
             "id": "act-skip-dup-001",
@@ -844,6 +909,14 @@ def test_select_followup_react_iteration_actions_does_not_retry_duplicate_skippe
         },
     ]
     observations = [
+        {
+            "action_id": "act-prev-dup-source",
+            "command": "echo dup",
+            "status": "executed",
+            "exit_code": 0,
+            "output_truncated": False,
+            "command_run_id": "cmdrun-dup-source-001",
+        },
         {
             "action_id": "act-skip-dup-001",
             "command": "echo dup",
@@ -866,6 +939,33 @@ def test_select_followup_react_iteration_actions_does_not_retry_duplicate_skippe
     selected_commands = [str((item or {}).get("command") or "") for item in selected]
     assert "echo dup" not in selected_commands
     assert "echo backend" in selected_commands
+
+
+def test_select_followup_react_iteration_actions_retries_duplicate_skipped_without_valid_source():
+    actions = [
+        {
+            "id": "act-skip-dup-001",
+            "command": "echo dup",
+            "command_type": "query",
+            "executable": True,
+        }
+    ]
+    observations = [
+        {
+            "action_id": "act-skip-dup-001",
+            "command": "echo dup",
+            "status": "skipped",
+            "reason_code": "duplicate_skipped",
+        }
+    ]
+
+    selected = _select_followup_react_iteration_actions(
+        actions=actions,
+        action_observations=observations,
+        retry_per_command=1,
+    )
+    assert len(selected) == 1
+    assert selected[0]["id"] == "act-skip-dup-001"
 
 
 def test_followup_react_loop_first_round_filters_non_executable_actions(monkeypatch):
