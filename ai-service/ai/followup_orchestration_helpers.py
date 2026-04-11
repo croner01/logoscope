@@ -8,6 +8,7 @@ import asyncio
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ai.agent_runtime.exec_client import (
@@ -66,6 +67,113 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _parse_optional_iso_datetime(value: Any) -> Optional[datetime]:
+    text = _as_str(value).strip()
+    if not text:
+        return None
+    candidate = text.replace(" ", "T")
+    if candidate.endswith("Z"):
+        candidate = f"{candidate[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_utc_iso_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_followup_evidence_window(
+    analysis_context: Optional[Dict[str, Any]],
+    *,
+    default_minutes: int = 15,
+) -> Dict[str, str]:
+    context_payload = analysis_context if isinstance(analysis_context, dict) else {}
+    explicit_start = _parse_optional_iso_datetime(context_payload.get("request_flow_window_start"))
+    explicit_end = _parse_optional_iso_datetime(context_payload.get("request_flow_window_end"))
+    if explicit_start and explicit_end and explicit_start <= explicit_end:
+        return {
+            "start_iso": _to_utc_iso_text(explicit_start),
+            "end_iso": _to_utc_iso_text(explicit_end),
+        }
+
+    anchor_candidates = [
+        context_payload.get("source_log_timestamp"),
+        context_payload.get("related_log_anchor_timestamp"),
+        context_payload.get("timestamp"),
+    ]
+    anchor_dt: Optional[datetime] = None
+    for candidate in anchor_candidates:
+        parsed = _parse_optional_iso_datetime(candidate)
+        if parsed is not None:
+            anchor_dt = parsed
+            break
+    if anchor_dt is None:
+        return {}
+
+    raw_minutes = int(_as_float(context_payload.get("request_flow_window_minutes"), default_minutes))
+    window_minutes = max(1, min(120, raw_minutes))
+    start_dt = anchor_dt - timedelta(minutes=window_minutes)
+    end_dt = anchor_dt + timedelta(minutes=window_minutes)
+    return {
+        "start_iso": _to_utc_iso_text(start_dt),
+        "end_iso": _to_utc_iso_text(end_dt),
+    }
+
+
+def _build_k8s_logs_evidence_command(
+    *,
+    namespace: str,
+    service_name: str,
+    window_start_iso: str = "",
+) -> str:
+    target_service = _as_str(service_name).strip() or "query-service"
+    if window_start_iso:
+        return f"kubectl -n {namespace} logs -l app={target_service} --since-time={window_start_iso} --tail=200"
+    return f"kubectl -n {namespace} logs -l app={target_service} --since=15m --tail=200"
+
+
+def _build_clickhouse_query_log_evidence_command(
+    *,
+    namespace: str,
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> str:
+    if window_start_iso and window_end_iso:
+        return (
+            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "\"SELECT event_time,query_id,exception_code,exception,query "
+            "FROM system.query_log "
+            f"WHERE event_time >= toDateTime64('{window_start_iso}', 9, 'UTC') "
+            f"AND event_time <= toDateTime64('{window_end_iso}', 9, 'UTC') "
+            "ORDER BY event_time DESC LIMIT 20\""
+        )
+    return (
+        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "\"SELECT event_time,query_id,exception_code,exception,query "
+        "FROM system.query_log "
+        "WHERE event_time >= now() - INTERVAL 15 MINUTE "
+        "ORDER BY event_time DESC LIMIT 20\""
+    )
+
+
+def _derive_template_expected_signal(command: str) -> str:
+    safe_command = _normalize_followup_command_line(command).strip().lower()
+    if "system.query_log" in safe_command:
+        return "命中故障时间窗内的 query_id、exception_code、exception 或慢查询样本。"
+    if "kubectl" in safe_command and " logs " in f" {safe_command} ":
+        return "命中故障时间窗内的 ERROR/WARN/Traceback/慢查询告警关键日志。"
+    if "top pod" in safe_command:
+        return "命中故障时间窗内的 CPU/内存资源异常。"
+    if "describe pod" in safe_command:
+        return "命中与故障相关的配置、重启或事件异常。"
+    return "返回可直接确认或排除当前根因候选的关键证据。"
 
 
 def _build_evidence_gap_keywords(evidence_gaps: List[str]) -> List[str]:
@@ -212,6 +320,9 @@ def _build_non_executable_command_templates(
     namespace = _as_str(context_payload.get("namespace"), "islap") or "islap"
     service_name = _as_str(context_payload.get("service_name")).strip()
     trace_id = _as_str(context_payload.get("trace_id")).strip()
+    evidence_window = _resolve_followup_evidence_window(context_payload)
+    window_start_iso = _as_str(evidence_window.get("start_iso")).strip()
+    window_end_iso = _as_str(evidence_window.get("end_iso")).strip()
 
     def _append(command: str) -> None:
         safe_command = _as_str(command).strip()
@@ -222,9 +333,21 @@ def _build_non_executable_command_templates(
 
     def _append_context_defaults() -> None:
         if service_name:
-            _append(f"kubectl -n {namespace} logs -l app={service_name} --since=15m --tail=200")
+            _append(
+                _build_k8s_logs_evidence_command(
+                    namespace=namespace,
+                    service_name=service_name,
+                    window_start_iso=window_start_iso,
+                )
+            )
         elif trace_id:
-            _append(f"kubectl -n {namespace} logs -l app=query-service --since=15m --tail=200")
+            _append(
+                _build_k8s_logs_evidence_command(
+                    namespace=namespace,
+                    service_name="query-service",
+                    window_start_iso=window_start_iso,
+                )
+            )
 
     for action in _as_list(actions):
         if len(templates) >= safe_limit:
@@ -253,12 +376,10 @@ def _build_non_executable_command_templates(
             continue
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append(
-                (
-                    f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
-                    "\"SELECT event_time,query_id,exception_code,exception,query "
-                    "FROM system.query_log "
-                    "WHERE event_time >= now() - INTERVAL 15 MINUTE "
-                    "ORDER BY event_time DESC LIMIT 20\""
+                _build_clickhouse_query_log_evidence_command(
+                    namespace=namespace,
+                    window_start_iso=window_start_iso,
+                    window_end_iso=window_end_iso,
                 )
             )
             continue
@@ -324,6 +445,10 @@ def _build_structured_template_actions(
 
     built: List[Dict[str, Any]] = []
     seen_commands: set[str] = set()
+    context_payload = analysis_context if isinstance(analysis_context, dict) else {}
+    evidence_window = _resolve_followup_evidence_window(context_payload)
+    window_start_iso = _as_str(evidence_window.get("start_iso")).strip()
+    window_end_iso = _as_str(evidence_window.get("end_iso")).strip()
     for command in templates:
         normalized_command = _normalize_non_executable_template_command(command)
         if not normalized_command:
@@ -373,6 +498,9 @@ def _build_structured_template_actions(
                 "requires_write_permission": False,
                 "requires_elevation": False,
                 "reason": "structured_template_ready_for_auto_exec",
+                "expected_signal": _derive_template_expected_signal(compiled_command),
+                "evidence_window_start": window_start_iso,
+                "evidence_window_end": window_end_iso,
             }
         )
     return built[: max(1, int(max_items or 2))]

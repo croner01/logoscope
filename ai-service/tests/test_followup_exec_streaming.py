@@ -8,6 +8,7 @@ import pytest
 
 from ai.agent_runtime.exec_client import ExecServiceClientError
 from ai.followup_orchestration_helpers import (
+    _build_non_executable_command_templates,
     _emit_followup_event,
     _run_followup_auto_exec_react_loop,
     _run_followup_readonly_auto_exec,
@@ -25,6 +26,35 @@ def test_summarize_iteration_actions_repairs_glued_kubectl_logs_namespace():
         ]
     )
     assert summary == "kubectl logs -n islap --tail=100 -l app=query-service | grep -i error"
+
+
+def test_non_executable_templates_use_anchor_window_when_available():
+    templates = _build_non_executable_command_templates(
+        [
+            {
+                "id": "act-template-log-001",
+                "title": "补齐 trace 相关日志证据",
+                "purpose": "查询日志",
+                "executable": False,
+            },
+            {
+                "id": "act-template-sql-001",
+                "title": "检查 clickhouse 慢查询",
+                "purpose": "query_log",
+                "executable": False,
+            },
+        ],
+        analysis_context={
+            "namespace": "islap",
+            "service_name": "query-service",
+            "source_log_timestamp": "2026-04-11T13:03:33Z",
+            "request_flow_window_minutes": 5,
+        },
+        max_items=3,
+    )
+    assert any("--since-time=2026-04-11T12:58:33Z" in item for item in templates)
+    assert any("toDateTime64('2026-04-11T12:58:33Z', 9, 'UTC')" in item for item in templates)
+    assert any("toDateTime64('2026-04-11T13:08:33Z', 9, 'UTC')" in item for item in templates)
 
 
 def test_followup_readonly_auto_exec_streams_exec_runtime_events(monkeypatch):
