@@ -1,0 +1,2 @@
+# Shared baseline dependencies
+-r ../shared_src/requirements/common-observability.txt

@@ -1,0 +1,497 @@
+namespace:
+  create: false
+  # 覆盖部署命名空间；为空时使用 .Release.Namespace
+  nameOverride: ""
+
+# 命名空间简写别名（优先级最高）
+ns: ""
+
+global:
+  # 标准 chart 方式：全局命名空间覆盖（低于 ns 与 namespace.nameOverride）
+  namespaceOverride: ""
+  # 全局镜像仓库（不含末尾 /）；组件可单独覆盖
+  imageRegistry: "localhost:5000"
+  # 全局镜像 tag；组件未指定 tag 时生效
+  imageTag: ""
+  # 全局存储类兜底；组件未指定 storageClass 时生效
+  storageClass: ""
+  # 全局 NodeSelector；组件级会覆盖同名 key
+  nodeSelector: {}
+
+# 全局部署模式：影响可支持 single/ha 的组件（clickhouse/redis）
+# neo4j 当前仅提供 single 清单；若设置为 ha 会直接 fail
+# 可选: single | ha
+deployment:
+  mode: single
+
+# 兼容旧参数（已废弃，建议使用 deployment.mode）
+database:
+  profile: ""
+
+# 组件级可配置项（参考 Grafana 官方 chart 的 image/service/ingress/env 风格）
+# 注意：以下 env 主要覆盖“业务可调参数”；基础运行参数（APP_NAME/PORT/PYTHONPATH/TZ 等）保持清单默认
+components:
+  aiService:
+    enabled: true
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+    env:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DATABASE: logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      NEO4J_HOST: neo4j
+      NEO4J_PORT: "7687"
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      NEO4J_DATABASE: neo4j
+      LOG_LEVEL: info
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.islap.svc.cluster.local:4318
+      LLM_PROVIDER: deepseek
+      LLM_API_BASE: ""
+      LOCAL_MODEL_API_BASE: ""
+      LOCAL_MODEL_PATH: ""
+      LLM_MODEL: deepseek-chat
+      AI_FOLLOWUP_LLM_TIMEOUT_SECONDS: "90"
+      AI_FOLLOWUP_COMMAND_EXEC_ENABLED: "true"
+      AI_FOLLOWUP_COMMAND_WRITE_ENABLED: "true"
+      AI_FOLLOWUP_COMMAND_TEST_PERMISSIVE: "false"
+      AI_RUNTIME_V1_API_ENABLED: "false"
+      AI_RUNTIME_V4_OUTER_ENGINE: "temporal_required"
+      AI_RUNTIME_V4_INNER_ENGINE: "langgraph_required"
+      AI_RUNTIME_V4_TEMPORAL_ADDRESS: "temporal-frontend:7233"
+      AI_RUNTIME_V4_TEMPORAL_NAMESPACE: "default"
+      AI_RUNTIME_V4_TEMPORAL_TASK_QUEUE: "ai-runtime-v4"
+      AI_RUNTIME_V4_TEMPORAL_WORKER_ENABLED: "true"
+      AI_RUNTIME_V4_TEMPORAL_CONNECT_TIMEOUT_SECONDS: "5"
+      AI_RUNTIME_V4_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS: "3600"
+      AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS: "15"
+      AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS: "200"
+      AI_RUNTIME_V4_GRAPH_CHECKPOINT_TABLE: "logs.ai_runtime_v4_graph_checkpoints"
+      EXEC_SERVICE_BASE_URL: http://exec-service:8095
+
+  execService:
+    enabled: true
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+    env:
+      LOG_LEVEL: info
+      EXEC_POLICY_DECISION_MODE: "opa_enforced"
+      EXEC_POLICY_ALLOW_NON_ENFORCED_MODES: "false"
+      EXEC_POLICY_OPA_URL: http://opa:8181/v1/data/runtime/command/v1
+      EXEC_POLICY_OPA_TIMEOUT_MS: "800"
+      EXEC_POLICY_DECISION_STORE_BACKEND: clickhouse
+      EXEC_POLICY_DECISION_SQLITE_ENABLED: "false"
+      EXEC_POLICY_DECISION_CH_URL: http://clickhouse:8123
+      EXEC_POLICY_DECISION_CH_DATABASE: logs
+      EXEC_POLICY_DECISION_CH_TABLE: exec_policy_decisions
+      EXEC_POLICY_DECISION_CH_USER: default
+      EXEC_POLICY_DECISION_CH_PASSWORD: ""
+      EXEC_POLICY_DECISION_CH_FAIL_OPEN: "false"
+      EXEC_RUNTIME_HISTORY_STORE_BACKEND: clickhouse
+      EXEC_RUNTIME_HISTORY_CH_URL: http://clickhouse:8123
+      EXEC_RUNTIME_HISTORY_CH_DATABASE: logs
+      EXEC_RUNTIME_HISTORY_RUN_TABLE: exec_command_runs
+      EXEC_RUNTIME_HISTORY_EVENT_TABLE: exec_command_events
+      EXEC_RUNTIME_HISTORY_AUDIT_TABLE: exec_command_audits
+      EXEC_RUNTIME_HISTORY_CH_USER: default
+      EXEC_RUNTIME_HISTORY_CH_PASSWORD: ""
+      EXEC_RUNTIME_HISTORY_CH_FAIL_OPEN: "false"
+      EXEC_WRITE_ENABLED: "true"
+      EXEC_COMMAND_TEST_PERMISSIVE: "false"
+      EXEC_CONTROLLED_GATEWAY_REQUIRED: "true"
+      EXEC_TARGET_REGISTRY_MODE: enforced
+      EXEC_TARGET_REGISTRY_BASE_URL: http://ai-service:8090
+      EXEC_TARGET_REGISTRY_TIMEOUT_MS: "800"
+      # 审批票据默认 15 分钟，避免用户确认窗口内重复失效。
+      EXEC_TICKET_TTL_SECONDS: "900"
+      EXEC_DEFAULT_HOST_TARGET: host:primary
+      EXEC_EXECUTOR_TEMPLATE__BUSYBOX_READONLY: ""
+      EXEC_EXECUTOR_TEMPLATE__BUSYBOX_MUTATING: ""
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_K8S_READONLY: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_K8S_MUTATING: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_CLICKHOUSE_READONLY: ""
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_CLICKHOUSE_MUTATING: ""
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_OPENSTACK_READONLY: ""
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_OPENSTACK_MUTATING: ""
+      EXEC_EXECUTOR_TEMPLATE__HOST_SSH_READONLY: ""
+      EXEC_EXECUTOR_TEMPLATE__HOST_SSH_MUTATING: ""
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_READONLY: ""
+      EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_MUTATING: ""
+
+  temporal:
+    enabled: true
+    image: {}
+    nodeSelector: {}
+    env: {}
+
+  opa:
+    enabled: true
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+
+  clickhouse:
+    enabled: true
+    # 组件模式可覆盖 deployment.mode；可选: single | ha
+    mode: ""
+    # single: 覆盖单副本 Deployment 副本；ha: 会同时作用 keeper/clickhouse 两个 StatefulSet
+    replicaCount: 0
+    image: {}
+    nodeSelector: {}
+    storageClass: ""
+    env:
+      CLICKHOUSE_DB: logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      CLICKHOUSE_HTTP_PORT: "8123"
+      CLICKHOUSE_TCP_PORT: "9000"
+
+  fluentBit:
+    enabled: true
+    image: {}
+    nodeSelector: {}
+
+  frontend:
+    enabled: true
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+    service:
+      type: NodePort
+      nodePort: 31800
+    # 仅 frontend 支持 ingress
+    ingress:
+      enabled: false
+      name: frontend-ingress
+      className: ""
+      annotations: {}
+      hosts: []
+      tls: []
+      serviceName: frontend
+      servicePort: 80
+
+  ingestService:
+    enabled: true
+    replicaCount: 3
+    hpa:
+      minReplicas: 3
+      maxReplicas: 12
+    image: {}
+    nodeSelector: {}
+    env:
+      QUEUE_BACKEND: kafka
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_REQUIRED_ACKS: all
+      KAFKA_WRITE_MODE: async
+      KAFKA_DIAL_TIMEOUT_SEC: "3"
+      KAFKA_WRITE_TIMEOUT_SEC: "5"
+      KAFKA_PING_INTERVAL_SEC: "5"
+      KAFKA_RECONNECT_INTERVAL_SEC: "5"
+      KAFKA_MAX_RECONNECT_ATTEMPTS: "3"
+      KAFKA_BATCH_SIZE: "500"
+      KAFKA_BATCH_BYTES: "1048576"
+      KAFKA_BATCH_TIMEOUT_MS: "20"
+      KAFKA_TOPIC_LOGS: logs.raw
+      KAFKA_TOPIC_METRICS: metrics.raw
+      KAFKA_TOPIC_TRACES: traces.raw
+      QUEUE_FLUSH_INTERVAL_MS: "50"
+      SHUTDOWN_TIMEOUT_SEC: "120"
+      WAL_ENABLED: "true"
+      WAL_DIR: /var/lib/ingest/wal
+      WAL_FILE_NAME: queue.wal
+      WAL_SYNC_EVERY: "1"
+      QUEUE_LOG_RECORD_BATCH_SIZE: "80"
+      BATCH_SIZE: "100"
+      BATCH_TIMEOUT: "5"
+      LOG_LEVEL: info
+      MEMORY_QUEUE_MAX_SIZE: "20000"
+      MEMORY_QUEUE_FLUSH_BATCH_SIZE: "1000"
+      MEMORY_QUEUE_DROP_OLDEST_WHEN_FULL: "false"
+
+  neo4j:
+    enabled: true
+    # 当前 chart 仅提供 single 清单
+    mode: single
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+    storageClass: ""
+    env:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1G
+      NEO4J_dbms_memory_pagecache_size: 512m
+      NEO4J_server_config_strict_validation_enabled: "false"
+      NEO4J_dbms_connector_http_listen__address: 0.0.0.0:7474
+      NEO4J_dbms_connector_http_advertised__address: 0.0.0.0:7474
+      NEO4J_dbms_connector_bolt_listen__address: 0.0.0.0:7687
+      NEO4J_dbms_connector_bolt_advertised__address: 0.0.0.0:7687
+
+  otelCollector:
+    enabled: true
+    image: {}
+    nodeSelector: {}
+
+  otelGateway:
+    enabled: true
+    replicaCount: 2
+    hpa:
+      minReplicas: 2
+      maxReplicas: 10
+    image: {}
+    nodeSelector: {}
+
+  queryService:
+    enabled: true
+    replicaCount: 2
+    hpa:
+      minReplicas: 2
+      maxReplicas: 10
+    image: {}
+    nodeSelector: {}
+    env:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DATABASE: logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      NEO4J_HOST: neo4j
+      NEO4J_PORT: "7687"
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      NEO4J_DATABASE: neo4j
+      LOG_LEVEL: info
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.islap.svc.cluster.local:4318
+      PREAGG_SCHEMA_VERSION: v2
+      QUERY_LOGS_DEFAULT_TIME_WINDOW: 1 HOUR
+      QUERY_LOGS_MAX_THREADS: "4"
+      QUERY_LOGS_HARD_MAX_WINDOW_MINUTES: "10080"
+      QUERY_LOGS_FACETS_DEGRADE_WINDOW_MINUTES: "10080"
+
+  redis:
+    enabled: true
+    # 组件模式可覆盖 deployment.mode；可选: single | ha
+    mode: ""
+    # single: 覆盖单副本 Deployment；ha: 覆盖 StatefulSet
+    replicaCount: 0
+    image: {}
+    nodeSelector: {}
+    storageClass: ""
+
+  kafka:
+    enabled: true
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+    env:
+      KAFKA_ENABLE_KRAFT: "yes"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+
+  semanticEngine:
+    enabled: true
+    replicaCount: 2
+    hpa:
+      minReplicas: 2
+      maxReplicas: 8
+    image: {}
+    nodeSelector: {}
+    env:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DATABASE: logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      NEO4J_HOST: neo4j
+      NEO4J_PORT: "7687"
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      NEO4J_DATABASE: neo4j
+      PROCESS_BATCH_SIZE: "10"
+      PROCESS_TIMEOUT: "30"
+      LOG_LEVEL: info
+      ENABLE_PSEUDO_TRACE_ID_FALLBACK: "false"
+      USE_QUEUE: "true"
+      QUEUE_TYPE: kafka
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP_ID: log-workers
+      KAFKA_CLIENT_ID: semantic-engine
+      KAFKA_AUTO_OFFSET_RESET: earliest
+      KAFKA_POLL_TIMEOUT_MS: "1000"
+      KAFKA_MAX_BATCH_SIZE: "200"
+      KAFKA_MAX_RETRY_ATTEMPTS: "3"
+      KAFKA_RETRY_DELAY_SECONDS: "2"
+      CH_BATCH_SIZE: "2000"
+      CH_FLUSH_INTERVAL: "0.5"
+      CH_BATCH_ASYNC_INSERT: "true"
+      CH_BATCH_WAIT_FOR_ASYNC_INSERT: "true"
+      DLQ_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.islap.svc.cluster.local:4318
+      AI_SERVICE_BASE_URL: http://ai-service:8090
+
+  semanticEngineWorker:
+    enabled: true
+    replicaCount: 3
+    hpa:
+      minReplicas: 3
+      maxReplicas: 16
+    image: {}
+    nodeSelector: {}
+    env:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DATABASE: logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      NEO4J_HOST: neo4j
+      NEO4J_PORT: "7687"
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      NEO4J_DATABASE: neo4j
+      QUEUE_TYPE: kafka
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP_ID: log-workers
+      KAFKA_CLIENT_ID: semantic-engine-worker
+      KAFKA_AUTO_OFFSET_RESET: earliest
+      KAFKA_POLL_TIMEOUT_MS: "1000"
+      KAFKA_MAX_POLL_INTERVAL_MS: "600000"
+      KAFKA_SESSION_TIMEOUT_MS: "45000"
+      KAFKA_HEARTBEAT_INTERVAL_MS: "3000"
+      KAFKA_GROUP_PER_STREAM: "true"
+      KAFKA_CALLBACK_OFFLOAD: "true"
+      KAFKA_FLUSH_OFFLOAD: "true"
+      KAFKA_COMMIT_ERROR_AS_WARNING: "true"
+      KAFKA_MAX_BATCH_SIZE: "80"
+      KAFKA_MAX_RETRY_ATTEMPTS: "5"
+      KAFKA_RETRY_DELAY_SECONDS: "2"
+      KAFKA_TOPIC_LOGS: logs.raw
+      KAFKA_TOPIC_METRICS: metrics.raw
+      KAFKA_TOPIC_TRACES: traces.raw
+      DLQ_ENABLED: "true"
+      DLQ_MAX_RETRIES: "3"
+      CH_BATCH_SIZE: "300"
+      CH_FLUSH_INTERVAL: "0.1"
+      CH_BATCH_ASYNC_INSERT: "true"
+      CH_BATCH_WAIT_FOR_ASYNC_INSERT: "true"
+      CH_MAX_INSERT_ROWS_PER_QUERY: "60"
+      CH_FLUSH_FAILURE_BACKOFF_SECONDS: "1"
+      CH_FLUSH_FAILURE_MAX_BACKOFF_SECONDS: "8"
+      CH_FLUSH_SPLIT_MIN_ROWS: "1"
+      CH_BATCH_LOG_EVERY: "20"
+      ENABLE_SEMANTIC_EVENT_WRITE: "false"
+      LOG_LEVEL: info
+      ENABLE_PSEUDO_TRACE_ID_FALLBACK: "false"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.islap.svc.cluster.local:4318
+
+  topologyService:
+    enabled: true
+    replicaCount: 1
+    image: {}
+    nodeSelector: {}
+    env:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DATABASE: logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      NEO4J_HOST: neo4j
+      NEO4J_PORT: "7687"
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      NEO4J_DATABASE: neo4j
+      LOG_LEVEL: info
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.islap.svc.cluster.local:4318
+      SERVICE_NODE_SYNC_ENABLED: "true"
+      SERVICE_NODE_SYNC_INTERVAL_SECONDS: "300"
+
+  valueKpiCronjob:
+    enabled: true
+    schedule: 0 2 * * 1
+    image: {}
+    nodeSelector: {}
+
+# 默认镜像（可被 components.<name>.image 覆盖）
+images:
+  aiService:
+    repository: logoscope/ai-service
+    tag: latest
+  temporal:
+    registry: docker.io
+    repository: temporalio/auto-setup
+    tag: "1.25.2"
+  temporalPostgresql:
+    registry: docker.io
+    repository: postgres
+    tag: "16-alpine"
+  execService:
+    repository: logoscope/exec-service
+    tag: latest
+  opa:
+    registry: docker.io
+    repository: openpolicyagent/opa
+    tag: "0.63.0"
+  clickhouse:
+    repository: logoscope/clickhouse-server
+    tag: "25.6"
+  fluentBit:
+    repository: logoscope/fluent-bit
+    tag: "3.1.3"
+  frontend:
+    repository: logoscope/frontend
+    tag: latest
+  ingestService:
+    repository: logoscope/ingest-service
+    tag: latest
+  neo4j:
+    repository: logoscope/neo4j
+    tag: "4.4-community"
+  otelCollector:
+    registry: otel
+    repository: opentelemetry-collector-contrib
+    tag: "0.91.0"
+  otelGateway:
+    repository: logoscope/opentelemetry-collector
+    tag: "0.111.0"
+  queryService:
+    repository: logoscope/query-service
+    tag: latest
+  kafka:
+    registry: docker.io
+    repository: bitnamilegacy/kafka
+    tag: "4.0.0-debian-12-r10"
+  redis:
+    registry: docker.io
+    repository: redis
+    tag: "7-alpine"
+  semanticEngine:
+    repository: logoscope/semantic-engine
+    tag: latest
+  semanticEngineWorker:
+    repository: logoscope/semantic-engine
+    tag: latest
+  topologyService:
+    repository: logoscope/topology-service
+    tag: latest
+  valueKpiCronjob:
+    repository: logoscope/query-service
+    tag: latest
+
+# 兼容旧方案：按原始镜像字符串进行替换（可选）
+imageReplacements: {}

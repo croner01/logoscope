@@ -1,0 +1,174 @@
+# Production overrides for logoscope Helm chart.
+# Usage:
+# helm upgrade --install logoscope charts/logoscope \
+#   -n islap --create-namespace \
+#   -f charts/logoscope/values-prod.yaml
+
+namespace:
+  create: false
+  nameOverride: islap
+
+ns: ""
+
+global:
+  namespaceOverride: ""
+  imageRegistry: "localhost:5000"
+  imageTag: ""
+  storageClass: ""
+  nodeSelector: {}
+
+deployment:
+  mode: ha
+
+database:
+  profile: ""
+
+components:
+  aiService:
+    enabled: true
+    replicaCount: 1
+
+  execService:
+    enabled: true
+    replicaCount: 1
+
+  clickhouse:
+    enabled: true
+    mode: ha
+    replicaCount: 3
+
+  fluentBit:
+    enabled: true
+
+  frontend:
+    enabled: true
+    replicaCount: 1
+    service:
+      type: NodePort
+      nodePort: 31800
+    ingress:
+      enabled: false
+      name: frontend-ingress
+      className: ""
+      annotations: {}
+      hosts: []
+      tls: []
+      serviceName: frontend
+      servicePort: 80
+
+  ingestService:
+    enabled: true
+    replicaCount: 3
+    hpa:
+      minReplicas: 3
+      maxReplicas: 12
+
+  neo4j:
+    enabled: true
+    mode: single
+    replicaCount: 1
+
+  otelCollector:
+    enabled: true
+
+  otelGateway:
+    enabled: true
+    replicaCount: 2
+    hpa:
+      minReplicas: 2
+      maxReplicas: 10
+
+  queryService:
+    enabled: true
+    replicaCount: 2
+    hpa:
+      minReplicas: 2
+      maxReplicas: 10
+
+  redis:
+    enabled: false
+    mode: ha
+    replicaCount: 3
+
+  kafka:
+    enabled: true
+    replicaCount: 1
+
+  semanticEngine:
+    enabled: true
+    replicaCount: 2
+    hpa:
+      minReplicas: 2
+      maxReplicas: 8
+
+  semanticEngineWorker:
+    enabled: true
+    replicaCount: 3
+    hpa:
+      minReplicas: 3
+      maxReplicas: 16
+
+  topologyService:
+    enabled: true
+    replicaCount: 1
+
+  valueKpiCronjob:
+    enabled: true
+    schedule: 0 2 * * 1
+
+images:
+  aiService:
+    repository: logoscope/ai-service
+    tag: sqlopt-20260304-101504
+  execService:
+    repository: logoscope/exec-service
+    tag: latest
+  clickhouse:
+    repository: logoscope/clickhouse-server
+    tag: "25.6"
+  fluentBit:
+    repository: logoscope/fluent-bit
+    tag: "3.1.3"
+  frontend:
+    repository: logoscope/frontend
+    tag: 20260304-spanfix2
+  ingestService:
+    repository: logoscope/ingest-service
+    tag: sqlopt-20260304-101504
+  neo4j:
+    repository: logoscope/neo4j
+    tag: "4.4-community"
+  otelCollector:
+    registry: otel
+    repository: opentelemetry-collector-contrib
+    tag: "0.91.0"
+  otelGateway:
+    registry: otel
+    repository: opentelemetry-collector-contrib
+    tag: "0.91.0"
+  queryService:
+    repository: logoscope/query-service
+    tag: 20260304-spanfix3
+  kafka:
+    registry: docker.io
+    repository: bitnamilegacy/kafka
+    tag: "4.0.0-debian-12-r10"
+  # 仅回滚 Redis 路径时使用
+  redis:
+    registry: docker.io
+    repository: redis
+    tag: "7-alpine"
+  semanticEngine:
+    repository: logoscope/semantic-engine
+    tag: 20260304-spanfix3
+  semanticEngineWorker:
+    repository: logoscope/semantic-engine
+    tag: 20260304-spanfix3
+  topologyService:
+    repository: logoscope/topology-service
+    tag: 20260304-cstfix
+  valueKpiCronjob:
+    repository: logoscope/query-service
+    tag: 20260304-spanfix3
+
+imageReplacements: {}

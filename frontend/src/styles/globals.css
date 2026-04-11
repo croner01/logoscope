@@ -1,0 +1,134 @@
+/**
+ * 全局样式 - Tailwind CSS 基础配置
+ * 参考 Datadog 设计风格
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --app-bg: #f1f5f9;
+  --app-surface: #ffffff;
+  --app-surface-muted: #f8fafc;
+  --app-border: #dbe3ef;
+  --app-text: #0f172a;
+  --app-text-muted: #475569;
+  --app-accent: #0f766e;
+  --app-accent-soft: #ccfbf1;
+  --app-sidebar-bg: #0f172a;
+  --app-sidebar-border: #1e293b;
+  --app-sidebar-text: #e2e8f0;
+  --app-sidebar-muted: #94a3b8;
+  --app-sidebar-active: #0f766e;
+}
+
+/* 基础样式重置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'IBM Plex Sans', 'Noto Sans SC', 'PingFang SC', 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: radial-gradient(circle at top right, #dff4ff 0%, var(--app-bg) 30%, #edf2f7 100%);
+  color: var(--app-text);
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* 代码/日志样式 */
+pre, code {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+}
+
+/* 动画 */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* 日志级别颜色 */
+.log-level-trace { color: #6b7280; }
+.log-level-debug { color: #6366f1; }
+.log-level-info { color: #3b82f6; }
+.log-level-warn { color: #f59e0b; background-color: #fef3c7; }
+.log-level-error { color: #ef4444; background-color: #fee2e2; }
+.log-level-fatal { color: #ffffff; background-color: #dc2626; }
+
+/* 状态指示器 */
+.status-healthy { background-color: #10b981; }
+.status-degraded { background-color: #f59e0b; }
+.status-critical { background-color: #ef4444; }
+.status-unknown { background-color: #6b7280; }
+
+/* 表格样式 */
+.data-table {
+  @apply w-full text-sm text-left;
+}
+
+.data-table th {
+  @apply px-4 py-3 bg-gray-50 font-medium text-gray-600 uppercase tracking-wider border-b;
+}
+
+.data-table td {
+  @apply px-4 py-3 border-b border-gray-100;
+}
+
+.data-table tbody tr:hover {
+  @apply bg-gray-50;
+}
+
+/* 卡片阴影 */
+.card {
+  @apply bg-white rounded-lg shadow-md p-6;
+}
+
+/* 响应式隐藏 */
+@media (max-width: 768px) {
+  .hide-mobile {
+    display: none !important;
+  }
+}

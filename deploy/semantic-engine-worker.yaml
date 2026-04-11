@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semantic-engine-worker
+  namespace: islap
+  labels:
+    app: semantic-engine-worker
+spec:
+  replicas: 4  # prod 参考: 3
+  selector:
+    matchLabels:
+      app: semantic-engine-worker
+  template:
+    metadata:
+      labels:
+        app: semantic-engine-worker
+    spec:
+      containers:
+      - name: worker
+        image: localhost:5000/logoscope/semantic-engine:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "start.py", "worker"]
+        env:
+        - name: APP_NAME
+          value: "semantic-engine-worker"
+        - name: APP_VERSION
+          value: "1.0.0"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONFAULTHANDLER
+          value: "1"
+        - name: PYTHONPATH
+          value: "/app/shared_lib"
+        - name: TZ
+          value: "UTC"
+        # 数据库配置
+        - name: CLICKHOUSE_HOST
+          value: "clickhouse"  # 使用ClusterIP
+        - name: CLICKHOUSE_PORT
+          value: "9000"
+        - name: CLICKHOUSE_DATABASE
+          value: "logs"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          value: ""
+        - name: NEO4J_HOST
+          value: "neo4j"  # 使用ClusterIP
+        - name: NEO4J_PORT
+          value: "7687"
+        - name: NEO4J_USER
+          value: "neo4j"
+        - name: NEO4J_PASSWORD
+          value: "password"
+        - name: NEO4J_DATABASE
+          value: "neo4j"
+        # 队列配置
+        - name: QUEUE_TYPE
+          value: "kafka"
+        - name: KAFKA_BROKERS
+          value: "kafka:9092"
+        - name: KAFKA_GROUP_ID
+          value: "log-workers"
+        - name: KAFKA_CLIENT_ID
+          value: "semantic-engine-worker"
+        - name: KAFKA_AUTO_OFFSET_RESET
+          value: "earliest"
+        - name: KAFKA_POLL_TIMEOUT_MS
+          value: "1000"
+        - name: KAFKA_MAX_POLL_INTERVAL_MS
+          value: "600000"
+        - name: KAFKA_SESSION_TIMEOUT_MS
+          value: "45000"
+        - name: KAFKA_HEARTBEAT_INTERVAL_MS
+          value: "3000"
+        - name: KAFKA_GROUP_PER_STREAM
+          value: "true"
+        - name: KAFKA_CALLBACK_OFFLOAD
+          value: "true"
+        - name: KAFKA_FLUSH_OFFLOAD
+          value: "true"
+        - name: KAFKA_COMMIT_ERROR_AS_WARNING
+          value: "true"
+        - name: KAFKA_MAX_BATCH_SIZE
+          value: "80"
+        - name: KAFKA_MAX_RETRY_ATTEMPTS
+          value: "5"
+        - name: KAFKA_RETRY_DELAY_SECONDS
+          value: "2"
+        - name: KAFKA_TOPIC_LOGS
+          value: "logs.raw"
+        - name: KAFKA_TOPIC_METRICS
+          value: "metrics.raw"
+        - name: KAFKA_TOPIC_TRACES
+          value: "traces.raw"
+        - name: DLQ_ENABLED
+          value: "true"
+        - name: DLQ_MAX_RETRIES
+          value: "5"  # prod 参考: 3
+        # ⭐ P0优化：ClickHouse 批量写入配置
+        - name: CH_BATCH_SIZE
+          value: "300"  # pod 调优: 降低单次写入峰值内存
+        - name: CH_FLUSH_INTERVAL
+          value: "0.1"  # pod 调优: 更快落盘减少堆积
+        - name: CH_BATCH_ASYNC_INSERT
+          value: "true"
+        - name: CH_BATCH_WAIT_FOR_ASYNC_INSERT
+          value: "true"
+        - name: CH_MAX_INSERT_ROWS_PER_QUERY
+          value: "60"
+        - name: CH_FLUSH_FAILURE_BACKOFF_SECONDS
+          value: "1"
+        - name: CH_FLUSH_FAILURE_MAX_BACKOFF_SECONDS
+          value: "8"
+        - name: CH_FLUSH_SPLIT_MIN_ROWS
+          value: "1"
+        - name: CH_BATCH_LOG_EVERY
+          value: "20"
+        - name: ENABLE_SEMANTIC_EVENT_WRITE
+          value: "false"
+        # 日志配置
+        - name: LOG_LEVEL
+          value: "info"
+        - name: ENABLE_PSEUDO_TRACE_ID_FALLBACK
+          value: "false"
+        # OpenTelemetry 分布式追踪配置
+        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "semantic-engine-worker"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=semantic-engine-worker,deployment.environment=production"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi

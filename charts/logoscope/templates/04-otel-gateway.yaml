@@ -1,0 +1,213 @@
+{{- if .Values.components.otelGateway.enabled }}
+{{- $raw := `
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-gateway
+  namespace: islap
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-gateway
+  namespace: islap
+  labels:
+    app: otel-gateway
+spec:
+  type: NodePort
+  ports:
+  - port: 4317
+    name: otlp-grpc
+    protocol: TCP
+    targetPort: 4317
+    nodePort: 31417
+  - port: 4318
+    name: otlp-http
+    protocol: TCP
+    targetPort: 4318
+    nodePort: 31418
+  - port: 8888
+    name: metrics
+    protocol: TCP
+    targetPort: 8888
+    nodePort: 31488
+  selector:
+    app: otel-gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-gateway
+  namespace: islap
+  labels:
+    app: otel-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otel-gateway
+  template:
+    metadata:
+      labels:
+        app: otel-gateway
+    spec:
+      serviceAccountName: otel-gateway
+      containers:
+      - name: otel-gateway
+        image: localhost:5000/logoscope/opentelemetry-collector:0.111.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - "/otelcol"
+        - "--config=/etc/otelcol/config.yaml"
+        ports:
+        - containerPort: 4317
+          name: otlp-grpc
+          protocol: TCP
+        - containerPort: 4318
+          name: otlp-http
+          protocol: TCP
+        - containerPort: 8888
+          name: metrics
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otelcol
+        - name: logs
+          mountPath: /var/log/otel-gateway
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: config
+        configMap:
+          name: otel-gateway-config
+          items:
+          - key: config.yaml
+            path: config.yaml
+      - name: logs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-gateway-config
+  namespace: islap
+  labels:
+    app: otel-gateway
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        limit_mib: 1500
+        spike_limit_mib: 512
+        check_interval: 2s
+      batch:
+        timeout: 2s
+        send_batch_size: 2000
+        send_batch_max_size: 4000
+      attributes:
+        actions:
+          - key: env
+            value: prod
+            action: upsert
+          - key: collector
+            value: otel-gateway
+            action: upsert
+
+    exporters:
+      otlphttp/ingest-service:
+        endpoint: http://ingest-service:8080
+        tls:
+          insecure: true
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
+      otlphttp/ingest-service-metrics:
+        endpoint: http://ingest-service:8080
+        tls:
+          insecure: true
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
+      otlphttp/ingest-service-traces:
+        endpoint: http://ingest-service:8080
+        tls:
+          insecure: true
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+    service:
+      pipelines:
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes, batch]
+          exporters: [otlphttp/ingest-service]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes, batch]
+          exporters: [otlphttp/ingest-service-metrics]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes, batch]
+          exporters: [otlphttp/ingest-service-traces]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: otel-gateway-hpa
+  namespace: islap
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: otel-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "otelGateway") }}
+{{- end }}

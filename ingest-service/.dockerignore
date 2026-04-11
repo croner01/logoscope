@@ -1,0 +1,22 @@
+#
+# Go runtime image build context should not include Python implementation files.
+# This file is effective when using `docker build ingest-service`.
+#
+
+# Python source and tests
+api/
+services/
+tests/
+main.py
+config.py
+verify_syntax.py
+pytest.ini
+requirements*.txt
+run_tests.sh
+
+# Python build/test artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+

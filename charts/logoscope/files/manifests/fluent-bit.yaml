@@ -1,0 +1,302 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: islap
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-read
+rules:
+- apiGroups: [""]
+  resources:
+  - pods
+  - namespaces
+  - nodes
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-read
+subjects:
+- kind: ServiceAccount
+  name: fluent-bit
+  namespace: islap
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: islap
+  labels:
+    app: fluent-bit
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit
+      containers:
+      - name: fluent-bit
+        image: localhost:5000/logoscope/fluent-bit:3.1.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 2020
+          name: http-metrics
+          protocol: TCP
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: etcfluentbitmain
+          mountPath: /fluent-bit/etc/fluent-bit.conf
+          subPath: fluent-bit.conf
+        - name: etcfluentbitmain
+          mountPath: /fluent-bit/etc/custom
+        - name: etcfluentbitparsers
+          mountPath: /fluent-bit/etc/parsers.conf
+          subPath: parsers.conf
+        resources:
+          limits:
+            memory: 1024Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: etcfluentbitmain
+        configMap:
+          name: fluent-bit-config
+      - name: etcfluentbitparsers
+        configMap:
+          name: fluent-bit-parsers
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: islap
+  labels:
+    app: fluent-bit
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1
+        Log_Level    info
+        Daemon       off
+        Parsers_File parsers.conf
+        storage.path /var/log/fluent-bit-buffers/
+        storage.sync normal
+        storage.backlog.mem_limit 20MB
+
+    # Inputs by service template blocks
+    @INCLUDE /fluent-bit/etc/custom/input-query-service.conf
+    @INCLUDE /fluent-bit/etc/custom/input-otel-collector.conf
+    @INCLUDE /fluent-bit/etc/custom/input-java-exception.conf
+    @INCLUDE /fluent-bit/etc/custom/input-default.conf
+
+    # Shared pipeline blocks
+    @INCLUDE /fluent-bit/etc/custom/filter-drop-empty.conf
+    @INCLUDE /fluent-bit/etc/custom/filter-kubernetes.conf
+    @INCLUDE /fluent-bit/etc/custom/output-otel.conf
+
+  input-query-service.conf: |
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*query-service*.log
+        Tag               kube.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     20MB
+        Skip_Long_Lines   On
+        multiline.parser  multiline_query_sql,multiline_trace_stack
+        DB                /var/log/flb_query_ml.db
+        DB.Sync           Normal
+        Buffer_Chunk_Size 512KB
+        Buffer_Max_Size   5MB
+        storage.type      filesystem
+
+  input-otel-collector.conf: |
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*otel-collector*.log
+        Tag               kube.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     20MB
+        Skip_Long_Lines   On
+        multiline.parser  multiline_otel_stack,multiline_trace_stack
+        DB                /var/log/flb_otel_ml.db
+        DB.Sync           Normal
+        Buffer_Chunk_Size 512KB
+        Buffer_Max_Size   5MB
+        storage.type      filesystem
+
+  input-java-exception.conf: |
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*test-java-exception*.log,/var/log/containers/*multiline-test*.log
+        Tag               kube.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     10MB
+        Skip_Long_Lines   On
+        multiline.parser  multiline_java_stack,multiline_trace_stack
+        DB                /var/log/flb_java_ml.db
+        DB.Sync           Normal
+        Buffer_Chunk_Size 512KB
+        Buffer_Max_Size   5MB
+        storage.type      filesystem
+
+  input-default.conf: |
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*.log
+        Tag               kube.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     35MB
+        Skip_Long_Lines   On
+        multiline.parser  multiline_openstack_traceback,multiline_openstack_ts_boundary,docker,cri
+        DB                /var/log/flb_kube.db
+        DB.Sync           Normal
+        Exclude_Path      /var/log/containers/*query-service*,/var/log/containers/*otel-collector*,/var/log/containers/*multiline-test*,/var/log/containers/*test-java-exception*,/var/log/containers/*fluent-bit*,/var/log/containers/*semantic-engine*,/var/log/containers/*otel-gateway*,/var/log/containers/*ingest-service*
+        Buffer_Chunk_Size    512KB
+        Buffer_Max_Size      5MB
+        storage.type         filesystem
+
+  filter-drop-empty.conf: |
+    [FILTER]
+        Name                grep
+        Match               kube.*
+        Regex               log .+
+        Exclude             log ^\s*$
+        Exclude             log ^\{\"log\":\"(?:\\n|\\r\\n|\\s*)\",\"stream\":\"(?:stdout|stderr)\",\"time\":\"[^\"]+\"\}$
+
+  filter-kubernetes.conf: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           Off
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Labels              On
+        Annotations         Off
+
+  output-otel.conf: |
+    [OUTPUT]
+        Name          opentelemetry
+        Match         *
+        Host          otel-collector.islap.svc.cluster.local
+        Port          4318
+        Logs_uri      /v1/logs
+        tls           off
+        Logs_body_key_attributes  true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-parsers
+  namespace: islap
+  labels:
+    app: fluent-bit
+data:
+  parsers.conf: |
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Strict Off
+        Time_Keep   On
+
+    [PARSER]
+        Name        syslog
+        Format      regex
+        Regex       ^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$
+        Time_Key    time
+        Time_Format %b %d %H:%M:%S
+
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+    [MULTILINE_PARSER]
+        name          multiline_trace_stack
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?\s+.*(?:ERROR|FATAL|Exception|Traceback)|Traceback \(most recent call last\):|Exception in thread \".*\"|panic: .*)$/" "cont"
+        rule          "cont"        "/^(\s+at\s+.*|\s*Caused by:.*|\s*Suppressed:.*|\s*\.\.\. \d+ more|\s+File \".*\", line \d+, in .*|During handling of the above exception, another exception occurred:|[A-Za-z_][A-Za-z0-9_\.]*?(Error|Exception):.*|\s+.*)$/" "cont"
+
+    [MULTILINE_PARSER]
+        name          multiline_java_stack
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2500
+        rule          "start_state" "/^((?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?\s+.*(?:ERROR|FATAL).*)|(?:Exception in thread \".*\".*)|(?:[A-Za-z_][A-Za-z0-9_\.]*(?:Exception|Error):.*)|(?:Traceback \(most recent call last\):)|(?:panic: .*))$/" "cont"
+        rule          "cont"        "/^((?:\s+at\s+.*)|(?:\s*Caused by:.*)|(?:\s*Suppressed:.*)|(?:\s*\.\.\. \d+ more)|(?:\s*File \".*\", line \d+, in .*)|(?:During handling of the above exception, another exception occurred:)|(?:[A-Za-z_][A-Za-z0-9_\.]*(?:Exception|Error):.*)|(?:\s*))$/" "cont"
+
+    [MULTILINE_PARSER]
+        name          multiline_query_sql
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 1500
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s+-\s+[^-]+\s+-\s+(?:INFO|DEBUG)\s+-\s+Executing query:\s*)$/" "cont"
+        rule          "cont"        "/^(\s+.*)$/" "cont"
+
+    [MULTILINE_PARSER]
+        name          multiline_otel_stack
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+error\s+.*)$/" "cont"
+        rule          "cont"        "/^(go\.[A-Za-z0-9_\/\.\-\(\)\*\[\]]+.*|\s+.*)$/" "cont"
+
+    [MULTILINE_PARSER]
+        name          multiline_openstack_traceback
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2500
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\d+\s+(?:ERROR|CRITICAL)\s+[A-Za-z0-9_\.\-]+(?:\s+\[-\])?\s+.*(?:Traceback \(most recent call last\):|Error contacting|ConnectFailure|Max retries exceeded|No address found).*)$/" "cont"
+        rule          "cont"        "/^(Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*)$/" "cont"
+    [MULTILINE_PARSER]
+        name          multiline_openstack_ts_boundary
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 3000
+        # 有时间戳 + 级别 => 新日志开始
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|WARN|WARNING|FATAL)\s+.*)$/" "cont"
+        # 非“时间戳+级别”开头 => 归到上一条（含空行）
+        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|WARN|WARNING|FATAL)\s+).*$/" "cont"

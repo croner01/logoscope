@@ -1,0 +1,70 @@
+{{- if .Values.components.frontend.enabled }}
+{{- $raw := `
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: islap
+  labels:
+    app: frontend
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    name: http
+    protocol: TCP
+    targetPort: 80
+    nodePort: 31800
+  selector:
+    app: frontend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: islap
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: localhost:5000/logoscope/frontend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80
+          name: http
+          protocol: TCP
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 10
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "frontend") }}
+{{- end }}

@@ -1,0 +1,215 @@
+{{- if .Values.components.temporal.enabled }}
+{{- $raw := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-postgresql-auth
+  namespace: islap
+  labels:
+    app: temporal-postgresql
+type: Opaque
+stringData:
+  username: temporal
+  password: temporal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-postgresql
+  namespace: islap
+  labels:
+    app: temporal-postgresql
+spec:
+  type: ClusterIP
+  selector:
+    app: temporal-postgresql
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+    protocol: TCP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: temporal-postgresql-data
+  namespace: islap
+  labels:
+    app: temporal-postgresql
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-postgresql
+  namespace: islap
+  labels:
+    app: temporal-postgresql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-postgresql
+  template:
+    metadata:
+      labels:
+        app: temporal-postgresql
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-auth
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-auth
+              key: password
+        - name: POSTGRES_DB
+          value: temporal
+        ports:
+        - containerPort: 5432
+          name: postgres
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -lc
+            - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 10
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -lc
+            - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: temporal-postgresql-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: islap
+  labels:
+    app: temporal
+spec:
+  type: ClusterIP
+  selector:
+    app: temporal
+  ports:
+  - name: grpc
+    port: 7233
+    targetPort: 7233
+    protocol: TCP
+  - name: http
+    port: 7243
+    targetPort: 7243
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: islap
+  labels:
+    app: temporal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      containers:
+      - name: temporal
+        image: temporalio/auto-setup:1.25.2
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: DB
+          value: postgres12
+        - name: DB_PORT
+          value: "5432"
+        - name: DBNAME
+          value: temporal
+        - name: VISIBILITY_DBNAME
+          value: temporal_visibility
+        - name: POSTGRES_SEEDS
+          value: temporal-postgresql
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-auth
+              key: username
+        - name: POSTGRES_PWD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-auth
+              key: password
+        - name: DYNAMIC_CONFIG_FILE_PATH
+          value: config/dynamicconfig/docker.yaml
+        - name: BIND_ON_IP
+          value: "0.0.0.0"
+        - name: LOG_LEVEL
+          value: info
+        ports:
+        - containerPort: 7233
+          name: grpc
+        - containerPort: 7243
+          name: http
+        readinessProbe:
+          tcpSocket:
+            port: 7233
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 20
+        livenessProbe:
+          tcpSocket:
+            port: 7233
+          initialDelaySeconds: 40
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 10
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "temporal") }}
+{{- end }}

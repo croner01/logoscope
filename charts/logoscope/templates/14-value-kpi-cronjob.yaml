@@ -1,0 +1,67 @@
+{{- if .Values.components.valueKpiCronjob.enabled }}
+{{- $raw := `
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: value-kpi-weekly
+  namespace: islap
+  labels:
+    app: value-kpi-weekly
+spec:
+  # 每周一 UTC 02:00 生成一次 KPI 快照并评估告警
+  schedule: "0 2 * * 1"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: value-kpi-weekly
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: value-kpi-weekly
+            image: localhost:5000/logoscope/query-service:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -lc
+            args:
+            - |
+              set -euo pipefail
+              python - <<'PY'
+              import json
+              import requests
+              from datetime import datetime, timezone
+
+              base = "http://query-service:8002/api/v1"
+              snapshot = requests.post(
+                  f"{base}/value/kpi/snapshots",
+                  params={"time_window": "7 DAY", "source": "cronjob-weekly"},
+                  timeout=30,
+              )
+              snapshot.raise_for_status()
+              snapshot_data = snapshot.json()
+
+              alerts = requests.get(
+                  f"{base}/value/kpi/alerts",
+                  params={"time_window": "7 DAY"},
+                  timeout=30,
+              )
+              alerts.raise_for_status()
+              alerts_data = alerts.json()
+
+              print(json.dumps({
+                  "status": "ok",
+                  "generated_at": datetime.now(timezone.utc).isoformat(),
+                  "snapshot_id": snapshot_data.get("snapshot_id"),
+                  "active_alerts": alerts_data.get("active_alerts", 0),
+                  "alerts": alerts_data.get("alerts", []),
+              }, ensure_ascii=False))
+              PY
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "valueKpiCronjob") }}
+{{- end }}

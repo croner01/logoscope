@@ -1,0 +1,1127 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-keeper-headless
+  namespace: islap
+  labels:
+    app: clickhouse-keeper
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - name: client
+    port: 9181
+    targetPort: 9181
+  - name: raft
+    port: 9234
+    targetPort: 9234
+  selector:
+    app: clickhouse-keeper
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-keeper
+  namespace: islap
+  labels:
+    app: clickhouse-keeper
+spec:
+  type: ClusterIP
+  ports:
+  - name: client
+    port: 9181
+    targetPort: 9181
+  selector:
+    app: clickhouse-keeper
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-keeper-config
+  namespace: islap
+  labels:
+    app: clickhouse-keeper
+data:
+  keeper_config.xml: |
+    <clickhouse>
+      <logger>
+        <level>information</level>
+        <console>true</console>
+      </logger>
+      <listen_host>0.0.0.0</listen_host>
+      <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id from_env="KEEPER_SERVER_ID"/>
+        <log_storage_path>/var/lib/clickhouse-keeper/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/snapshots</snapshot_storage_path>
+        <coordination_settings>
+          <operation_timeout_ms>10000</operation_timeout_ms>
+          <session_timeout_ms>30000</session_timeout_ms>
+          <raft_logs_level>information</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+          <server>
+            <id>1</id>
+            <hostname>clickhouse-keeper-0.clickhouse-keeper-headless.islap.svc.cluster.local</hostname>
+            <port>9234</port>
+          </server>
+          <server>
+            <id>2</id>
+            <hostname>clickhouse-keeper-1.clickhouse-keeper-headless.islap.svc.cluster.local</hostname>
+            <port>9234</port>
+          </server>
+          <server>
+            <id>3</id>
+            <hostname>clickhouse-keeper-2.clickhouse-keeper-headless.islap.svc.cluster.local</hostname>
+            <port>9234</port>
+          </server>
+        </raft_configuration>
+      </keeper_server>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse-keeper
+  namespace: islap
+  labels:
+    app: clickhouse-keeper
+spec:
+  serviceName: clickhouse-keeper-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: clickhouse-keeper
+  template:
+    metadata:
+      labels:
+        app: clickhouse-keeper
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: clickhouse-keeper
+        image: localhost:5000/logoscope/clickhouse-server:25.6
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-ec"]
+        args:
+          - |
+            ordinal="${HOSTNAME##*-}"
+            export KEEPER_SERVER_ID="$((ordinal + 1))"
+            exec clickhouse-keeper --config-file=/etc/clickhouse-keeper/keeper_config.xml
+        ports:
+        - name: client
+          containerPort: 9181
+        - name: raft
+          containerPort: 9234
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse-keeper
+        - name: keeper-config
+          mountPath: /etc/clickhouse-keeper
+          readOnly: true
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        livenessProbe:
+          tcpSocket:
+            port: client
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        readinessProbe:
+          tcpSocket:
+            port: client
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 6
+      volumes:
+      - name: keeper-config
+        configMap:
+          name: clickhouse-keeper-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-headless
+  namespace: islap
+  labels:
+    app: clickhouse
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - port: 9000
+    name: native
+    protocol: TCP
+    targetPort: 9000
+  - port: 8123
+    name: http
+    protocol: TCP
+    targetPort: 8123
+  - port: 9009
+    name: interserver
+    protocol: TCP
+    targetPort: 9009
+  selector:
+    app: clickhouse
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: islap
+  labels:
+    app: clickhouse
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9000
+    name: native
+    protocol: TCP
+    targetPort: 9000
+  - port: 8123
+    name: http
+    protocol: TCP
+    targetPort: 8123
+  selector:
+    app: clickhouse
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-init
+  namespace: islap
+  labels:
+    app: clickhouse
+data:
+  init.sql: |
+    -- 创建 logs 数据库
+    CREATE DATABASE IF NOT EXISTS logs;
+    
+    -- 创建 events 表
+    CREATE TABLE IF NOT EXISTS logs.events (
+        id String,
+        timestamp DateTime64(9, 'UTC'),
+        entity_type String,
+        entity_name String,
+        event_type String,
+        level String,
+        content String,
+        trace_id String,
+        span_id String,
+        labels String,
+        host_ip String
+    ) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.events', '{replica}')
+    PARTITION BY toDate(timestamp)
+    ORDER BY (timestamp, entity_name, event_type)
+    TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    
+    -- 创建 logs 表（带物化列、跳数索引、projection）
+    CREATE TABLE IF NOT EXISTS logs.logs (
+        id String,
+        timestamp DateTime64(9, 'UTC'),
+        observed_timestamp DateTime64(9, 'UTC'),
+        trace_id String,
+        span_id String,
+        trace_flags UInt8,
+        service_name LowCardinality(String),
+        pod_name String,
+        namespace LowCardinality(String),
+        node_name String,
+        host_name String,
+        pod_id String,
+        container_name String,
+        container_id String,
+        container_image String,
+        level String,
+        level_norm LowCardinality(String) MATERIALIZED multiIf(
+            length(trim(BOTH ' ' FROM ifNull(level, ''))) = 0, 'OTHER',
+            upperUTF8(trim(BOTH ' ' FROM level)) = 'WARNING', 'WARN',
+            upperUTF8(trim(BOTH ' ' FROM level))
+        ),
+        severity_number UInt8,
+        flags UInt8,
+        message String,
+        labels String,
+        attributes_json String,
+        trace_id_source LowCardinality(String) MATERIALIZED lowerUTF8(ifNull(JSONExtractString(attributes_json, 'trace_id_source'), '')),
+        host_ip String,
+        cpu_limit String,
+        cpu_request String,
+        memory_limit String,
+        memory_request String,
+        INDEX idx_logs_id id TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_logs_trace_id trace_id TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_logs_span_id span_id TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_logs_level_norm level_norm TYPE set(128) GRANULARITY 1,
+        INDEX idx_logs_service_name service_name TYPE set(256) GRANULARITY 1,
+        INDEX idx_logs_namespace namespace TYPE set(256) GRANULARITY 1,
+        INDEX idx_logs_pod_name pod_name TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_logs_trace_id_source trace_id_source TYPE set(128) GRANULARITY 1,
+        INDEX idx_logs_message_token message TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
+        INDEX idx_logs_message_ngram message TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1,
+        PROJECTION proj_logs_trace_lookup
+        (
+            SELECT
+                id,
+                timestamp,
+                service_name,
+                level_norm,
+                message,
+                trace_id,
+                span_id,
+                pod_name,
+                namespace
+            ORDER BY (trace_id, timestamp, id)
+        ),
+        PROJECTION proj_logs_service_level_time
+        (
+            SELECT
+                timestamp,
+                service_name,
+                level_norm,
+                trace_id,
+                span_id,
+                id
+            ORDER BY (service_name, level_norm, timestamp, id)
+        ),
+        PROJECTION proj_logs_pod_ns_time
+        (
+            SELECT
+                id,
+                timestamp,
+                service_name,
+                level_norm,
+                pod_name,
+                namespace,
+                trace_id,
+                span_id
+            ORDER BY (pod_name, namespace, timestamp, id)
+        )
+    ) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.logs', '{replica}')
+    PARTITION BY toDate(timestamp)
+    ORDER BY (timestamp, service_name, trace_id, span_id, id)
+    TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    
+    -- 历史集群增量补齐 logs 过滤索引（覆盖 service_name/namespace 查询）
+    ALTER TABLE logs.logs
+    ADD INDEX IF NOT EXISTS idx_logs_service_name service_name TYPE set(256) GRANULARITY 1;
+    
+    ALTER TABLE logs.logs
+    ADD INDEX IF NOT EXISTS idx_logs_namespace namespace TYPE set(256) GRANULARITY 1;
+    
+    ALTER TABLE logs.logs
+    ADD INDEX IF NOT EXISTS idx_logs_id id TYPE bloom_filter(0.01) GRANULARITY 4;
+    
+    ALTER TABLE logs.logs
+    ADD INDEX IF NOT EXISTS idx_logs_pod_name pod_name TYPE bloom_filter(0.01) GRANULARITY 4;
+    
+    -- 创建 traces 表（带跳数索引、projection）
+    CREATE TABLE IF NOT EXISTS logs.traces (
+        timestamp DateTime64(9, 'UTC'),
+        trace_id String,
+        span_id String,
+        parent_span_id String,
+        service_name LowCardinality(String),
+        operation_name String,
+        span_kind String,
+        status String,
+        duration_ms Float64 DEFAULT 0.0,
+        attributes_json String,
+        traces_namespace LowCardinality(String) MATERIALIZED multiIf(
+            length(JSONExtractString(attributes_json, 'k8s.namespace.name')) > 0,
+            JSONExtractString(attributes_json, 'k8s.namespace.name'),
+            length(JSONExtractString(attributes_json, 'service_namespace')) > 0,
+            JSONExtractString(attributes_json, 'service_namespace'),
+            JSONExtractString(attributes_json, 'namespace')
+        ),
+        events_json String,
+        links_json String,
+        INDEX idx_traces_trace_id trace_id TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_traces_span_id span_id TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_traces_parent_span_id parent_span_id TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_traces_service_name service_name TYPE set(256) GRANULARITY 1,
+        INDEX idx_traces_namespace traces_namespace TYPE set(256) GRANULARITY 1,
+        PROJECTION proj_traces_trace_lookup
+        (
+            SELECT
+                trace_id,
+                span_id,
+                parent_span_id,
+                timestamp,
+                service_name,
+                operation_name,
+                status,
+                duration_ms
+            ORDER BY (trace_id, timestamp, span_id)
+        )
+    ) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.traces', '{replica}')
+    PARTITION BY toDate(timestamp)
+    ORDER BY (timestamp, trace_id, span_id)
+    TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    
+    -- 历史集群增量补齐 traces_namespace（避免 namespace 查询回退到 JSONExtract）
+    ALTER TABLE logs.traces
+    ADD COLUMN IF NOT EXISTS traces_namespace LowCardinality(String)
+    MATERIALIZED multiIf(
+        length(JSONExtractString(attributes_json, 'k8s.namespace.name')) > 0,
+        JSONExtractString(attributes_json, 'k8s.namespace.name'),
+        length(JSONExtractString(attributes_json, 'service_namespace')) > 0,
+        JSONExtractString(attributes_json, 'service_namespace'),
+        JSONExtractString(attributes_json, 'namespace')
+    );
+    
+    ALTER TABLE logs.traces
+    ADD INDEX IF NOT EXISTS idx_traces_namespace traces_namespace TYPE set(256) GRANULARITY 1;
+    
+    -- 创建 metrics 表（与 deploy.sh init-db 保持一致）
+    CREATE TABLE IF NOT EXISTS logs.metrics (
+        timestamp DateTime64(9, 'UTC'),
+        service_name LowCardinality(String),
+        metric_name String,
+        metric_type String,
+        value_float64 Float64,
+        value_int64 Int64,
+        attributes_json String,
+        metrics_namespace LowCardinality(String) MATERIALIZED if(
+            length(JSONExtractString(attributes_json, 'service_namespace')) > 0,
+            JSONExtractString(attributes_json, 'service_namespace'),
+            JSONExtractString(attributes_json, 'namespace')
+        ),
+        data_point_count UInt32,
+        INDEX idx_metrics_metric_name metric_name TYPE bloom_filter(0.01) GRANULARITY 4,
+        INDEX idx_metrics_namespace metrics_namespace TYPE set(256) GRANULARITY 1
+    ) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.metrics', '{replica}')
+    PARTITION BY toDate(timestamp)
+    ORDER BY (timestamp, service_name, metric_name)
+    TTL toDateTime(timestamp) + INTERVAL 7 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    
+    -- 历史集群增量补齐 metrics_namespace（避免旧表缺列导致回退 JSONExtract）
+    ALTER TABLE logs.metrics
+    ADD COLUMN IF NOT EXISTS metrics_namespace LowCardinality(String)
+    MATERIALIZED if(
+        length(JSONExtractString(attributes_json, 'service_namespace')) > 0,
+        JSONExtractString(attributes_json, 'service_namespace'),
+        JSONExtractString(attributes_json, 'namespace')
+    );
+    
+    ALTER TABLE logs.metrics
+    ADD INDEX IF NOT EXISTS idx_metrics_namespace metrics_namespace TYPE set(256) GRANULARITY 1;
+    
+    ALTER TABLE logs.metrics
+    ADD INDEX IF NOT EXISTS idx_metrics_metric_name metric_name TYPE bloom_filter(0.01) GRANULARITY 4;
+    
+    -- 创建 observability 预聚合表 v2（标准化两表模型）
+    CREATE TABLE IF NOT EXISTS logs.obs_counts_1m (
+        ts_minute DateTime('UTC'),
+        signal Enum8('log' = 1, 'metric' = 2),
+        service_name LowCardinality(String),
+        dim_name LowCardinality(String),
+        dim_value String,
+        count UInt64,
+        error_count UInt64
+    ) ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/logs.obs_counts_1m', '{replica}')
+    PARTITION BY toDate(ts_minute)
+    ORDER BY (signal, ts_minute, service_name, dim_name, dim_value)
+    TTL ts_minute + INTERVAL 30 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    
+    CREATE TABLE IF NOT EXISTS logs.obs_traces_1m (
+        ts_minute DateTime('UTC'),
+        service_name LowCardinality(String),
+        operation_name String,
+        span_count_state AggregateFunction(sum, UInt64),
+        error_span_count_state AggregateFunction(sum, UInt64),
+        trace_id_state AggregateFunction(uniqCombined64, String),
+        error_trace_id_state AggregateFunction(uniqCombined64, String)
+    ) ENGINE = ReplicatedAggregatingMergeTree('/clickhouse/tables/{shard}/logs.obs_traces_1m', '{replica}')
+    PARTITION BY toDate(ts_minute)
+    ORDER BY (ts_minute, service_name, operation_name)
+    TTL ts_minute + INTERVAL 30 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    
+    CREATE MATERIALIZED VIEW IF NOT EXISTS logs.mv_obs_counts_1m_from_logs
+    TO logs.obs_counts_1m
+    AS
+    WITH multiIf(
+        length(trim(BOTH ' ' FROM ifNull(level, ''))) = 0, 'OTHER',
+        upperUTF8(trim(BOTH ' ' FROM level)) = 'WARNING', 'WARN',
+        upperUTF8(trim(BOTH ' ' FROM level))
+    ) AS level_norm_safe
+    SELECT
+        toStartOfMinute(timestamp) AS ts_minute,
+        CAST('log', 'Enum8(\'log\' = 1, \'metric\' = 2)') AS signal,
+        service_name,
+        'level' AS dim_name,
+        level_norm_safe AS dim_value,
+        count() AS count,
+        countIf(level_norm_safe IN ('ERROR', 'FATAL')) AS error_count
+    FROM logs.logs
+    GROUP BY ts_minute, service_name, dim_value;
+    
+    CREATE MATERIALIZED VIEW IF NOT EXISTS logs.mv_obs_counts_1m_from_metrics
+    TO logs.obs_counts_1m
+    AS
+    SELECT
+        toStartOfMinute(timestamp) AS ts_minute,
+        CAST('metric', 'Enum8(\'log\' = 1, \'metric\' = 2)') AS signal,
+        service_name,
+        'metric_name' AS dim_name,
+        metric_name AS dim_value,
+        count() AS count,
+        toUInt64(0) AS error_count
+    FROM logs.metrics
+    GROUP BY ts_minute, service_name, dim_value;
+    
+    CREATE MATERIALIZED VIEW IF NOT EXISTS logs.mv_obs_traces_1m_from_traces
+    TO logs.obs_traces_1m
+    AS
+    SELECT
+        toStartOfMinute(timestamp) AS ts_minute,
+        service_name,
+        operation_name,
+        sumState(toUInt64(1)) AS span_count_state,
+        sumState(toUInt64(if(toString(status) IN ('2', 'STATUS_CODE_ERROR', 'ERROR'), 1, 0))) AS error_span_count_state,
+        uniqCombined64State(trace_id) AS trace_id_state,
+        uniqCombined64StateIf(trace_id, toString(status) IN ('2', 'STATUS_CODE_ERROR', 'ERROR')) AS error_trace_id_state
+    FROM logs.traces
+    GROUP BY ts_minute, service_name, operation_name;
+    
+    -- AI 会话与消息表
+    CREATE TABLE IF NOT EXISTS logs.ai_analysis_sessions (
+        session_id String,
+        analysis_type String,
+        title String,
+        service_name String,
+        input_text String,
+        trace_id String,
+        summary_text String,
+        context_json String,
+        result_json String,
+        analysis_method String,
+        llm_model String,
+        llm_provider String,
+        source String,
+        status String,
+        created_at DateTime64(3, 'UTC'),
+        updated_at DateTime64(3, 'UTC'),
+        is_pinned UInt8 DEFAULT 0,
+        is_archived UInt8 DEFAULT 0,
+        is_deleted UInt8 DEFAULT 0
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.ai_analysis_sessions', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (session_id)
+    SETTINGS index_granularity = 8192;
+    
+    CREATE TABLE IF NOT EXISTS logs.ai_analysis_messages (
+        session_id String,
+        message_id String,
+        msg_index UInt32,
+        role String,
+        content String,
+        metadata_json String,
+        created_at DateTime64(3, 'UTC')
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.ai_analysis_messages', '{replica}')
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (session_id, msg_index, created_at, message_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.ai_agent_runs (
+        run_id String,
+        session_id String,
+        analysis_type String,
+        engine String,
+        runtime_version String,
+        user_message_id String,
+        assistant_message_id String,
+        service_name String,
+        trace_id String,
+        status String,
+        input_json String,
+        context_json String,
+        summary_json String,
+        error_code String,
+        error_detail String,
+        created_at DateTime64(3, 'UTC'),
+        updated_at DateTime64(3, 'UTC'),
+        ended_at Nullable(DateTime64(3, 'UTC'))
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.ai_agent_runs', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (run_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.ai_agent_run_events (
+        run_id String,
+        event_id String,
+        seq UInt64,
+        event_type String,
+        payload_json String,
+        created_at DateTime64(3, 'UTC')
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.ai_agent_run_events', '{replica}')
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (run_id, seq, created_at, event_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.ai_agent_tool_calls (
+        tool_call_id String,
+        run_id String,
+        step_id String,
+        tool_name String,
+        title String,
+        status String,
+        input_json String,
+        result_json String,
+        error_code String,
+        error_detail String,
+        started_at DateTime64(3, 'UTC'),
+        updated_at DateTime64(3, 'UTC'),
+        ended_at Nullable(DateTime64(3, 'UTC'))
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.ai_agent_tool_calls', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(started_at)
+    ORDER BY (run_id, tool_call_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.ai_agent_command_runs (
+        command_run_id String,
+        run_id String,
+        tool_call_id String,
+        message_id String,
+        action_id String,
+        command String,
+        command_type String,
+        risk_level String,
+        status String,
+        requires_confirmation UInt8 DEFAULT 0,
+        requires_elevation UInt8 DEFAULT 0,
+        exit_code Int32 DEFAULT 0,
+        timed_out UInt8 DEFAULT 0,
+        output_truncated UInt8 DEFAULT 0,
+        error_code String,
+        error_detail String,
+        started_at DateTime64(3, 'UTC'),
+        updated_at DateTime64(3, 'UTC'),
+        ended_at Nullable(DateTime64(3, 'UTC'))
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.ai_agent_command_runs', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(started_at)
+    ORDER BY (run_id, command_run_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.ai_agent_command_events (
+        command_run_id String,
+        seq UInt64,
+        event_type String,
+        stream String,
+        text String,
+        payload_json String,
+        created_at DateTime64(3, 'UTC')
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.ai_agent_command_events', '{replica}')
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (command_run_id, seq, created_at)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.exec_command_runs (
+        run_id String,
+        status LowCardinality(String),
+        created_at DateTime64(3, 'UTC'),
+        updated_at DateTime64(3, 'UTC'),
+        record_json String
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.exec_command_runs', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (run_id, updated_at)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.exec_command_events (
+        run_id String,
+        event_id String,
+        seq UInt64,
+        event_type LowCardinality(String),
+        created_at DateTime64(3, 'UTC'),
+        record_json String
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.exec_command_events', '{replica}')
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (run_id, seq, created_at, event_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE TABLE IF NOT EXISTS logs.exec_command_audits (
+        run_id String,
+        audit_id String,
+        created_at DateTime64(3, 'UTC'),
+        record_json String
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.exec_command_audits', '{replica}')
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (run_id, created_at, audit_id)
+    SETTINGS index_granularity = 8192;
+
+    CREATE VIEW IF NOT EXISTS logs.v_ai_agent_runs_latest AS
+    SELECT
+        run_id,
+        argMax(session_id, _updated_at) AS session_id,
+        argMax(analysis_type, _updated_at) AS analysis_type,
+        argMax(engine, _updated_at) AS engine,
+        argMax(runtime_version, _updated_at) AS runtime_version,
+        argMax(user_message_id, _updated_at) AS user_message_id,
+        argMax(assistant_message_id, _updated_at) AS assistant_message_id,
+        argMax(service_name, _updated_at) AS service_name,
+        argMax(trace_id, _updated_at) AS trace_id,
+        argMax(status, _updated_at) AS status,
+        argMax(input_json, _updated_at) AS input_json,
+        argMax(context_json, _updated_at) AS context_json,
+        argMax(summary_json, _updated_at) AS summary_json,
+        argMax(error_code, _updated_at) AS error_code,
+        argMax(error_detail, _updated_at) AS error_detail,
+        max(created_at) AS created_at,
+        max(_updated_at) AS updated_at,
+        argMax(ended_at, _updated_at) AS ended_at
+    FROM
+    (
+        SELECT *, updated_at AS _updated_at
+        FROM logs.ai_agent_runs
+    )
+    GROUP BY run_id;
+
+    CREATE VIEW IF NOT EXISTS logs.v_ai_agent_tool_calls_latest AS
+    SELECT
+        tool_call_id,
+        argMax(run_id, _updated_at) AS run_id,
+        argMax(step_id, _updated_at) AS step_id,
+        argMax(tool_name, _updated_at) AS tool_name,
+        argMax(title, _updated_at) AS title,
+        argMax(status, _updated_at) AS status,
+        argMax(input_json, _updated_at) AS input_json,
+        argMax(result_json, _updated_at) AS result_json,
+        argMax(error_code, _updated_at) AS error_code,
+        argMax(error_detail, _updated_at) AS error_detail,
+        max(started_at) AS started_at,
+        max(_updated_at) AS updated_at,
+        argMax(ended_at, _updated_at) AS ended_at
+    FROM
+    (
+        SELECT *, updated_at AS _updated_at
+        FROM logs.ai_agent_tool_calls
+    )
+    GROUP BY tool_call_id;
+
+    CREATE VIEW IF NOT EXISTS logs.v_ai_agent_command_runs_latest AS
+    SELECT
+        command_run_id,
+        argMax(run_id, _updated_at) AS run_id,
+        argMax(tool_call_id, _updated_at) AS tool_call_id,
+        argMax(message_id, _updated_at) AS message_id,
+        argMax(action_id, _updated_at) AS action_id,
+        argMax(command, _updated_at) AS command,
+        argMax(command_type, _updated_at) AS command_type,
+        argMax(risk_level, _updated_at) AS risk_level,
+        argMax(status, _updated_at) AS status,
+        argMax(requires_confirmation, _updated_at) AS requires_confirmation,
+        argMax(requires_elevation, _updated_at) AS requires_elevation,
+        argMax(exit_code, _updated_at) AS exit_code,
+        argMax(timed_out, _updated_at) AS timed_out,
+        argMax(output_truncated, _updated_at) AS output_truncated,
+        argMax(error_code, _updated_at) AS error_code,
+        argMax(error_detail, _updated_at) AS error_detail,
+        max(started_at) AS started_at,
+        max(_updated_at) AS updated_at,
+        argMax(ended_at, _updated_at) AS ended_at
+    FROM
+    (
+        SELECT *, updated_at AS _updated_at
+        FROM logs.ai_agent_command_runs
+    )
+    GROUP BY command_run_id;
+    
+    -- AI 知识库与变更历史表
+    CREATE TABLE IF NOT EXISTS logs.ai_cases (
+        case_id String,
+        problem_type String,
+        severity String,
+        summary String,
+        log_content String,
+        service_name String,
+        root_causes_json String,
+        solutions_json String,
+        context_json String,
+        tags_json String,
+        similarity_features_json String,
+        resolved UInt8,
+        resolution String,
+        created_at DateTime64(3, 'UTC'),
+        updated_at DateTime64(3, 'UTC'),
+        resolved_at Nullable(DateTime64(3, 'UTC')),
+        llm_provider String,
+        llm_model String,
+        llm_metadata_json String,
+        source String,
+        is_deleted UInt8 DEFAULT 0
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.ai_cases', '{replica}', updated_at)
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (case_id)
+    SETTINGS index_granularity = 8192;
+    
+    CREATE TABLE IF NOT EXISTS logs.ai_case_change_history (
+        event_id String,
+        case_id String,
+        event_type String,
+        version UInt32,
+        editor String,
+        changed_fields_json String,
+        changes_json String,
+        requested_fields_json String,
+        unchanged_requested_fields_json String,
+        no_effective_change_reason String,
+        effective_save_mode String,
+        sync_status String,
+        sync_error_code String,
+        note String,
+        source String,
+        created_at DateTime64(3, 'UTC')
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.ai_case_change_history', '{replica}')
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (case_id, created_at, event_id)
+    SETTINGS index_granularity = 8192;
+    
+    -- Value KPI 快照与发布门禁报告表
+    CREATE TABLE IF NOT EXISTS logs.value_kpi_snapshots (
+        snapshot_id String,
+        source String,
+        time_window String,
+        window_start DateTime64(3, 'UTC'),
+        window_end DateTime64(3, 'UTC'),
+        mttd_minutes Float64,
+        mttr_minutes Float64,
+        trace_log_correlation_rate Float64,
+        topology_coverage_rate Float64,
+        release_regression_pass_rate Float64,
+        incident_count UInt32,
+        release_gate_total UInt32,
+        release_gate_passed UInt32,
+        release_gate_failed UInt32,
+        release_gate_bypassed UInt32,
+        created_at DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.value_kpi_snapshots', '{replica}')
+    ORDER BY (created_at, snapshot_id)
+    SETTINGS index_granularity = 8192;
+    
+    CREATE TABLE IF NOT EXISTS logs.release_gate_reports (
+        gate_id String,
+        candidate String,
+        tag String,
+        target String,
+        started_at DateTime64(3, 'UTC'),
+        finished_at DateTime64(3, 'UTC'),
+        duration_ms UInt64,
+        status String,
+        trace_id String,
+        smoke_exit_code Int32,
+        trace_smoke_exit_code Int32 DEFAULT smoke_exit_code,
+        ai_contract_exit_code Int32 DEFAULT 0,
+        query_contract_exit_code Int32 DEFAULT 0,
+        sql_safety_exit_code Int32 DEFAULT 0,
+        data_retention_exit_code Int32 DEFAULT 0,
+        backend_pytest_exit_code Int32 DEFAULT 0,
+        p0p1_regression_exit_code Int32 DEFAULT 0,
+        perf_baseline_exit_code Int32 DEFAULT 0,
+        perf_trend_exit_code Int32 DEFAULT 0,
+        report_path String,
+        summary String,
+        created_at DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC')
+    )
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/logs.release_gate_reports', '{replica}')
+    ORDER BY (started_at, gate_id)
+    SETTINGS index_granularity = 8192;
+    
+    ALTER TABLE logs.ai_analysis_sessions
+        ADD COLUMN IF NOT EXISTS title String DEFAULT '',
+        ADD COLUMN IF NOT EXISTS summary_text String DEFAULT '',
+        ADD COLUMN IF NOT EXISTS latest_run_id String DEFAULT '',
+        ADD COLUMN IF NOT EXISTS runtime_version String DEFAULT '',
+        ADD COLUMN IF NOT EXISTS is_pinned UInt8 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS is_archived UInt8 DEFAULT 0;
+    
+    ALTER TABLE logs.ai_case_change_history
+        ADD COLUMN IF NOT EXISTS requested_fields_json String DEFAULT '',
+        ADD COLUMN IF NOT EXISTS unchanged_requested_fields_json String DEFAULT '',
+        ADD COLUMN IF NOT EXISTS no_effective_change_reason String DEFAULT '';
+    
+    ALTER TABLE logs.release_gate_reports
+        ADD COLUMN IF NOT EXISTS trace_smoke_exit_code Int32 DEFAULT smoke_exit_code,
+        ADD COLUMN IF NOT EXISTS ai_contract_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS query_contract_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS sql_safety_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS data_retention_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS backend_pytest_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS p0p1_regression_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS perf_baseline_exit_code Int32 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS perf_trend_exit_code Int32 DEFAULT 0;
+
+    -- Release 收敛：logs 子串检索与上下文 projection（与 release-1-hotfix.sql 对齐）
+    ALTER TABLE logs.logs
+    ADD INDEX IF NOT EXISTS idx_logs_message_ngram message TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1;
+
+    ALTER TABLE logs.logs
+    ADD PROJECTION IF NOT EXISTS proj_logs_pod_ns_time
+    (
+        SELECT
+            id, timestamp, service_name, level_norm, pod_name, namespace, trace_id, span_id
+        ORDER BY (pod_name, namespace, timestamp, id)
+    );
+
+    -- Release 收敛：trace edge 增量聚合基线（与 release-2/release-3 对齐）
+    CREATE TABLE IF NOT EXISTS logs.trace_edges_1m (
+        ts_minute DateTime('UTC'),
+        source_service LowCardinality(String),
+        target_service LowCardinality(String),
+        namespace LowCardinality(String) DEFAULT '',
+        call_count UInt64,
+        error_count UInt64,
+        avg_duration_ms Float64,
+        timeout_count UInt64 DEFAULT 0,
+        retries_sum Float64 DEFAULT 0,
+        pending_sum Float64 DEFAULT 0,
+        dlq_sum Float64 DEFAULT 0,
+        p95_ms Float64 DEFAULT 0,
+        p99_ms Float64 DEFAULT 0,
+        duration_sum_ms Float64 DEFAULT 0
+    )
+    ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/logs.trace_edges_1m', '{replica}')
+    PARTITION BY toDate(ts_minute)
+    ORDER BY (ts_minute, source_service, target_service)
+    TTL ts_minute + INTERVAL 30 DAY DELETE
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+    ALTER TABLE logs.trace_edges_1m
+        ADD COLUMN IF NOT EXISTS namespace LowCardinality(String) DEFAULT '',
+        ADD COLUMN IF NOT EXISTS timeout_count UInt64 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS retries_sum Float64 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS pending_sum Float64 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS dlq_sum Float64 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS p95_ms Float64 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS p99_ms Float64 DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS duration_sum_ms Float64 DEFAULT 0;
+
+    CREATE TABLE IF NOT EXISTS logs.trace_edges_rollup_watermark (
+        id UInt8,
+        window_end DateTime('UTC'),
+        updated_at DateTime('UTC') DEFAULT now()
+    )
+    ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/logs.trace_edges_rollup_watermark', '{replica}', updated_at)
+    ORDER BY (id)
+    SETTINGS index_granularity = 256;
+
+    INSERT INTO logs.trace_edges_rollup_watermark (id, window_end, updated_at)
+    SELECT
+        1 AS id,
+        ifNull(
+            (SELECT max(ts_minute) FROM logs.trace_edges_1m),
+            toDateTime(toStartOfMinute(now()) - INTERVAL 10 MINUTE, 'UTC')
+        ) AS window_end,
+        now() AS updated_at
+    WHERE (SELECT count() FROM logs.trace_edges_rollup_watermark) = 0;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: islap
+  labels:
+    app: clickhouse
+data:
+  listen.xml: |
+    <clickhouse>
+      <listen_host>0.0.0.0</listen_host>
+      <interserver_http_host from_env="INTERSERVER_HTTP_HOST"/>
+      <interserver_http_port>9009</interserver_http_port>
+    </clickhouse>
+  cluster.xml: |
+    <clickhouse>
+      <zookeeper>
+        <node>
+          <host>clickhouse-keeper-0.clickhouse-keeper-headless.islap.svc.cluster.local</host>
+          <port>9181</port>
+        </node>
+        <node>
+          <host>clickhouse-keeper-1.clickhouse-keeper-headless.islap.svc.cluster.local</host>
+          <port>9181</port>
+        </node>
+        <node>
+          <host>clickhouse-keeper-2.clickhouse-keeper-headless.islap.svc.cluster.local</host>
+          <port>9181</port>
+        </node>
+      </zookeeper>
+      <remote_servers>
+        <logoscope_cluster>
+          <shard>
+            <internal_replication>true</internal_replication>
+            <replica>
+              <host>clickhouse-0.clickhouse-headless.islap.svc.cluster.local</host>
+              <port>9000</port>
+            </replica>
+            <replica>
+              <host>clickhouse-1.clickhouse-headless.islap.svc.cluster.local</host>
+              <port>9000</port>
+            </replica>
+            <replica>
+              <host>clickhouse-2.clickhouse-headless.islap.svc.cluster.local</host>
+              <port>9000</port>
+            </replica>
+          </shard>
+        </logoscope_cluster>
+      </remote_servers>
+      <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+      </distributed_ddl>
+    </clickhouse>
+  macros.xml: |
+    <clickhouse>
+      <macros>
+        <cluster>logoscope_cluster</cluster>
+        <shard>01</shard>
+        <replica from_env="HOSTNAME"/>
+      </macros>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: islap
+  labels:
+    app: clickhouse
+spec:
+  serviceName: clickhouse-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: clickhouse
+        image: localhost:5000/logoscope/clickhouse-server:25.6
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9000
+          name: native
+          protocol: TCP
+        - containerPort: 8123
+          name: http
+          protocol: TCP
+        - containerPort: 9009
+          name: interserver
+          protocol: TCP
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: INTERSERVER_HTTP_HOST
+          value: "$(POD_NAME).clickhouse-headless.$(POD_NAMESPACE).svc.cluster.local"
+        - name: CLICKHOUSE_DB
+          value: "logs"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          value: ""
+        - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+          value: "1"
+        - name: CLICKHOUSE_HTTP_PORT
+          value: "8123"
+        - name: CLICKHOUSE_TCP_PORT
+          value: "9000"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        - name: init
+          mountPath: /docker-entrypoint-initdb.d
+        - name: config
+          mountPath: /etc/clickhouse-server/config.d
+          readOnly: true
+        resources:
+          requests:
+            cpu: 1
+            memory: 2Gi
+          limits:
+            cpu: 2
+            memory: 4Gi
+        startupProbe:
+          exec:
+            command: ["/bin/bash", "-ec", "clickhouse-client --query 'SELECT 1'"]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 60
+        livenessProbe:
+          exec:
+            command: ["/bin/bash", "-ec", "clickhouse-client --query 'SELECT 1'"]
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          exec:
+            command: ["/bin/bash", "-ec", "clickhouse-client --query 'SELECT 1'"]
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+      volumes:
+      - name: init
+        configMap:
+          name: clickhouse-init
+      - name: config
+        configMap:
+          name: clickhouse-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 100Gi

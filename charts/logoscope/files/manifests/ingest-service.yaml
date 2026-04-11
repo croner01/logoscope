@@ -1,0 +1,176 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest-service
+  namespace: islap
+  labels:
+    app: ingest-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    name: http
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: ingest-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-service
+  namespace: islap
+  labels:
+    app: ingest-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ingest-service
+  template:
+    metadata:
+      labels:
+        app: ingest-service
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+      - name: ingest-service
+        image: localhost:5000/logoscope/ingest-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        # 应用配置
+        - name: APP_NAME
+          value: "ingest-service"
+        - name: APP_VERSION
+          value: "1.0.0"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: PORT
+          value: "8080"
+        - name: DEBUG
+          value: "false"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONFAULTHANDLER
+          value: "1"
+        - name: PYTHONPATH
+          value: "/app/shared_lib"
+        - name: TZ
+          value: "UTC"
+        # 队列后端配置
+        - name: QUEUE_BACKEND
+          value: "kafka"
+        # Kafka 配置（主队列）
+        - name: KAFKA_BROKERS
+          value: "kafka:9092"
+        - name: KAFKA_REQUIRED_ACKS
+          value: "all"
+        - name: KAFKA_WRITE_MODE
+          value: "async"
+        - name: KAFKA_DIAL_TIMEOUT_SEC
+          value: "3"
+        - name: KAFKA_WRITE_TIMEOUT_SEC
+          value: "5"
+        - name: KAFKA_PING_INTERVAL_SEC
+          value: "5"
+        - name: KAFKA_RECONNECT_INTERVAL_SEC
+          value: "5"
+        - name: KAFKA_MAX_RECONNECT_ATTEMPTS
+          value: "3"
+        - name: KAFKA_BATCH_SIZE
+          value: "500"
+        - name: KAFKA_BATCH_BYTES
+          value: "1048576"
+        - name: KAFKA_BATCH_TIMEOUT_MS
+          value: "20"
+        - name: KAFKA_TOPIC_LOGS
+          value: "logs.raw"
+        - name: KAFKA_TOPIC_METRICS
+          value: "metrics.raw"
+        - name: KAFKA_TOPIC_TRACES
+          value: "traces.raw"
+        - name: QUEUE_FLUSH_INTERVAL_MS
+          value: "50"
+        - name: SHUTDOWN_TIMEOUT_SEC
+          value: "120"
+        - name: WAL_ENABLED
+          value: "true"
+        - name: WAL_DIR
+          value: "/var/lib/ingest/wal"
+        - name: WAL_FILE_NAME
+          value: "queue.wal"
+        - name: WAL_SYNC_EVERY
+          value: "1"
+        - name: QUEUE_LOG_RECORD_BATCH_SIZE
+          value: "80"
+        # 处理配置
+        - name: BATCH_SIZE
+          value: "100"
+        - name: BATCH_TIMEOUT
+          value: "5"
+        - name: LOG_LEVEL
+          value: "info"
+        # 内存队列配置（降级方案）
+        - name: MEMORY_QUEUE_MAX_SIZE
+          value: "20000"
+        - name: MEMORY_QUEUE_FLUSH_BATCH_SIZE
+          value: "1000"
+        - name: MEMORY_QUEUE_DROP_OLDEST_WHEN_FULL
+          value: "false"
+        volumeMounts:
+        - name: ingest-wal
+          mountPath: /var/lib/ingest/wal
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: ingest-wal
+        emptyDir: {}
+      # 重启策略
+      restartPolicy: Always
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ingest-service-hpa
+  namespace: islap
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ingest-service
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

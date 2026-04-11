@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: logoscope-tests
+  namespace: logoscope
+spec:
+  restartPolicy: Never
+  containers:
+  - name: test
+    image: localhost:5000/logoscope/semantic-engine:2.0.0
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        cd /app
+        
+        # Install pytest
+        pip install --no-cache-dir pytest pytest-asyncio mock
+        
+        # Run tests
+        echo "=== Running BaseConfig tests ==="
+        python3 -c "
+import sys
+sys.path.insert(0, 'shared_src')
+from config.base import BaseConfig
+
+# Test 1: Default values
+config = BaseConfig(app_name='test', default_port=9000)
+assert config.app_name == 'test'
+assert config.port == 9000
+assert config.host == '0.0.0.0'
+print('✓ Default values test passed')
+
+# Test 2: Port parsing
+assert BaseConfig._parse_port('9000') == 9000
+assert BaseConfig._parse_port('tcp://host:9000') == 9000
+print('✓ Port parsing test passed')
+
+# Test 3: ClickHouse config
+config = BaseConfig()
+ch = config.get_clickhouse_config()
+assert 'host' in ch
+assert 'port' in ch
+print('✓ ClickHouse config test passed')
+
+# Test 4: Neo4j config
+neo4j = config.get_neo4j_config()
+assert 'host' in neo4j
+assert 'port' in neo4j
+print('✓ Neo4j config test passed')
+
+print('')
+print('=== All BaseConfig tests PASSED ===')
+"
+        
+        echo ""
+        echo "=== Running BatchClickHouseWriter tests ==="
+        python3 -c "
+import sys
+sys.path.insert(0, 'shared_src')
+from batch.clickhouse_writer import BatchClickHouseWriter, MultiTableBatchWriter
+
+class MockClient:
+    def __init__(self):
+        self.inserted = []
+    def execute(self, query, data=None):
+        if data:
+            self.inserted.extend(data)
+        return []
+
+# Test 1: Default params
+client = MockClient()
+writer = BatchClickHouseWriter(client, 'test')
+assert writer.batch_size == 2000
+assert writer.flush_interval == 0.5
+print('✓ Default params test passed')
+
+# Test 2: Custom params
+writer2 = BatchClickHouseWriter(client, 'test', batch_size=100, flush_interval=0.1)
+assert writer2.batch_size == 100
+print('✓ Custom params test passed')
+
+# Test 3: Add single row
+writer3 = BatchClickHouseWriter(client, 'test', batch_size=5)
+writer3.add(['id1', 'data1'])
+assert len(writer3._buffer) == 1
+print('✓ Add single row test passed')
+
+# Test 4: Trigger flush
+writer4 = BatchClickHouseWriter(client, 'test', batch_size=3)
+writer4.add(['id1', 'data1'])
+writer4.add(['id2', 'data2'])
+writer4.add(['id3', 'data3'])
+assert len(writer4._buffer) == 0
+assert len(client.inserted) == 3
+print('✓ Trigger flush test passed')
+
+# Test 5: Manual flush
+client2 = MockClient()
+writer5 = BatchClickHouseWriter(client2, 'test', batch_size=100)
+writer5.add(['id1', 'data1'])
+writer5.flush()
+assert len(client2.inserted) == 1
+print('✓ Manual flush test passed')
+
+# Test 6: MultiTableBatchWriter
+client3 = MockClient()
+manager = MultiTableBatchWriter(client3)
+writer_a = manager.get_writer('table1')
+writer_b = manager.get_writer('table2')
+writer_a_again = manager.get_writer('table1')
+assert writer_a is writer_a_again
+assert writer_a is not writer_b
+print('✓ MultiTableBatchWriter test passed')
+
+print('')
+print('=== All BatchClickHouseWriter tests PASSED ===')
+"
+        
+        echo ""
+        echo "=========================================="
+        echo "=== ALL TESTS PASSED SUCCESSFULLY ==="
+        echo "=========================================="
+    env:
+    - name: CH_BATCH_SIZE
+      value: "2000"
+    - name: CH_FLUSH_INTERVAL
+      value: "0.5"

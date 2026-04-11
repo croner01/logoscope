@@ -1,0 +1,181 @@
+{{- if .Values.components.semanticEngine.enabled }}
+{{- $raw := `
+apiVersion: v1
+kind: Service
+metadata:
+  name: semantic-engine
+  namespace: islap
+  labels:
+    app: semantic-engine
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    name: http
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: semantic-engine
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semantic-engine
+  namespace: islap
+  labels:
+    app: semantic-engine
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: semantic-engine
+  template:
+    metadata:
+      labels:
+        app: semantic-engine
+    spec:
+      containers:
+      - name: semantic-engine
+        image: localhost:5000/logoscope/semantic-engine:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: APP_NAME
+          value: "semantic-engine"
+        - name: APP_VERSION
+          value: "1.0.0"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: PORT
+          value: "8080"
+        - name: DEBUG
+          value: "false"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONFAULTHANDLER
+          value: "1"
+        - name: PYTHONPATH
+          value: "/app/shared_lib"
+        - name: TZ
+          value: "UTC"
+        - name: CLICKHOUSE_HOST
+          value: "clickhouse"
+        - name: CLICKHOUSE_PORT
+          value: "9000"
+        - name: CLICKHOUSE_DATABASE
+          value: "logs"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          value: ""
+        - name: NEO4J_HOST
+          value: "neo4j"
+        - name: NEO4J_PORT
+          value: "7687"
+        - name: NEO4J_USER
+          value: "neo4j"
+        - name: NEO4J_PASSWORD
+          value: "password"
+        - name: NEO4J_DATABASE
+          value: "neo4j"
+        - name: PROCESS_BATCH_SIZE
+          value: "10"
+        - name: PROCESS_TIMEOUT
+          value: "30"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: ENABLE_PSEUDO_TRACE_ID_FALLBACK
+          value: "false"
+        # 队列配置
+        - name: USE_QUEUE
+          value: "true"  # 启用队列模式
+        - name: QUEUE_TYPE
+          value: "kafka"
+        - name: KAFKA_BROKERS
+          value: "kafka:9092"
+        - name: KAFKA_GROUP_ID
+          value: "log-workers"
+        - name: KAFKA_CLIENT_ID
+          value: "semantic-engine"
+        - name: KAFKA_AUTO_OFFSET_RESET
+          value: "earliest"
+        - name: KAFKA_POLL_TIMEOUT_MS
+          value: "1000"
+        - name: KAFKA_MAX_BATCH_SIZE
+          value: "200"
+        - name: KAFKA_MAX_RETRY_ATTEMPTS
+          value: "3"
+        - name: KAFKA_RETRY_DELAY_SECONDS
+          value: "2"
+        - name: CH_BATCH_SIZE
+          value: "2000"
+        - name: CH_FLUSH_INTERVAL
+          value: "0.5"
+        - name: CH_BATCH_ASYNC_INSERT
+          value: "true"
+        - name: CH_BATCH_WAIT_FOR_ASYNC_INSERT
+          value: "true"
+        - name: DLQ_ENABLED
+          value: "true"
+        # OpenTelemetry 分布式追踪配置
+        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "semantic-engine"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=semantic-engine,deployment.environment=production"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        - name: AI_SERVICE_BASE_URL
+          value: "http://ai-service:8090"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 10
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: semantic-engine-hpa
+  namespace: islap
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: semantic-engine
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "semanticEngine") }}
+{{- end }}

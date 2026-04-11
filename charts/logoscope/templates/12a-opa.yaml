@@ -1,0 +1,204 @@
+{{- if .Values.components.opa.enabled }}
+{{- $raw := `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-policy-runtime-command-v1
+  namespace: islap
+  labels:
+    app: opa
+    policy: runtime-command-v1
+data:
+  runtime-command-v1.rego: |
+    package runtime.command.v1
+
+    classification := object.get(input, "classification", {})
+    dispatch_preview := object.get(input, "dispatch_preview", {})
+    target_registry := object.get(input, "target_registry", {})
+    target := object.get(input, "target", {})
+    whitelist := object.get(input, "whitelist", {})
+    runtime_switches := object.get(input, "runtime_switches", {})
+
+    command_type := lower(object.get(classification, "command_type", "unknown"))
+    requires_write := object.get(classification, "requires_write_permission", false)
+    supported := object.get(classification, "supported", false)
+    dispatch_ready := object.get(dispatch_preview, "dispatch_ready", false)
+    dispatch_degraded := object.get(dispatch_preview, "dispatch_degraded", false)
+    whitelist_match := object.get(whitelist, "match", false)
+    target_unknown := object.get(target, "unknown_target", true)
+    target_registry_applied := object.get(target_registry, "applied", false)
+    target_registry_result := lower(object.get(target_registry, "result", ""))
+    target_registry_reason := object.get(target_registry, "reason", "")
+    missing_capabilities := object.get(target_registry, "missing_capabilities", [])
+    ambiguous_targets := object.get(target_registry, "ambiguous_targets", [])
+    exec_enabled := object.get(runtime_switches, "command_exec_enabled", false)
+    write_enabled := object.get(runtime_switches, "write_enabled", false)
+
+    is_write {
+      requires_write
+    }
+    is_write {
+      command_type == "repair"
+    }
+    is_write {
+      command_type == "mutation"
+    }
+
+    deny_by_switch {
+      not exec_enabled
+    }
+    deny_unsupported {
+      not supported
+    }
+    deny_dispatch {
+      not dispatch_ready
+    }
+    deny_dispatch {
+      dispatch_degraded
+    }
+    deny_write_switch {
+      is_write
+      not write_enabled
+    }
+
+    manual_by_target_registry {
+      target_registry_applied
+      target_registry_result == "manual_required"
+    }
+    manual_by_unknown_target {
+      target_unknown
+    }
+    query_needs_confirmation {
+      command_type == "query"
+      not whitelist_match
+    }
+
+    result = "deny" {
+      deny_by_switch
+    } else = "deny" {
+      deny_unsupported
+    } else = "deny" {
+      deny_dispatch
+    } else = "manual_required" {
+      manual_by_target_registry
+    } else = "manual_required" {
+      manual_by_unknown_target
+    } else = "deny" {
+      deny_write_switch
+    } else = "allow" {
+      is_write
+    } else = "confirm" {
+      query_needs_confirmation
+    } else = "allow" {
+      true
+    }
+
+    reason = "command execution disabled by runtime switch" {
+      deny_by_switch
+    } else = "unsupported command classification" {
+      deny_unsupported
+    } else = "dispatch executor unavailable" {
+      deny_dispatch
+    } else = sprintf("target registry requires manual approval: %v", [target_registry_reason]) {
+      manual_by_target_registry
+      target_registry_reason != ""
+    } else = sprintf(
+      "target registry requires manual approval: missing_capabilities=%v ambiguous_targets=%v",
+      [missing_capabilities, ambiguous_targets],
+    ) {
+      manual_by_target_registry
+    } else = "unknown target requires manual approval" {
+      manual_by_unknown_target
+    } else = "write command disabled by runtime switch" {
+      deny_write_switch
+    } else = "write command allowed by OPA; runtime approval gate still required" {
+      is_write
+    } else = "query is outside whitelist; confirmation required" {
+      query_needs_confirmation
+    } else = "allow by runtime.command.v1" {
+      true
+    }
+
+    package_name = "runtime.command.v1"
+    policy_version = "runtime-command-v1.2.0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa
+  namespace: islap
+  labels:
+    app: opa
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8181
+    targetPort: 8181
+    protocol: TCP
+    name: http
+  selector:
+    app: opa
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opa
+  namespace: islap
+  labels:
+    app: opa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opa
+  template:
+    metadata:
+      labels:
+        app: opa
+    spec:
+      containers:
+      - name: opa
+        image: docker.io/openpolicyagent/opa:0.63.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - run
+        - --server
+        - --addr=0.0.0.0:8181
+        - --log-level=info
+        - --set=decision_logs.console=true
+        - /policies
+        ports:
+        - containerPort: 8181
+          name: http
+        volumeMounts:
+        - name: opa-policy
+          mountPath: /policies
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8181
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8181
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      volumes:
+      - name: opa-policy
+        configMap:
+          name: opa-policy-runtime-command-v1
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "opa") }}
+{{- end }}

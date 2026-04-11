@@ -1,0 +1,48 @@
+# Deploy profile: Production (balanced throughput/reliability)
+#
+# Scope:
+# - Sync baseline for raw deploy manifests under deploy/
+# - Keep collection range unchanged (Fluent Bit untouched)
+#
+# Recommended usage:
+# 1) Use this in production for balanced reliability and performance.
+# 2) Sync keys into these manifests when needed:
+#    - deploy/ingest-service.yaml
+#    - deploy/semantic-engine.yaml
+#    - deploy/semantic-engine-worker.yaml
+
+components:
+  ingestService:
+    hpa:
+      minReplicas: 3
+      maxReplicas: 12
+    env:
+      MEMORY_QUEUE_MAX_SIZE: "12000"
+      QUEUE_LOG_RECORD_BATCH_SIZE: "200"
+      BATCH_SIZE: "120"
+      BATCH_TIMEOUT: "5"
+      MEMORY_QUEUE_DROP_OLDEST_WHEN_FULL: "false"
+
+  semanticEngine:
+    hpa:
+      minReplicas: 2
+      maxReplicas: 8
+    env:
+      CH_BATCH_SIZE: "2500"
+      CH_FLUSH_INTERVAL: "0.5"
+      CH_BATCH_ASYNC_INSERT: "true"
+      CH_BATCH_WAIT_FOR_ASYNC_INSERT: "true"
+      DLQ_ENABLED: "true"
+
+  semanticEngineWorker:
+    hpa:
+      minReplicas: 3
+      maxReplicas: 16
+    env:
+      DLQ_ENABLED: "true"
+      DLQ_MAX_RETRIES: "3"
+      CH_BATCH_SIZE: "3000"
+      CH_FLUSH_INTERVAL: "0.35"
+      CH_BATCH_ASYNC_INSERT: "true"
+      CH_BATCH_WAIT_FOR_ASYNC_INSERT: "true"
+      CH_BATCH_LOG_EVERY: "20"

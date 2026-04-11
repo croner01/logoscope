@@ -1,0 +1,123 @@
+# OTel 集成部署配置示例
+
+## 为现有服务添加 OTel 支持的 Deployment 配置
+
+### 示例: Semantic Engine（已完成）
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semantic-engine
+  namespace: islap
+spec:
+  template:
+    spec:
+      containers:
+      - name: semantic-engine
+        image: localhost:30500/logoscope/semantic-engine:v3.14.1-dedup-fix
+        env:
+        # ===== OpenTelemetry 配置 =====
+        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "semantic-engine"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=semantic-engine,deployment.environment=production"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        # ==================================
+        # ... 其他环境变量
+```
+
+### 示例: 为 log-processor 添加 OTel（待实施）
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-processor
+  namespace: logoscope
+spec:
+  template:
+    spec:
+      containers:
+      - name: log-processor
+        image: localhost:30500/logoscope/log-processor:v8-otel
+        env:
+        # ===== 新增 OpenTelemetry 配置 =====
+        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "log-processor"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=log-processor,deployment.environment=production,component=processor"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        # =====================================
+        # ... 原有环境变量保持不变
+        - name: DATABASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: log-processor-config
+              key: database-url
+        # ...
+```
+
+### 示例: 为 metrics-aggregator 添加 OTel
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-aggregator
+  namespace: logoscope
+spec:
+  template:
+    spec:
+      containers:
+      - name: metrics-aggregator
+        image: localhost:30500/logoscope/metrics-aggregator:v3-otel
+        env:
+        # ===== OpenTelemetry 配置 =====
+        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "metrics-aggregator"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=metrics-aggregator,deployment.environment=production,component=aggregator"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        # =====================================
+```
+
+## 关键配置说明
+
+### 必需环境变量
+
+| 变量名 | 说明 | 示例值 |
+|--------|------|--------|
+| `OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED` | 启用自动插桩 | `true` |
+| `OTEL_SERVICE_NAME` | 服务名称 | `log-processor` |
+| `OTEL_RESOURCE_ATTRIBUTES` | 资源属性 | `service.name=xxx,env=prod` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector 端点 | `http://otel-collector.islap.svc.cluster.local:4318` |
+
+### 可选环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `OTEL_TRACES_SAMPLER` | 采样器类型 | `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | 采样率 | `1.0` (100%) |
+| `OTEL_LOG_LEVEL` | 日志级别 | `info` |
+
+### DNS 解析
+
+**重要**: 使用完整的 Kubernetes 服务名：
+```
+http://otel-collector.islap.svc.cluster.local:4318
+
+而不是:
+http://otel-collector:4318
+```
+
+这样可以跨命名空间访问服务。

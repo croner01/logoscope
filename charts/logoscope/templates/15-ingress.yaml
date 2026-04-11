@@ -1,0 +1,53 @@
+{{- $frontend := index .Values.components "frontend" | default dict -}}
+{{- $ingress := index $frontend "ingress" | default dict -}}
+{{- if and (default false (index $frontend "enabled")) (default false (index $ingress "enabled")) -}}
+{{- $frontendService := index $frontend "service" | default dict -}}
+{{- $serviceName := default "frontend" (index $ingress "serviceName") -}}
+{{- $servicePort := int (coalesce (index $ingress "servicePort") (index $frontendService "port") 80) -}}
+{{- $hosts := index $ingress "hosts" | default list -}}
+{{- if eq (len $hosts) 0 -}}
+{{- fail "components.frontend.ingress.hosts must not be empty when ingress.enabled=true" -}}
+{{- end -}}
+{{- $ingressName := default "frontend-ingress" (index $ingress "name") -}}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $ingressName }}
+  namespace: {{ include "logoscope.namespace" $ }}
+  labels:
+    app.kubernetes.io/name: logoscope
+    app.kubernetes.io/component: frontend
+{{- with (index $ingress "annotations") }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+{{- end }}
+spec:
+{{- with (index $ingress "className") }}
+  ingressClassName: {{ . }}
+{{- end }}
+  rules:
+{{- range $host := $hosts }}
+{{- if (index $host "host") }}
+  - host: {{ index $host "host" | quote }}
+{{- else }}
+  -
+{{- end }}
+    http:
+      paths:
+{{- $paths := index $host "paths" | default (list (dict "path" "/" "pathType" "Prefix")) }}
+{{- range $path := $paths }}
+      - path: {{ default "/" (index $path "path") }}
+        pathType: {{ default "Prefix" (index $path "pathType") }}
+        backend:
+          service:
+            name: {{ default $serviceName (index $path "serviceName") }}
+            port:
+              number: {{ default $servicePort (index $path "servicePort") }}
+{{- end }}
+{{- end }}
+{{- with (index $ingress "tls") }}
+  tls:
+{{ toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}

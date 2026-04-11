@@ -1,0 +1,193 @@
+{{- if .Values.components.otelCollector.enabled }}
+{{- $raw := `
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: islap
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: islap
+  labels:
+    app: opentelemetry
+    component: otel-collector
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        timeout: 2s
+        send_batch_size: 2000
+        send_batch_max_size: 4000
+      memory_limiter:
+        limit_mib: 1500
+        spike_limit_mib: 512
+        check_interval: 2s
+
+    exporters:
+      otlphttp/otel-gateway-logs:
+        endpoint: http://otel-gateway.islap.svc.cluster.local:4318
+        tls:
+          insecure: true
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      otlphttp/otel-gateway-metrics:
+        endpoint: http://otel-gateway.islap.svc.cluster.local:4318
+        tls:
+          insecure: true
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      otlphttp/otel-gateway-traces:
+        endpoint: http://otel-gateway.islap.svc.cluster.local:4318
+        tls:
+          insecure: true
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/otel-gateway-traces]
+
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/otel-gateway-metrics]
+
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/otel-gateway-logs]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  namespace: islap
+  labels:
+    app: opentelemetry
+    component: otel-collector
+spec:
+  selector:
+    matchLabels:
+      app: opentelemetry
+      component: otel-collector
+  template:
+    metadata:
+      labels:
+        app: opentelemetry
+        component: otel-collector
+    spec:
+      serviceAccountName: otel-collector
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.91.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /otelcol-contrib
+        - --config=/etc/otelcol-contrib/otel-collector-config.yaml
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 4317  # OTLP gRPC receiver
+          protocol: TCP
+        - containerPort: 4318  # OTLP HTTP receiver
+          protocol: TCP
+        - containerPort: 8888  # Metrics endpoint
+          protocol: TCP
+        volumeMounts:
+        - name: otel-collector-config-vol
+          mountPath: /etc/otelcol-contrib
+        resources:
+          limits:
+            cpu: 500m
+            memory: 2048Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: otel-collector-config-vol
+        configMap:
+          name: otel-collector-config
+          items:
+          - key: otel-collector-config.yaml
+            path: otel-collector-config.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: islap
+  labels:
+    app: opentelemetry
+    component: otel-collector
+spec:
+  selector:
+    app: opentelemetry
+    component: otel-collector
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+    protocol: TCP
+  - name: otlp-http
+    port: 4318
+    targetPort: 4318
+    protocol: TCP
+  - name: metrics
+    port: 8888
+    targetPort: 8888
+    protocol: TCP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: islap
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "otelCollector") }}
+{{- end }}

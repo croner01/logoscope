@@ -1,0 +1,51 @@
+# Semantic Engine 依赖项
+
+# Web 框架
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# 数据验证
+pydantic==2.5.2
+pydantic-settings==2.1.0
+
+# 数据库客户端
+clickhouse-driver==0.2.10
+clickhouse-connect==0.6.10
+neo4j==5.14.0
+requests==2.31.0
+openai==1.63.0
+langchain-core==0.3.10
+
+# 监控指标
+prometheus-client==0.19.0
+
+# 错误和重试
+tenacity==8.2.3
+
+# 日志系统
+python-json-logger==2.0.7
+
+# 认证和授权
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# OpenTelemetry 支持（自动插桩）
+opentelemetry-api==1.22.0
+opentelemetry-sdk==1.22.0
+opentelemetry-instrumentation==0.43b0
+opentelemetry-instrumentation-fastapi==0.43b0
+opentelemetry-instrumentation-logging==0.43b0
+opentelemetry-instrumentation-requests==0.43b0
+opentelemetry-instrumentation-sqlalchemy==0.43b0
+opentelemetry-instrumentation-urllib==0.43b0
+opentelemetry-instrumentation-httpx==0.43b0
+opentelemetry-instrumentation-asgi==0.43b0
+opentelemetry-exporter-otlp==1.22.0
+opentelemetry-proto==1.22.0
+opentelemetry-semantic-conventions==0.43b0
+protobuf==4.25.1
+
+# 测试框架
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0

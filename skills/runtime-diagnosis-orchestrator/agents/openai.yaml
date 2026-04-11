@@ -1,0 +1,4 @@
+interface:
+  display_name: "Runtime Diagnosis Orchestrator"
+  short_description: "Orchestrate OpenStack, K8s, and host diagnosis runs"
+  default_prompt: "Use $runtime-diagnosis-orchestrator to plan and execute a cross-layer diagnosis run across OpenStack, Kubernetes, and system hosts."

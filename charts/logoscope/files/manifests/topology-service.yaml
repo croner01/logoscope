@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: topology-service
+  namespace: islap
+  labels:
+    app: topology-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8003
+    name: http
+    protocol: TCP
+    targetPort: 8003
+  selector:
+    app: topology-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: topology-service
+  namespace: islap
+  labels:
+    app: topology-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: topology-service
+  template:
+    metadata:
+      labels:
+        app: topology-service
+    spec:
+      containers:
+      - name: topology-service
+        image: localhost:5000/logoscope/topology-service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8003
+          name: http
+          protocol: TCP
+        env:
+        - name: APP_NAME
+          value: "topology-service"
+        - name: APP_VERSION
+          value: "1.0.0"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: PORT
+          value: "8003"
+        - name: DEBUG
+          value: "false"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONFAULTHANDLER
+          value: "1"
+        - name: PYTHONPATH
+          value: "/app/shared_lib"
+        - name: TZ
+          value: "UTC"
+        - name: CLICKHOUSE_HOST
+          value: "clickhouse"
+        - name: CLICKHOUSE_PORT
+          value: "9000"
+        - name: CLICKHOUSE_DATABASE
+          value: "logs"
+        - name: CLICKHOUSE_USER
+          value: "default"
+        - name: CLICKHOUSE_PASSWORD
+          value: ""
+        - name: NEO4J_HOST
+          value: "neo4j"
+        - name: NEO4J_PORT
+          value: "7687"
+        - name: NEO4J_USER
+          value: "neo4j"
+        - name: NEO4J_PASSWORD
+          value: "password"
+        - name: NEO4J_DATABASE
+          value: "neo4j"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: OTEL_ENABLED
+          value: "true"
+        - name: OTEL_SERVICE_NAME
+          value: "topology-service"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=topology-service,deployment.environment=production"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector.islap.svc.cluster.local:4318"
+        - name: SERVICE_NODE_SYNC_ENABLED
+          value: "true"
+        - name: SERVICE_NODE_SYNC_INTERVAL_SECONDS
+          value: "300"
+        - name: TOPOLOGY_BUILD_PROCESS_ISOLATION_ENABLED
+          value: "false"
+        - name: TOPOLOGY_BUILD_PROCESS_TIMEOUT_SECONDS
+          value: "10"
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 300m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 10
