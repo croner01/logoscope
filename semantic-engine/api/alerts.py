@@ -8,6 +8,7 @@ import binascii
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -27,9 +28,101 @@ _STORAGE_ADAPTER: Optional[StorageAdapter] = None
 _RULE_TABLE_NAME: Optional[str] = None
 _EVENT_TABLE_NAME: Optional[str] = None
 _NOTIFICATION_TABLE_NAME: Optional[str] = None
+_RULE_LATEST_VIEW_NAME: Optional[str] = None
+_EVENT_LATEST_VIEW_NAME: Optional[str] = None
 
 ACTIVE_EVENT_STATUSES: Set[str] = {"pending", "firing", "acknowledged", "silenced"}
 ALLOWED_NOTIFICATION_CHANNELS: Set[str] = {"inapp", "webhook"}
+EDGE_METRIC_NAMES: Set[str] = {
+    "edge_error_rate_5m",
+    "edge_error_count_5m",
+    "edge_call_count_5m",
+    "edge_p95_ms_5m",
+    "edge_p99_ms_5m",
+    "edge_timeout_rate_5m",
+    "edge_retries_per_call_5m",
+    "edge_pending_per_call_5m",
+    "edge_dlq_per_call_5m",
+}
+EDGE_MISSING_AS_ZERO_METRIC_NAMES: Set[str] = {"edge_call_count_5m"}
+SYNTHETIC_PROJECT_LOG_METRIC_NAMES: Set[str] = {
+    "log_error_count_5m",
+    "log_error_rate_5m",
+    "log_warn_error_rate_5m",
+    "error_rate",
+    "success_rate",
+}
+SYNTHETIC_PROJECT_TRACE_METRIC_NAMES: Set[str] = {
+    "trace_count_5m",
+    "trace_error_rate_5m",
+    "trace_p95_ms_5m",
+    "latency_p95_ms",
+}
+SYNTHETIC_PROJECT_METRIC_NAMES: Set[str] = (
+    SYNTHETIC_PROJECT_LOG_METRIC_NAMES | SYNTHETIC_PROJECT_TRACE_METRIC_NAMES
+)
+_SYNTHETIC_PROJECT_METRICS_CACHE: Dict[
+    Tuple[int, Tuple[str, ...]],
+    Tuple[float, Dict[Tuple[str, str, str], float]],
+] = {}
+
+
+def _resolve_synthetic_project_group_limit() -> int:
+    """Resolve max group count for synthetic project metrics query."""
+    raw_value = str(os.getenv("ALERT_SYNTHETIC_PROJECT_GROUP_LIMIT", "1000")).strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = 1000
+    return max(100, min(parsed, 5000))
+
+
+def _collect_required_synthetic_metric_names(rules: List["AlertRule"]) -> Set[str]:
+    """Collect synthetic project metric names required by enabled service rules."""
+    required: Set[str] = set()
+    for rule in rules:
+        metric_name = _normalize_optional_text(rule.metric_name)
+        if metric_name in SYNTHETIC_PROJECT_METRIC_NAMES:
+            required.add(metric_name)
+    return required
+
+
+def _build_synthetic_project_cache_key(
+    window_minutes: int,
+    required_metric_names: Set[str],
+) -> Tuple[int, Tuple[str, ...]]:
+    safe_minutes = max(1, int(window_minutes or 1))
+    metric_names = tuple(sorted(required_metric_names))
+    return safe_minutes, metric_names
+
+
+def _get_cached_synthetic_project_metrics(
+    window_minutes: int,
+    required_metric_names: Set[str],
+) -> Optional[Dict[Tuple[str, str, str], float]]:
+    if _SYNTHETIC_PROJECT_METRICS_CACHE_TTL_SECONDS <= 0:
+        return None
+    cache_key = _build_synthetic_project_cache_key(window_minutes, required_metric_names)
+    cached = _SYNTHETIC_PROJECT_METRICS_CACHE.get(cache_key)
+    if not cached:
+        return None
+    expire_at, payload = cached
+    if time.monotonic() >= expire_at:
+        _SYNTHETIC_PROJECT_METRICS_CACHE.pop(cache_key, None)
+        return None
+    return dict(payload)
+
+
+def _set_cached_synthetic_project_metrics(
+    window_minutes: int,
+    required_metric_names: Set[str],
+    metrics: Dict[Tuple[str, str, str], float],
+) -> None:
+    if _SYNTHETIC_PROJECT_METRICS_CACHE_TTL_SECONDS <= 0:
+        return
+    cache_key = _build_synthetic_project_cache_key(window_minutes, required_metric_names)
+    expire_at = time.monotonic() + float(_SYNTHETIC_PROJECT_METRICS_CACHE_TTL_SECONDS)
+    _SYNTHETIC_PROJECT_METRICS_CACHE[cache_key] = (expire_at, dict(metrics))
 
 
 # 告警规则数据模型
@@ -41,6 +134,9 @@ class AlertRule(BaseModel):
     description: Optional[str] = None
     metric_name: str
     service_name: Optional[str] = None
+    source_service: Optional[str] = None
+    target_service: Optional[str] = None
+    namespace: Optional[str] = None
     condition: str  # "gt", "lt", "eq", "gte", "lte"
     threshold: float
     duration: int = 60  # 持续时间（秒）
@@ -65,6 +161,9 @@ class AlertEvent(BaseModel):
     rule_name: str
     metric_name: str
     service_name: str
+    source_service: Optional[str] = None
+    target_service: Optional[str] = None
+    namespace: Optional[str] = None
     current_value: float
     threshold: float
     condition: str
@@ -91,6 +190,8 @@ class AlertRuleTemplate(BaseModel):
     name: str
     description: str
     metric_name: str
+    source_service: Optional[str] = None
+    target_service: Optional[str] = None
     condition: str
     threshold: float
     duration: int
@@ -105,6 +206,9 @@ class CreateRuleFromTemplateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     service_name: Optional[str] = None
+    source_service: Optional[str] = None
+    target_service: Optional[str] = None
+    namespace: Optional[str] = None
     threshold: Optional[float] = None
     duration: Optional[int] = None
     severity: Optional[str] = None
@@ -122,6 +226,149 @@ _alert_notifications: List[Dict[str, Any]] = []
 
 
 _RULE_TEMPLATES: List[AlertRuleTemplate] = [
+    AlertRuleTemplate(
+        id="project-log-error-rate-5m",
+        name="项目日志错误率(5m)",
+        description="最近 5 分钟日志错误率超过阈值时触发告警。",
+        metric_name="log_error_rate_5m",
+        condition="gt",
+        threshold=5.0,
+        duration=120,
+        severity="warning",
+        labels={"category": "logs", "preset": "project_standard"},
+    ),
+    AlertRuleTemplate(
+        id="project-log-error-count-5m",
+        name="项目日志错误频次(5m)",
+        description="最近 5 分钟错误日志数量超过阈值时触发告警。",
+        metric_name="log_error_count_5m",
+        condition="gt",
+        threshold=20.0,
+        duration=60,
+        severity="critical",
+        labels={"category": "logs", "preset": "project_standard"},
+    ),
+    AlertRuleTemplate(
+        id="project-trace-error-rate-5m",
+        name="链路错误率(5m)",
+        description="最近 5 分钟 Trace 错误率超过阈值时触发告警。",
+        metric_name="trace_error_rate_5m",
+        condition="gt",
+        threshold=5.0,
+        duration=120,
+        severity="warning",
+        labels={"category": "trace", "preset": "project_standard"},
+    ),
+    AlertRuleTemplate(
+        id="project-trace-p95-latency-5m",
+        name="链路 P95 延迟(5m)",
+        description="最近 5 分钟 Trace P95 延迟超过阈值时触发告警。",
+        metric_name="trace_p95_ms_5m",
+        condition="gt",
+        threshold=1000.0,
+        duration=180,
+        severity="warning",
+        labels={"category": "trace", "preset": "project_standard"},
+    ),
+    AlertRuleTemplate(
+        id="edge-error-rate-5m",
+        name="链路错误率(5m)",
+        description="最近 5 分钟固定链路错误率超过阈值时触发告警。",
+        metric_name="edge_error_rate_5m",
+        condition="gt",
+        threshold=5.0,
+        duration=120,
+        severity="warning",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-error-count-5m",
+        name="链路错误次数(5m)",
+        description="最近 5 分钟固定链路错误调用次数超过阈值时触发告警。",
+        metric_name="edge_error_count_5m",
+        condition="gt",
+        threshold=20.0,
+        duration=60,
+        severity="critical",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-call-count-low-5m",
+        name="链路调用量过低(5m)",
+        description="最近 5 分钟固定链路调用次数低于阈值时触发告警，可用于发现链路中断或流量骤降。",
+        metric_name="edge_call_count_5m",
+        condition="lt",
+        threshold=1.0,
+        duration=120,
+        severity="critical",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-p95-latency-5m",
+        name="链路 P95 延迟(5m)",
+        description="最近 5 分钟固定链路 P95 延迟超过阈值时触发告警。",
+        metric_name="edge_p95_ms_5m",
+        condition="gt",
+        threshold=1000.0,
+        duration=180,
+        severity="warning",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-p99-latency-5m",
+        name="链路 P99 延迟(5m)",
+        description="最近 5 分钟固定链路 P99 延迟超过阈值时触发告警。",
+        metric_name="edge_p99_ms_5m",
+        condition="gt",
+        threshold=2000.0,
+        duration=180,
+        severity="critical",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-timeout-rate-5m",
+        name="链路超时率(5m)",
+        description="最近 5 分钟固定链路超时率超过阈值时触发告警。",
+        metric_name="edge_timeout_rate_5m",
+        condition="gt",
+        threshold=2.0,
+        duration=120,
+        severity="warning",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-retries-per-call-5m",
+        name="链路重试密度(5m)",
+        description="最近 5 分钟固定链路平均每次调用的重试次数超过阈值时触发告警。",
+        metric_name="edge_retries_per_call_5m",
+        condition="gt",
+        threshold=0.1,
+        duration=120,
+        severity="warning",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-pending-per-call-5m",
+        name="链路积压密度(5m)",
+        description="最近 5 分钟固定链路平均每次调用的 pending 指标超过阈值时触发告警。",
+        metric_name="edge_pending_per_call_5m",
+        condition="gt",
+        threshold=0.1,
+        duration=120,
+        severity="warning",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
+    AlertRuleTemplate(
+        id="edge-dlq-per-call-5m",
+        name="链路死信密度(5m)",
+        description="最近 5 分钟固定链路平均每次调用的 DLQ 指标超过阈值时触发告警。",
+        metric_name="edge_dlq_per_call_5m",
+        condition="gt",
+        threshold=0.01,
+        duration=120,
+        severity="critical",
+        labels={"category": "edge", "preset": "project_standard", "scope": "edge"},
+    ),
     AlertRuleTemplate(
         id="high-error-rate",
         name="高错误率",
@@ -157,6 +404,24 @@ _RULE_TEMPLATES: List[AlertRuleTemplate] = [
     ),
 ]
 
+def _parse_int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(minimum, int(default))
+    try:
+        return max(minimum, int(str(raw).strip()))
+    except Exception:
+        logger.warning("Invalid integer env for %s=%s, fallback=%s", name, raw, default)
+        return max(minimum, int(default))
+
+
+_SYNTHETIC_METRIC_WINDOW_MINUTES = _parse_int_env("ALERT_SYNTHETIC_WINDOW_MINUTES", 5, minimum=1)
+_SYNTHETIC_PROJECT_METRICS_CACHE_TTL_SECONDS = _parse_int_env(
+    "ALERT_SYNTHETIC_CACHE_TTL_SECONDS",
+    20,
+    minimum=0,
+)
+
 
 def _is_mock_object(value: Any) -> bool:
     if value is None:
@@ -172,6 +437,44 @@ def _is_clickhouse_available() -> bool:
     if ch_client is None or _is_mock_object(ch_client):
         return False
     return hasattr(ch_client, "execute")
+
+
+def _split_table_name(table_name: str) -> Tuple[str, str]:
+    normalized = str(table_name or "").strip()
+    if "." in normalized:
+        db_name, tbl_name = normalized.split(".", 1)
+        return db_name, tbl_name
+    return "default", normalized
+
+
+def _table_exists(table_name: Optional[str]) -> bool:
+    if not _is_clickhouse_available() or not table_name:
+        return False
+    db_name, tbl_name = _split_table_name(table_name)
+    try:
+        rows = _STORAGE_ADAPTER.ch_client.execute(
+            """
+            SELECT count()
+            FROM system.tables
+            WHERE database = %(database)s
+              AND name = %(name)s
+            """,
+            {"database": db_name, "name": tbl_name},
+        )
+        return bool(rows and rows[0] and int(rows[0][0]) > 0)
+    except Exception:
+        return False
+
+
+def _resolve_latest_read_source(latest_view: Optional[str], fallback_table: Optional[str]) -> Tuple[str, bool]:
+    """
+    返回读取源与是否需要 FINAL：
+    - 优先 latest view（无需 FINAL）
+    - 回退明细表（使用 FINAL 保证 latest 语义）
+    """
+    if latest_view and _table_exists(latest_view):
+        return latest_view, False
+    return str(fallback_table or ""), True
 
 
 def _now_utc() -> datetime:
@@ -232,8 +535,316 @@ def _safe_json_loads(raw: Any, fallback: Any) -> Any:
         return fallback
 
 
+def _normalize_optional_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _normalize_namespace(value: Any) -> str:
+    text = str(value or "").strip()
+    return text or "unknown"
+
+
+def _namespace_from_labels(labels: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(labels, dict):
+        return None
+    candidates = [
+        labels.get("namespace"),
+        labels.get("k8s.namespace.name"),
+        labels.get("k8s_namespace_name"),
+        labels.get("k8s.namespace"),
+        labels.get("kubernetes.namespace_name"),
+        labels.get("service.namespace"),
+        labels.get("service_namespace"),
+    ]
+    for candidate in candidates:
+        text = _normalize_optional_text(candidate)
+        if text:
+            return text
+    return None
+
+
+def _merge_namespace_into_labels(labels: Dict[str, Any], namespace: Optional[str]) -> Dict[str, str]:
+    merged = dict(labels or {})
+    normalized_namespace = _normalize_optional_text(namespace)
+    if normalized_namespace:
+        merged["namespace"] = normalized_namespace
+    elif "namespace" in merged and not str(merged.get("namespace") or "").strip():
+        merged.pop("namespace", None)
+    return {str(k): str(v) for k, v in merged.items() if str(k).strip()}
+
+
+def _edge_services_from_labels(labels: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    if not isinstance(labels, dict):
+        return None, None
+    source_service = _normalize_optional_text(labels.get("source_service"))
+    target_service = _normalize_optional_text(labels.get("target_service"))
+    return source_service, target_service
+
+
+def _merge_edge_identity_into_labels(
+    labels: Dict[str, Any],
+    source_service: Optional[str],
+    target_service: Optional[str],
+) -> Dict[str, str]:
+    merged = dict(labels or {})
+    normalized_source = _normalize_optional_text(source_service)
+    normalized_target = _normalize_optional_text(target_service)
+    if normalized_source:
+        merged["source_service"] = normalized_source
+    else:
+        merged.pop("source_service", None)
+    if normalized_target:
+        merged["target_service"] = normalized_target
+    else:
+        merged.pop("target_service", None)
+    return {str(k): str(v) for k, v in merged.items() if str(k).strip()}
+
+
+def _compose_edge_service_name(
+    source_service: Optional[str],
+    target_service: Optional[str],
+    fallback_service_name: Optional[str] = None,
+) -> str:
+    normalized_source = _normalize_optional_text(source_service)
+    normalized_target = _normalize_optional_text(target_service)
+    if normalized_source and normalized_target:
+        return f"{normalized_source}->{normalized_target}"
+    if normalized_source:
+        return normalized_source
+    if normalized_target:
+        return normalized_target
+    return _normalize_optional_text(fallback_service_name) or "unknown"
+
+
+def _is_edge_metric_name(metric_name: Any) -> bool:
+    return _normalize_optional_text(metric_name) in EDGE_METRIC_NAMES
+
+
+def _is_edge_rule(rule: AlertRule) -> bool:
+    return bool(
+        _is_edge_metric_name(rule.metric_name)
+        or _normalize_optional_text(rule.source_service)
+        or _normalize_optional_text(rule.target_service)
+        or str((rule.labels or {}).get("scope") or "").strip().lower() == "edge"
+    )
+
+
+def _resolve_edge_metric_window_minutes(rule: AlertRule) -> int:
+    duration_seconds = max(0, int(rule.duration or 0))
+    duration_minutes = (duration_seconds + 59) // 60 if duration_seconds > 0 else 0
+    return max(5, _SYNTHETIC_METRIC_WINDOW_MINUTES, duration_minutes)
+
+
+def _should_zero_fill_edge_metric(rule: AlertRule) -> bool:
+    return bool(
+        _normalize_optional_text(rule.source_service)
+        and _normalize_optional_text(rule.target_service)
+        and _normalize_optional_text(rule.metric_name) in EDGE_MISSING_AS_ZERO_METRIC_NAMES
+        and str(rule.condition or "").strip().lower() in {"lt", "lte", "eq"}
+    )
+
+
+def _collect_synthetic_edge_metrics(
+    window_minutes: int = 5,
+    namespace: Optional[str] = None,
+) -> Dict[Tuple[str, str, str, str], float]:
+    if not _STORAGE_ADAPTER or not hasattr(_STORAGE_ADAPTER, "get_edge_red_metrics"):
+        return {}
+
+    safe_minutes = max(1, int(window_minutes or 5))
+    normalized_namespace = _normalize_optional_text(namespace)
+    effective_namespace = _normalize_namespace(normalized_namespace)
+
+    try:
+        raw_metrics = _STORAGE_ADAPTER.get_edge_red_metrics(
+            time_window=f"{safe_minutes} MINUTE",
+            namespace=normalized_namespace,
+        )
+    except Exception as exc:
+        logger.warning("Failed to collect synthetic edge metrics for alerts: %s", exc)
+        return {}
+
+    synthetic: Dict[Tuple[str, str, str, str], float] = {}
+    for edge_key, values in (raw_metrics or {}).items():
+        if not isinstance(values, dict):
+            continue
+        source_service = _normalize_optional_text(values.get("source_service"))
+        target_service = _normalize_optional_text(values.get("target_service"))
+        if not source_service or not target_service:
+            key_text = str(edge_key or "").strip()
+            if "->" not in key_text:
+                continue
+            source_service, target_service = [part.strip() for part in key_text.split("->", 1)]
+        if not source_service or not target_service:
+            continue
+
+        call_count = float(values.get("call_count") or 0.0)
+        error_count = float(values.get("error_count") or 0.0)
+        error_rate = float(values.get("error_rate") or 0.0) * 100.0
+        p95_ms = float(values.get("p95") or 0.0)
+        p99_ms = float(values.get("p99") or 0.0)
+        timeout_rate = float(values.get("timeout_rate") or 0.0) * 100.0
+        retries_per_call = float(values.get("retries") or 0.0)
+        pending_per_call = float(values.get("pending") or 0.0)
+        dlq_per_call = float(values.get("dlq") or 0.0)
+
+        synthetic[(effective_namespace, source_service, target_service, "edge_call_count_5m")] = call_count
+        synthetic[(effective_namespace, source_service, target_service, "edge_error_count_5m")] = error_count
+        synthetic[(effective_namespace, source_service, target_service, "edge_error_rate_5m")] = error_rate
+        synthetic[(effective_namespace, source_service, target_service, "edge_p95_ms_5m")] = p95_ms
+        synthetic[(effective_namespace, source_service, target_service, "edge_p99_ms_5m")] = p99_ms
+        synthetic[(effective_namespace, source_service, target_service, "edge_timeout_rate_5m")] = timeout_rate
+        synthetic[(effective_namespace, source_service, target_service, "edge_retries_per_call_5m")] = retries_per_call
+        synthetic[(effective_namespace, source_service, target_service, "edge_pending_per_call_5m")] = pending_per_call
+        synthetic[(effective_namespace, source_service, target_service, "edge_dlq_per_call_5m")] = dlq_per_call
+
+    return synthetic
+
+
+def _extract_metric_namespace(metric: Dict[str, Any]) -> str:
+    direct_namespace = _normalize_optional_text(metric.get("namespace"))
+    if direct_namespace:
+        return direct_namespace
+
+    labels = metric.get("labels")
+    parsed_labels: Dict[str, Any] = {}
+    if isinstance(labels, dict):
+        parsed_labels = labels
+    elif isinstance(labels, str):
+        parsed = _safe_json_loads(labels, {})
+        if isinstance(parsed, dict):
+            parsed_labels = parsed
+
+    namespace = _namespace_from_labels(parsed_labels)
+    return _normalize_namespace(namespace)
+
+
+def _extract_metric_service(metric: Dict[str, Any]) -> str:
+    service_name = _normalize_optional_text(metric.get("service_name"))
+    return service_name or "unknown"
+
+
+def _extract_metric_name(metric: Dict[str, Any]) -> str:
+    metric_name = _normalize_optional_text(metric.get("metric_name"))
+    return metric_name or "unknown"
+
+
+def _collect_synthetic_project_metrics(
+    window_minutes: int = 5,
+    required_metric_names: Optional[Set[str]] = None,
+) -> Dict[Tuple[str, str, str], float]:
+    """
+    基于 logs/traces 直接生成项目级告警指标，补齐“日志报错频率 + 链路质量”基础能力。
+    """
+    if not _STORAGE_ADAPTER or not hasattr(_STORAGE_ADAPTER, "execute_query"):
+        return {}
+
+    requested_metric_names = set(required_metric_names or SYNTHETIC_PROJECT_METRIC_NAMES)
+    effective_metric_names = {
+        metric_name
+        for metric_name in requested_metric_names
+        if metric_name in SYNTHETIC_PROJECT_METRIC_NAMES
+    }
+    if not effective_metric_names:
+        return {}
+
+    collect_log_metrics = bool(effective_metric_names & SYNTHETIC_PROJECT_LOG_METRIC_NAMES)
+    collect_trace_metrics = bool(effective_metric_names & SYNTHETIC_PROJECT_TRACE_METRIC_NAMES)
+
+    safe_minutes = max(1, int(window_minutes or 5))
+    safe_group_limit = _resolve_synthetic_project_group_limit()
+    synthetic: Dict[Tuple[str, str, str], float] = {}
+
+    if collect_log_metrics:
+        try:
+            logs_rows = _STORAGE_ADAPTER.execute_query(
+                f"""
+                SELECT
+                    if(length(trim(namespace)) > 0, trim(namespace), 'unknown') AS namespace,
+                    if(length(trim(service_name)) > 0, trim(service_name),
+                        if(length(trim(pod_name)) > 0, trim(pod_name), 'unknown')) AS service_name,
+                    count() AS total_logs,
+                    countIf(upper(toString(level)) IN ('ERROR', 'FATAL')) AS error_logs,
+                    countIf(upper(toString(level)) IN ('WARN', 'WARNING', 'ERROR', 'FATAL')) AS warn_error_logs
+                FROM logs.logs
+                PREWHERE timestamp > now() - INTERVAL {safe_minutes} MINUTE
+                GROUP BY namespace, service_name
+                LIMIT {safe_group_limit}
+                """,
+                {},
+            )
+            for row in logs_rows:
+                namespace = _normalize_namespace(row.get("namespace"))
+                service_name = _normalize_optional_text(row.get("service_name")) or "unknown"
+                total_logs = float(row.get("total_logs") or 0.0)
+                error_logs = float(row.get("error_logs") or 0.0)
+                warn_error_logs = float(row.get("warn_error_logs") or 0.0)
+                if total_logs <= 0:
+                    continue
+
+                log_error_rate = (error_logs / total_logs) * 100.0
+                log_warn_error_rate = (warn_error_logs / total_logs) * 100.0
+
+                if "log_error_count_5m" in effective_metric_names:
+                    synthetic[(namespace, service_name, "log_error_count_5m")] = error_logs
+                if "log_error_rate_5m" in effective_metric_names:
+                    synthetic[(namespace, service_name, "log_error_rate_5m")] = log_error_rate
+                if "log_warn_error_rate_5m" in effective_metric_names:
+                    synthetic[(namespace, service_name, "log_warn_error_rate_5m")] = log_warn_error_rate
+                if "error_rate" in effective_metric_names:
+                    synthetic[(namespace, service_name, "error_rate")] = log_error_rate
+                if "success_rate" in effective_metric_names:
+                    synthetic[(namespace, service_name, "success_rate")] = max(0.0, 100.0 - log_error_rate)
+        except Exception as exc:
+            logger.warning("Failed to collect synthetic log metrics for alerts: %s", exc)
+
+    if collect_trace_metrics:
+        try:
+            traces_rows = _STORAGE_ADAPTER.execute_query(
+                f"""
+                SELECT
+                    if(length(trim(namespace)) > 0, trim(namespace), 'unknown') AS namespace,
+                    if(length(trim(service_name)) > 0, trim(service_name), 'unknown') AS service_name,
+                    toFloat64(uniqCombined64(trace_id)) AS total_traces,
+                    toFloat64(uniqCombined64If(trace_id, upper(toString(status)) IN ('2', 'STATUS_CODE_ERROR', 'ERROR'))) AS error_traces,
+                    quantileTDigest(0.95)(toFloat64OrZero(toString(duration_ms))) AS p95_ms
+                FROM logs.traces
+                PREWHERE timestamp > now() - INTERVAL {safe_minutes} MINUTE
+                  AND notEmpty(trace_id)
+                GROUP BY namespace, service_name
+                LIMIT {safe_group_limit}
+                """,
+                {},
+            )
+            for row in traces_rows:
+                namespace = _normalize_namespace(row.get("namespace"))
+                service_name = _normalize_optional_text(row.get("service_name")) or "unknown"
+                total_traces = float(row.get("total_traces") or 0.0)
+                error_traces = float(row.get("error_traces") or 0.0)
+                p95_ms = float(row.get("p95_ms") or 0.0)
+                if total_traces <= 0:
+                    continue
+
+                trace_error_rate = (error_traces / total_traces) * 100.0
+                if "trace_count_5m" in effective_metric_names:
+                    synthetic[(namespace, service_name, "trace_count_5m")] = total_traces
+                if "trace_error_rate_5m" in effective_metric_names:
+                    synthetic[(namespace, service_name, "trace_error_rate_5m")] = trace_error_rate
+                if "trace_p95_ms_5m" in effective_metric_names:
+                    synthetic[(namespace, service_name, "trace_p95_ms_5m")] = p95_ms
+                if "latency_p95_ms" in effective_metric_names:
+                    synthetic[(namespace, service_name, "latency_p95_ms")] = p95_ms
+        except Exception as exc:
+            logger.warning("Failed to collect synthetic trace metrics for alerts: %s", exc)
+
+    return synthetic
+
+
 async def _run_blocking(func, *args, **kwargs):
     """在线程池执行阻塞 IO，避免阻塞事件循环。"""
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return func(*args, **kwargs)
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
@@ -263,6 +874,16 @@ def _normalize_notification_channels(value: Any) -> List[str]:
 
 
 def _normalize_alert_rule(rule: AlertRule) -> AlertRule:
+    rule.service_name = _normalize_optional_text(rule.service_name)
+    label_namespace = _namespace_from_labels(rule.labels or {})
+    label_source_service, label_target_service = _edge_services_from_labels(rule.labels or {})
+    rule.source_service = _normalize_optional_text(rule.source_service) or label_source_service
+    rule.target_service = _normalize_optional_text(rule.target_service) or label_target_service
+    if _is_edge_rule(rule):
+        rule.service_name = _compose_edge_service_name(rule.source_service, rule.target_service, rule.service_name)
+    rule.namespace = _normalize_optional_text(rule.namespace) or _normalize_optional_text(label_namespace)
+    merged_labels = _merge_namespace_into_labels(rule.labels or {}, rule.namespace)
+    rule.labels = _merge_edge_identity_into_labels(merged_labels, rule.source_service, rule.target_service)
     rule.duration = max(0, int(rule.duration or 0))
     rule.min_occurrence_count = max(1, int(rule.min_occurrence_count or 1))
     rule.notification_enabled = bool(rule.notification_enabled)
@@ -279,8 +900,19 @@ def _escape_sql_literal(value: Any) -> str:
     return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _event_fingerprint(rule_id: str, service_name: str, metric_name: str) -> str:
-    return f"{rule_id}:{service_name}:{metric_name}"
+def _event_fingerprint(
+    rule_id: str,
+    namespace: str,
+    service_name: str,
+    metric_name: str,
+    source_service: Optional[str] = None,
+    target_service: Optional[str] = None,
+) -> str:
+    normalized_source = _normalize_optional_text(source_service) or ""
+    normalized_target = _normalize_optional_text(target_service) or ""
+    if normalized_source or normalized_target:
+        return f"{rule_id}:{namespace}:{service_name}:{metric_name}:{normalized_source}:{normalized_target}"
+    return f"{rule_id}:{namespace}:{service_name}:{metric_name}"
 
 
 def _event_sort_key(event: AlertEvent) -> Tuple[str, str]:
@@ -354,6 +986,7 @@ def _deduplicate_events(events: List[AlertEvent]) -> List[AlertEvent]:
 
 def _resolve_storage_tables() -> None:
     global _RULE_TABLE_NAME, _EVENT_TABLE_NAME, _NOTIFICATION_TABLE_NAME
+    global _RULE_LATEST_VIEW_NAME, _EVENT_LATEST_VIEW_NAME
 
     if not _STORAGE_ADAPTER:
         return
@@ -366,6 +999,8 @@ def _resolve_storage_tables() -> None:
     _RULE_TABLE_NAME = f"{database_name}.alert_rules"
     _EVENT_TABLE_NAME = f"{database_name}.alert_events"
     _NOTIFICATION_TABLE_NAME = f"{database_name}.alert_notifications"
+    _RULE_LATEST_VIEW_NAME = os.getenv("ALERT_RULE_LATEST_VIEW", f"{database_name}.v_alert_rules_latest")
+    _EVENT_LATEST_VIEW_NAME = os.getenv("ALERT_EVENT_LATEST_VIEW", f"{database_name}.v_alert_events_latest")
 
 
 def _ensure_clickhouse_tables() -> None:
@@ -594,6 +1229,8 @@ def _load_rules_from_storage() -> None:
     if not _is_clickhouse_available() or not _RULE_TABLE_NAME:
         return
 
+    source_table, use_final = _resolve_latest_read_source(_RULE_LATEST_VIEW_NAME, _RULE_TABLE_NAME)
+    final_clause = "FINAL" if use_final else ""
     query = f"""
     SELECT
         rule_id, name, description, metric_name, service_name, cond,
@@ -601,7 +1238,8 @@ def _load_rules_from_storage() -> None:
         severity, enabled, labels_json,
         notification_enabled, notification_channels_json, notification_cooldown_seconds,
         created_at, updated_at
-    FROM {_RULE_TABLE_NAME} FINAL
+    FROM {source_table}
+    {final_clause}
     WHERE deleted = 0
     ORDER BY updated_at DESC
     """
@@ -616,19 +1254,23 @@ def _load_rules_from_storage() -> None:
         if not rule_id or rule_id in loaded:
             continue
 
+        parsed_labels = _safe_json_loads(row[11], {})
         loaded[rule_id] = _normalize_alert_rule(AlertRule(
             id=rule_id,
             name=str(row[1] or ""),
             description=str(row[2] or "") or None,
             metric_name=str(row[3] or ""),
             service_name=str(row[4] or "") or None,
+            source_service=_edge_services_from_labels(parsed_labels)[0],
+            target_service=_edge_services_from_labels(parsed_labels)[1],
+            namespace=_namespace_from_labels(parsed_labels),
             condition=str(row[5] or ""),
             threshold=float(row[6] or 0.0),
             duration=int(row[7] or 0),
             min_occurrence_count=max(1, int(row[8] or 1)),
             severity=str(row[9] or "warning"),
             enabled=bool(row[10]),
-            labels=_safe_json_loads(row[11], {}),
+            labels=parsed_labels,
             notification_enabled=bool(row[12]) if row[12] is not None else True,
             notification_channels=_normalize_notification_channels(_safe_json_loads(row[13], ["inapp"])),
             notification_cooldown_seconds=max(0, int(row[14] or 0)),
@@ -644,6 +1286,8 @@ def _load_events_from_storage(max_rows: int = 20000) -> None:
     if not _is_clickhouse_available() or not _EVENT_TABLE_NAME:
         return
 
+    source_table, use_final = _resolve_latest_read_source(_EVENT_LATEST_VIEW_NAME, _EVENT_TABLE_NAME)
+    final_clause = "FINAL" if use_final else ""
     query = f"""
     SELECT
         event_id, rule_id, rule_name, metric_name, service_name,
@@ -653,7 +1297,8 @@ def _load_events_from_storage(max_rows: int = 20000) -> None:
         acknowledged_at, silenced_until,
         occurrence_count, last_notified_at, notification_count,
         labels_json, updated_at
-    FROM {_EVENT_TABLE_NAME} FINAL
+    FROM {source_table}
+    {final_clause}
     WHERE deleted = 0
     ORDER BY updated_at DESC
     LIMIT {max(1000, int(max_rows))}
@@ -671,6 +1316,7 @@ def _load_events_from_storage(max_rows: int = 20000) -> None:
             continue
         seen_ids.add(event_id)
 
+        parsed_labels = _safe_json_loads(row[20], {})
         loaded.append(
             AlertEvent(
                 id=event_id,
@@ -678,6 +1324,9 @@ def _load_events_from_storage(max_rows: int = 20000) -> None:
                 rule_name=str(row[2] or ""),
                 metric_name=str(row[3] or ""),
                 service_name=str(row[4] or ""),
+                source_service=_edge_services_from_labels(parsed_labels)[0],
+                target_service=_edge_services_from_labels(parsed_labels)[1],
+                namespace=_namespace_from_labels(parsed_labels),
                 current_value=float(row[5] or 0.0),
                 threshold=float(row[6] or 0.0),
                 condition=str(row[7] or ""),
@@ -693,7 +1342,7 @@ def _load_events_from_storage(max_rows: int = 20000) -> None:
                 occurrence_count=max(1, int(row[17] or 1)),
                 last_notified_at=_to_iso(row[18]) if row[18] else None,
                 notification_count=max(0, int(row[19] or 0)),
-                labels=_safe_json_loads(row[20], {}),
+                labels=parsed_labels,
                 updated_at=_to_iso(row[21]),
             )
         )
@@ -1027,10 +1676,15 @@ async def create_alert_rule_from_template(payload: CreateRuleFromTemplateRequest
     rule_data["name"] = str(payload.name or template.name).strip() or template.name
     rule_data["description"] = str(payload.description or template.description).strip() or template.description
     rule_data["service_name"] = str(payload.service_name or "").strip() or None
+    rule_data["namespace"] = str(payload.namespace or "").strip() or None
+    rule_data["source_service"] = str(payload.source_service or template.source_service or "").strip() or None
+    rule_data["target_service"] = str(payload.target_service or template.target_service or "").strip() or None
     rule_data["threshold"] = float(payload.threshold) if payload.threshold is not None else template.threshold
     rule_data["duration"] = int(payload.duration) if payload.duration is not None else template.duration
     rule_data["severity"] = str(payload.severity or template.severity or "warning")
-    rule_data["labels"] = {**(template.labels or {}), **(payload.labels or {})}
+    merged_labels = {**(template.labels or {}), **(payload.labels or {})}
+    merged_labels.setdefault("template_id", template.id)
+    rule_data["labels"] = merged_labels
     rule_data["min_occurrence_count"] = (
         max(1, int(payload.min_occurrence_count or 1))
         if payload.min_occurrence_count is not None
@@ -1134,7 +1788,11 @@ async def get_alert_events(
     severity: Optional[str] = None,
     cursor: Optional[str] = None,
     service_name: Optional[str] = None,
+    source_service: Optional[str] = None,
+    target_service: Optional[str] = None,
+    namespace: Optional[str] = None,
     search: Optional[str] = None,
+    scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     """获取告警事件列表（支持过滤与分页）。"""
     try:
@@ -1142,7 +1800,13 @@ async def get_alert_events(
         statuses = _normalize_csv_filter(status)
         severities = _normalize_csv_filter(severity)
         service_filter = str(service_name or "").strip()
+        source_service_filter = str(source_service or "").strip()
+        target_service_filter = str(target_service or "").strip()
+        namespace_filter = str(namespace or "").strip()
         search_filter = str(search or "").strip().lower()
+        scope_filter = str(scope or "all").strip().lower() or "all"
+        if scope_filter not in {"all", "edge", "service"}:
+            raise ValueError("scope must be one of: all, edge, service")
 
         events = _deduplicate_events(_alert_events)
 
@@ -1152,10 +1816,32 @@ async def get_alert_events(
                 continue
             if severities and event.severity not in severities:
                 continue
-            if service_filter and event.service_name != service_filter:
+            event_namespace = _normalize_optional_text(event.namespace) or _namespace_from_labels(event.labels or {}) or "unknown"
+            event_source_service = _normalize_optional_text(event.source_service) or _edge_services_from_labels(event.labels or {})[0]
+            event_target_service = _normalize_optional_text(event.target_service) or _edge_services_from_labels(event.labels or {})[1]
+            event_is_edge = bool(
+                _is_edge_metric_name(event.metric_name)
+                or str(event_source_service or "").strip()
+                or str(event_target_service or "").strip()
+            )
+            if scope_filter == "edge" and not event_is_edge:
+                continue
+            if scope_filter == "service" and event_is_edge:
+                continue
+            if service_filter and service_filter not in {
+                str(event.service_name or "").strip(),
+                str(event_source_service or "").strip(),
+                str(event_target_service or "").strip(),
+            }:
+                continue
+            if source_service_filter and str(event_source_service or "").strip() != source_service_filter:
+                continue
+            if target_service_filter and str(event_target_service or "").strip() != target_service_filter:
+                continue
+            if namespace_filter and event_namespace != namespace_filter:
                 continue
             if search_filter:
-                haystack = f"{event.rule_name} {event.metric_name} {event.message}".lower()
+                haystack = f"{event.rule_name} {event.metric_name} {event.message} {event_namespace} {event_source_service or ''} {event_target_service or ''}".lower()
                 if search_filter not in haystack:
                     continue
             filtered.append(event)
@@ -1268,6 +1954,144 @@ async def resolve_alert_event(event_id: str, reason: Optional[str] = None) -> Di
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _build_rule_event_labels(
+    rule: AlertRule,
+    effective_namespace: str,
+    source_service: Optional[str] = None,
+    target_service: Optional[str] = None,
+) -> Dict[str, str]:
+    merged = _merge_namespace_into_labels(rule.labels or {}, effective_namespace)
+    return _merge_edge_identity_into_labels(merged, source_service, target_service)
+
+
+def _build_alert_message(
+    rule: AlertRule,
+    metric_name: str,
+    current_value: float,
+    source_service: Optional[str] = None,
+    target_service: Optional[str] = None,
+) -> str:
+    base = f"{metric_name} is {current_value:.2f}, threshold {rule.condition} {rule.threshold}"
+    edge_name = _compose_edge_service_name(source_service, target_service)
+    if edge_name != "unknown" and (source_service or target_service):
+        return f"{base} on {edge_name}"
+    return base
+
+
+async def _upsert_evaluated_event(
+    *,
+    rule: AlertRule,
+    effective_namespace: str,
+    service_name: str,
+    metric_name: str,
+    avg_value: float,
+    now_dt: datetime,
+    now_iso: str,
+    active_events_by_fingerprint: Dict[str, AlertEvent],
+    evaluated_fingerprints: Set[str],
+    triggered_fingerprints: Set[str],
+    source_service: Optional[str] = None,
+    target_service: Optional[str] = None,
+) -> int:
+    fp = _event_fingerprint(
+        str(rule.id),
+        effective_namespace,
+        service_name,
+        metric_name,
+        source_service=source_service,
+        target_service=target_service,
+    )
+    evaluated_fingerprints.add(fp)
+
+    if not _evaluate_condition(rule, avg_value):
+        return 0
+
+    triggered_fingerprints.add(fp)
+    message = _build_alert_message(
+        rule,
+        metric_name,
+        avg_value,
+        source_service=source_service,
+        target_service=target_service,
+    )
+    labels = _build_rule_event_labels(
+        rule,
+        effective_namespace,
+        source_service=source_service,
+        target_service=target_service,
+    )
+    existing_event = active_events_by_fingerprint.get(fp)
+
+    if existing_event:
+        existing_event.service_name = service_name
+        existing_event.source_service = _normalize_optional_text(source_service)
+        existing_event.target_service = _normalize_optional_text(target_service)
+        existing_event.current_value = avg_value
+        existing_event.namespace = effective_namespace
+        existing_event.message = message
+        existing_event.labels = labels
+        existing_event.last_triggered_at = now_iso
+        existing_event.updated_at = now_iso
+        existing_event.occurrence_count = max(1, int(existing_event.occurrence_count or 1)) + 1
+
+        if existing_event.status == "silenced":
+            silenced_until_dt = _to_datetime(existing_event.silenced_until, default=now_dt)
+            if silenced_until_dt <= now_dt:
+                if _is_rule_ready_to_fire(rule, existing_event, now_dt):
+                    existing_event.status = "firing"
+                    await _notify_event(rule, existing_event, transition="firing:reactivated")
+                    await _run_blocking(_persist_event, existing_event)
+                    return 1
+                existing_event.status = "pending"
+        elif existing_event.status == "pending":
+            if _is_rule_ready_to_fire(rule, existing_event, now_dt):
+                existing_event.status = "firing"
+                await _notify_event(rule, existing_event, transition="firing:threshold_met")
+                await _run_blocking(_persist_event, existing_event)
+                return 1
+        elif existing_event.status == "firing":
+            await _notify_event(rule, existing_event, transition="firing:heartbeat")
+
+        await _run_blocking(_persist_event, existing_event)
+        return 0
+
+    event = AlertEvent(
+        id=str(uuid.uuid4()),
+        rule_id=str(rule.id),
+        rule_name=rule.name,
+        metric_name=metric_name,
+        service_name=service_name,
+        source_service=_normalize_optional_text(source_service),
+        target_service=_normalize_optional_text(target_service),
+        namespace=effective_namespace,
+        current_value=avg_value,
+        threshold=rule.threshold,
+        condition=rule.condition,
+        severity=rule.severity,
+        message=message,
+        status="pending",
+        fired_at=now_iso,
+        first_triggered_at=now_iso,
+        last_triggered_at=now_iso,
+        occurrence_count=1,
+        updated_at=now_iso,
+        labels=labels,
+    )
+
+    _alert_events.append(event)
+    active_events_by_fingerprint[fp] = event
+
+    if _is_rule_ready_to_fire(rule, event, now_dt):
+        event.status = "firing"
+        await _notify_event(rule, event, transition="firing:new")
+        await _run_blocking(_persist_event, event)
+        return 1
+
+    event.status = "pending"
+    await _run_blocking(_persist_event, event)
+    return 0
+
+
 async def evaluate_alert_rules() -> Dict[str, Any]:
     """
     评估告警规则。
@@ -1281,18 +2105,46 @@ async def evaluate_alert_rules() -> Dict[str, Any]:
         triggered_count = 0
         resolved_count = 0
 
+        normalized_rules = [
+            _normalize_alert_rule(rule)
+            for rule in _alert_rules.values()
+            if rule.enabled
+        ]
+        enabled_rule_ids = {rule.id for rule in normalized_rules if rule.id}
+        service_rules = [rule for rule in normalized_rules if not _is_edge_rule(rule)]
+        edge_rules = [rule for rule in normalized_rules if _is_edge_rule(rule)]
+
         metrics = await _run_blocking(_STORAGE_ADAPTER.get_metrics, 1000)
 
-        metrics_by_key: Dict[str, List[float]] = {}
+        metrics_by_key: Dict[Tuple[str, str, str], List[float]] = {}
         for metric in metrics:
-            service_name = str(metric.get("service_name") or "").strip()
-            metric_name = str(metric.get("metric_name") or "").strip()
-            if not service_name or not metric_name:
-                continue
-            key = f"{service_name}:{metric_name}"
+            namespace = _extract_metric_namespace(metric)
+            service_name = _extract_metric_service(metric)
+            metric_name = _extract_metric_name(metric)
+            key = (namespace, service_name, metric_name)
             metrics_by_key.setdefault(key, []).append(float(metric.get("value") or 0.0))
 
-        avg_metrics: Dict[str, float] = {}
+        required_synthetic_metric_names = _collect_required_synthetic_metric_names(service_rules)
+        if required_synthetic_metric_names:
+            synthetic_metrics = _get_cached_synthetic_project_metrics(
+                _SYNTHETIC_METRIC_WINDOW_MINUTES,
+                required_synthetic_metric_names,
+            )
+            if synthetic_metrics is None:
+                synthetic_metrics = await _run_blocking(
+                    _collect_synthetic_project_metrics,
+                    _SYNTHETIC_METRIC_WINDOW_MINUTES,
+                    required_synthetic_metric_names,
+                )
+                _set_cached_synthetic_project_metrics(
+                    _SYNTHETIC_METRIC_WINDOW_MINUTES,
+                    required_synthetic_metric_names,
+                    synthetic_metrics,
+                )
+            for key, value in synthetic_metrics.items():
+                metrics_by_key.setdefault(key, []).append(float(value))
+
+        avg_metrics: Dict[Tuple[str, str, str], float] = {}
         for key, values in metrics_by_key.items():
             if values:
                 avg_metrics[key] = sum(values) / len(values)
@@ -1303,108 +2155,152 @@ async def evaluate_alert_rules() -> Dict[str, Any]:
         for event in _alert_events:
             if event.status not in ACTIVE_EVENT_STATUSES:
                 continue
-            fp = _event_fingerprint(event.rule_id, event.service_name, event.metric_name)
+            event_namespace = _normalize_optional_text(event.namespace) or _namespace_from_labels(event.labels or {}) or "unknown"
+            event.namespace = event_namespace
+            label_source_service, label_target_service = _edge_services_from_labels(event.labels or {})
+            event.source_service = _normalize_optional_text(event.source_service) or label_source_service
+            event.target_service = _normalize_optional_text(event.target_service) or label_target_service
+            if _is_edge_metric_name(event.metric_name) or event.source_service or event.target_service:
+                event.service_name = _compose_edge_service_name(event.source_service, event.target_service, event.service_name)
+            fp = _event_fingerprint(
+                event.rule_id,
+                event_namespace,
+                event.service_name,
+                event.metric_name,
+                source_service=event.source_service,
+                target_service=event.target_service,
+            )
             active_events_by_fingerprint[fp] = event
-
-        enabled_rule_ids = {rule.id for rule in _alert_rules.values() if rule.enabled and rule.id}
         evaluated_fingerprints: Set[str] = set()
         triggered_fingerprints: Set[str] = set()
 
         now_dt = _now_utc()
         now_iso = now_dt.isoformat()
 
-        for rule in _alert_rules.values():
-            if not rule.enabled:
-                continue
-            rule = _normalize_alert_rule(rule)
+        for rule in service_rules:
+            rule_namespace = _normalize_optional_text(rule.namespace)
 
             for key, avg_value in avg_metrics.items():
-                service_name, metric_name = key.split(":", 1)
+                metric_namespace, service_name, metric_name = key
 
                 if rule.metric_name != metric_name:
                     continue
                 if rule.service_name and rule.service_name != service_name:
                     continue
-
-                fp = _event_fingerprint(str(rule.id), service_name, metric_name)
-                evaluated_fingerprints.add(fp)
-
-                if not _evaluate_condition(rule, avg_value):
-                    continue
-
-                triggered_fingerprints.add(fp)
-                existing_event = active_events_by_fingerprint.get(fp)
-
-                if existing_event:
-                    existing_event.current_value = avg_value
-                    existing_event.message = (
-                        f"{metric_name} is {avg_value:.2f}, threshold {rule.condition} {rule.threshold}"
+                if rule_namespace and metric_namespace == "unknown":
+                    evaluated_fingerprints.add(
+                        _event_fingerprint(str(rule.id), rule_namespace, service_name, metric_name)
                     )
-                    existing_event.labels = rule.labels
-                    existing_event.last_triggered_at = now_iso
-                    existing_event.updated_at = now_iso
-                    existing_event.occurrence_count = max(1, int(existing_event.occurrence_count or 1)) + 1
-
-                    if existing_event.status == "silenced":
-                        silenced_until_dt = _to_datetime(existing_event.silenced_until, default=now_dt)
-                        if silenced_until_dt <= now_dt:
-                            if _is_rule_ready_to_fire(rule, existing_event, now_dt):
-                                existing_event.status = "firing"
-                                triggered_count += 1
-                                await _notify_event(rule, existing_event, transition="firing:reactivated")
-                            else:
-                                existing_event.status = "pending"
-                    elif existing_event.status == "pending":
-                        if _is_rule_ready_to_fire(rule, existing_event, now_dt):
-                            existing_event.status = "firing"
-                            triggered_count += 1
-                            await _notify_event(rule, existing_event, transition="firing:threshold_met")
-                    elif existing_event.status == "firing":
-                        # 仍在触发时按 cooldown 周期发送通知，避免噪声风暴
-                        await _notify_event(rule, existing_event, transition="firing:heartbeat")
-
-                    await _run_blocking(_persist_event, existing_event)
+                    continue
+                if rule_namespace and metric_namespace != rule_namespace:
                     continue
 
-                event = AlertEvent(
-                    id=str(uuid.uuid4()),
-                    rule_id=str(rule.id),
-                    rule_name=rule.name,
-                    metric_name=metric_name,
+                effective_namespace = rule_namespace or metric_namespace
+                triggered_count += await _upsert_evaluated_event(
+                    rule=rule,
+                    effective_namespace=effective_namespace,
                     service_name=service_name,
-                    current_value=avg_value,
-                    threshold=rule.threshold,
-                    condition=rule.condition,
-                    severity=rule.severity,
-                    message=f"{metric_name} is {avg_value:.2f}, threshold {rule.condition} {rule.threshold}",
-                    status="pending",
-                    fired_at=now_iso,
-                    first_triggered_at=now_iso,
-                    last_triggered_at=now_iso,
-                    occurrence_count=1,
-                    updated_at=now_iso,
-                    labels=rule.labels,
+                    metric_name=metric_name,
+                    avg_value=avg_value,
+                    now_dt=now_dt,
+                    now_iso=now_iso,
+                    active_events_by_fingerprint=active_events_by_fingerprint,
+                    evaluated_fingerprints=evaluated_fingerprints,
+                    triggered_fingerprints=triggered_fingerprints,
                 )
 
-                _alert_events.append(event)
-                active_events_by_fingerprint[fp] = event
+        edge_metrics_cache: Dict[Tuple[str, int], Dict[Tuple[str, str, str, str], float]] = {}
+        for rule in edge_rules:
+            rule_namespace = _normalize_optional_text(rule.namespace)
+            window_minutes = _resolve_edge_metric_window_minutes(rule)
+            cache_key = (rule_namespace or "", window_minutes)
+            if cache_key not in edge_metrics_cache:
+                edge_metrics_cache[cache_key] = await _run_blocking(
+                    _collect_synthetic_edge_metrics,
+                    window_minutes,
+                    rule_namespace,
+                )
+            edge_metrics = edge_metrics_cache[cache_key]
+            matched_rule_metric = False
 
-                if _is_rule_ready_to_fire(rule, event, now_dt):
-                    event.status = "firing"
-                    triggered_count += 1
-                    await _notify_event(rule, event, transition="firing:new")
-                else:
-                    event.status = "pending"
+            for key, avg_value in edge_metrics.items():
+                metric_namespace, source_service, target_service, metric_name = key
+                if rule.metric_name != metric_name:
+                    continue
+                if rule_namespace and metric_namespace == "unknown":
+                    continue
+                if rule_namespace and metric_namespace != rule_namespace:
+                    continue
+                if rule.source_service and rule.source_service != source_service:
+                    continue
+                if rule.target_service and rule.target_service != target_service:
+                    continue
 
-                await _run_blocking(_persist_event, event)
+                matched_rule_metric = True
+                effective_namespace = rule_namespace or metric_namespace
+                service_name = _compose_edge_service_name(source_service, target_service)
+                triggered_count += await _upsert_evaluated_event(
+                    rule=rule,
+                    effective_namespace=effective_namespace,
+                    service_name=service_name,
+                    metric_name=metric_name,
+                    avg_value=avg_value,
+                    now_dt=now_dt,
+                    now_iso=now_iso,
+                    active_events_by_fingerprint=active_events_by_fingerprint,
+                    evaluated_fingerprints=evaluated_fingerprints,
+                    triggered_fingerprints=triggered_fingerprints,
+                    source_service=source_service,
+                    target_service=target_service,
+                )
 
-                if event.status == "firing":
+                active_event = active_events_by_fingerprint.get(
+                    _event_fingerprint(
+                        str(rule.id),
+                        effective_namespace,
+                        service_name,
+                        metric_name,
+                        source_service=source_service,
+                        target_service=target_service,
+                    )
+                )
+                if active_event and active_event.status == "firing":
                     logger.warning(
-                        "Alert triggered: %s - %s:%s = %.2f",
+                        "Edge alert triggered: %s - %s/%s:%s = %.2f",
                         rule.name,
+                        effective_namespace,
                         service_name,
                         metric_name,
                         avg_value,
+                    )
+
+            if rule_namespace and rule.source_service and rule.target_service and not matched_rule_metric:
+                effective_service_name = _compose_edge_service_name(rule.source_service, rule.target_service, rule.service_name)
+                if _should_zero_fill_edge_metric(rule):
+                    triggered_count += await _upsert_evaluated_event(
+                        rule=rule,
+                        effective_namespace=rule_namespace,
+                        service_name=effective_service_name,
+                        metric_name=rule.metric_name,
+                        avg_value=0.0,
+                        now_dt=now_dt,
+                        now_iso=now_iso,
+                        active_events_by_fingerprint=active_events_by_fingerprint,
+                        evaluated_fingerprints=evaluated_fingerprints,
+                        triggered_fingerprints=triggered_fingerprints,
+                        source_service=rule.source_service,
+                        target_service=rule.target_service,
+                    )
+                else:
+                    evaluated_fingerprints.add(
+                        _event_fingerprint(
+                            str(rule.id),
+                            rule_namespace,
+                            effective_service_name,
+                            rule.metric_name,
+                            source_service=rule.source_service,
+                            target_service=rule.target_service,
+                        )
                     )
 
         for fp in evaluated_fingerprints:

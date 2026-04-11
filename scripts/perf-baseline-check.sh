@@ -270,8 +270,11 @@ def request_once(url: str, timeout: float) -> Dict[str, Any]:
         status_code = int(exc.code)
         try:
             exc.read()
-        except Exception:
-            pass
+        except Exception as read_exc:  # noqa: BLE001
+            print(
+                f"Warning: failed to read HTTP error body for {url}: {type(read_exc).__name__}:{read_exc}",
+                file=sys.stderr,
+            )
         error_message = f"HTTPError:{status_code}"
     except Exception as exc:  # noqa: BLE001
         error_message = f"{type(exc).__name__}:{exc}"

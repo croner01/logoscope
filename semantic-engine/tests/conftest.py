@@ -13,6 +13,18 @@ from storage.adapter import StorageAdapter
 
 
 @pytest.fixture
+def clear_stats():
+    """重置缓存统计，供缓存测试复用。"""
+    from api.cache import _cache_store, reset_cache_stats
+
+    _cache_store.clear()
+    reset_cache_stats()
+    yield
+    _cache_store.clear()
+    reset_cache_stats()
+
+
+@pytest.fixture
 def sample_metrics_data():
     """示例 Metrics 数据"""
     return {

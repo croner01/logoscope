@@ -12,7 +12,7 @@ REGISTRY_PREFIX="${REGISTRY_PREFIX:-localhost:5000/logoscope}"
 DEFAULT_TAG="${DEFAULT_TAG:-latest}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SERVICES=(semantic-engine ai-service ingest-service query-service topology-service frontend)
+SERVICES=(semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend)
 
 usage() {
   cat <<'EOF'
@@ -28,7 +28,7 @@ Usage:
   scripts/k8s-image-ops.sh rollout-status <service|all>
 
 Service list:
-  semantic-engine ai-service ingest-service query-service topology-service frontend
+  semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend
 
 Notes:
   1) semantic-engine image update also updates semantic-engine-worker deployment.
@@ -112,6 +112,12 @@ set_image_one() {
     ai-service)
       kubectl -n "$NAMESPACE" set image deployment/ai-service ai-service="$image"
       ;;
+    exec-service)
+      kubectl -n "$NAMESPACE" set image deployment/exec-service exec-service="$image"
+      ;;
+    toolbox-gateway)
+      kubectl -n "$NAMESPACE" set image deployment/toolbox-gateway toolbox-gateway="$image"
+      ;;
     ingest-service)
       kubectl -n "$NAMESPACE" set image deployment/ingest-service ingest-service="$image"
       ;;
@@ -141,6 +147,12 @@ apply_one() {
     ai-service)
       kubectl apply -f "${PROJECT_ROOT}/deploy/ai-service.yaml"
       ;;
+    exec-service)
+      kubectl apply -f "${PROJECT_ROOT}/deploy/exec-service.yaml"
+      ;;
+    toolbox-gateway)
+      kubectl apply -f "${PROJECT_ROOT}/deploy/toolbox-gateway.yaml"
+      ;;
     ingest-service)
       kubectl apply -f "${PROJECT_ROOT}/deploy/ingest-service.yaml"
       ;;
@@ -167,7 +179,7 @@ restart_one() {
       kubectl -n "$NAMESPACE" rollout restart deployment/semantic-engine
       kubectl -n "$NAMESPACE" rollout restart deployment/semantic-engine-worker
       ;;
-    ai-service|ingest-service|query-service|topology-service|frontend)
+    ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend)
       kubectl -n "$NAMESPACE" rollout restart "deployment/${service}"
       ;;
     *)
@@ -184,7 +196,7 @@ rollout_status_one() {
       kubectl -n "$NAMESPACE" rollout status deployment/semantic-engine
       kubectl -n "$NAMESPACE" rollout status deployment/semantic-engine-worker
       ;;
-    ai-service|ingest-service|query-service|topology-service|frontend)
+    ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend)
       kubectl -n "$NAMESPACE" rollout status "deployment/${service}"
       ;;
     *)

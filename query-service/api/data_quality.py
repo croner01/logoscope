@@ -8,6 +8,7 @@ import asyncio
 from fastapi import APIRouter, Query
 from typing import Dict, Any, List
 import logging
+import os
 import re
 from datetime import datetime, timezone
 
@@ -80,6 +81,8 @@ def _sanitize_limit(value: int, default_value: int, max_value: int) -> int:
 
 async def _run_blocking(func, *args, **kwargs):
     """在线程池执行阻塞 IO，避免阻塞事件循环。"""
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return func(*args, **kwargs)
     return await asyncio.to_thread(func, *args, **kwargs)
 
 

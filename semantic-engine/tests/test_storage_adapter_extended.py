@@ -36,7 +36,7 @@ def sample_event():
 class TestSaveEventHTTPMode:
     """测试 HTTP 模式保存事件"""
 
-    @patch('storage.adapter.requests.post')
+    @patch('storage.adapter._shared_adapter.requests.post')
     def test_save_event_http_success(self, mock_post, sample_event):
         """测试 HTTP 模式成功保存事件"""
         adapter = StorageAdapter()
@@ -47,6 +47,7 @@ class TestSaveEventHTTPMode:
             'user': 'default',
             'password': ''
         }
+        adapter.http_session = None
 
         mock_response = Mock()
         mock_response.status_code = 200
@@ -57,7 +58,7 @@ class TestSaveEventHTTPMode:
         assert result is True
         assert mock_post.called
 
-    @patch('storage.adapter.requests.post')
+    @patch('storage.adapter._shared_adapter.requests.post')
     def test_save_event_http_with_full_k8s_context(self, mock_post):
         """测试 HTTP 模式保存完整 K8s 上下文事件"""
         adapter = StorageAdapter()
@@ -68,6 +69,7 @@ class TestSaveEventHTTPMode:
             'user': 'default',
             'password': ''
         }
+        adapter.http_session = None
 
         mock_response = Mock()
         mock_response.status_code = 200

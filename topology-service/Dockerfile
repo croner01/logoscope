@@ -1,3 +1,16 @@
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH=/opt/venv/bin:$PATH
+
+RUN python -m venv /opt/venv
+
+COPY topology-service/requirements-runtime.txt /app/topology-service/requirements-runtime.txt
+RUN pip install  --prefer-binary -r /app/topology-service/requirements-runtime.txt
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -7,13 +20,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONFAULTHANDLER=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app/shared_lib
+    PYTHONPATH=/app/shared_lib \
+    PATH=/opt/venv/bin:$PATH
 
-# 安装依赖
-COPY topology-service/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /opt/venv /opt/venv
 
-# ⭐ 复制共享代码到独立目录
+# 复制共享代码到独立目录
 COPY shared_src/ /app/shared_lib/
 RUN ln -s /app/shared_lib /app/shared_lib/shared_src
 

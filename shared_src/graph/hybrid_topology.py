@@ -287,7 +287,7 @@ class HybridTopologyBuilder:
             # 查询 traces 表获取调用链
             prewhere_conditions = [f"timestamp > now() - INTERVAL {time_window}"]
             if namespace:
-                prewhere_conditions.append(f"namespace = '{namespace}'")
+                prewhere_conditions.append(f"traces_namespace = '{namespace}'")
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
 
             # 查询 span 关系（通过 trace_id 和 parent_span_id）

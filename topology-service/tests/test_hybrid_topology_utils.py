@@ -172,6 +172,35 @@ def test_merge_nodes_prefers_non_default_namespace_when_sources_conflict():
     assert node_map["checkout"]["metrics"]["service_namespace"] == "prod-blue"
 
 
+def test_merge_nodes_demotes_service_name_like_namespace():
+    merged_nodes = hybrid_topology_utils.merge_nodes(
+        traces_nodes=[{
+            "id": "semantic-engine",
+            "namespace": "semantic-engine",
+            "metrics": {
+                "namespace": "semantic-engine",
+                "service_namespace": "semantic-engine",
+                "trace_count": 6,
+            },
+        }],
+        logs_nodes=[{
+            "id": "semantic-engine",
+            "namespace": "islap",
+            "metrics": {
+                "namespace": "islap",
+                "service_namespace": "islap",
+                "log_count": 22,
+            },
+        }],
+        metrics_nodes=[],
+    )
+    node_map = {item["id"]: item for item in merged_nodes}
+    semantic_node = node_map["semantic-engine"]
+    assert semantic_node["namespace"] == "islap"
+    assert semantic_node["metrics"]["namespace"] == "islap"
+    assert semantic_node["metrics"]["service_namespace"] == "islap"
+
+
 def test_apply_aggregated_edge_metrics_only_overwrites_empty_values():
     edges = [
         {

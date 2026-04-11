@@ -134,6 +134,91 @@ class TestKBSearch:
         assert result["total"] == 1
         assert result["sources"]["local"] == 1
 
+    def test_kb_search_top_k_is_clamped_to_20(self):
+        from api.ai import kb_search, KBSearchRequest
+
+        request = KBSearchRequest(
+            query="payment timeout",
+            retrieval_mode="local",
+            top_k=999,
+        )
+        mock_gateway = Mock()
+        mock_gateway.resolve_runtime_options.return_value = {
+            "effective_retrieval_mode": "local",
+            "effective_save_mode": "local_only",
+            "message": "fallback",
+        }
+        mock_gateway.search.return_value = {
+            "cases": [],
+            "total": 0,
+            "sources": {"local": 0, "external": 0},
+        }
+
+        with patch("api.ai.get_knowledge_gateway", return_value=mock_gateway):
+            result = asyncio.run(kb_search(request))
+
+        assert result["effective_mode"] == "local"
+        kwargs = mock_gateway.search.call_args.kwargs
+        assert kwargs["top_k"] == 20
+
+    def test_kb_search_prefers_payload_warning_message_over_runtime_message(self):
+        from api.ai import kb_search, KBSearchRequest
+
+        request = KBSearchRequest(
+            query="payment timeout",
+            retrieval_mode="hybrid",
+            top_k=5,
+        )
+        mock_gateway = Mock()
+        mock_gateway.resolve_runtime_options.return_value = {
+            "effective_retrieval_mode": "local",
+            "effective_save_mode": "local_only",
+            "message": "runtime-fallback-message",
+        }
+        mock_gateway.search.return_value = {
+            "cases": [],
+            "total": 0,
+            "sources": {"local": 0, "external": 0},
+            "warning_message": "payload-warning-message",
+            "warning_code": "KBR-006",
+        }
+
+        with patch("api.ai.get_knowledge_gateway", return_value=mock_gateway):
+            result = asyncio.run(kb_search(request))
+
+        assert result["message"] == "payload-warning-message"
+        assert result["warning_code"] == "KBR-006"
+
+
+
+
+    def test_kb_search_remote_only_enables_remote_runtime_resolution(self):
+        from api.ai import kb_search, KBSearchRequest
+
+        request = KBSearchRequest(
+            query="payment timeout",
+            retrieval_mode="remote_only",
+            top_k=5,
+        )
+        mock_gateway = Mock()
+        mock_gateway.resolve_runtime_options.return_value = {
+            "effective_retrieval_mode": "remote_only",
+            "effective_save_mode": "local_only",
+            "message": "ok",
+        }
+        mock_gateway.search.return_value = {
+            "cases": [],
+            "total": 0,
+            "sources": {"local": 0, "external": 0},
+        }
+
+        with patch("api.ai.get_knowledge_gateway", return_value=mock_gateway):
+            result = asyncio.run(kb_search(request))
+
+        assert result["effective_mode"] == "remote_only"
+        kwargs = mock_gateway.resolve_runtime_options.call_args.kwargs
+        assert kwargs["remote_enabled"] is True
+        assert kwargs["retrieval_mode"] == "remote_only"
 
 class TestKBFromAnalysisSession:
     """kb/from-analysis-session endpoint tests."""
@@ -688,9 +773,10 @@ class TestKBRemoteRuntimeConfig:
         request = KBRemoteRuntimeConfig(
             provider="ragflow",
             base_url="http://ragflow:9380",
+            dataset_id="dataset-001",
             timeout_seconds=8,
             search_path="/api/v1/retrieval",
-            upsert_path="/api/v1/kb/upsert",
+            upsert_path="/api/v1/datasets/{dataset_id}/documents",
         )
 
         result = asyncio.run(validate_kb_runtime_config(request))
@@ -699,6 +785,7 @@ class TestKBRemoteRuntimeConfig:
         assert result["validated"] is True
         assert result["runtime"]["provider"] == "ragflow"
         assert result["runtime"]["base_url"] == "http://ragflow:9380"
+        assert result["runtime"]["dataset_id"] == "dataset-001"
 
     def test_validate_kb_runtime_requires_base_url_when_enabled(self):
         from api.ai import validate_kb_runtime_config, KBRemoteRuntimeConfig
@@ -710,12 +797,23 @@ class TestKBRemoteRuntimeConfig:
         assert exc_info.value.status_code == 400
         assert "base_url is required" in str(exc_info.value.detail)
 
+    def test_validate_kb_runtime_requires_dataset_id_when_ragflow(self):
+        from api.ai import validate_kb_runtime_config, KBRemoteRuntimeConfig
+
+        request = KBRemoteRuntimeConfig(provider="ragflow", base_url="http://ragflow:9380")
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(validate_kb_runtime_config(request))
+
+        assert exc_info.value.status_code == 400
+        assert "dataset_id is required" in str(exc_info.value.detail)
+
     def test_update_kb_runtime_config_success(self):
         from api.ai import update_kb_runtime_config, KBRemoteRuntimeConfig
 
         request = KBRemoteRuntimeConfig(
             provider="ragflow",
             base_url="http://ragflow:9380",
+            dataset_id="dataset-001",
             timeout_seconds=10,
             persist_to_deployment=False,
         )
@@ -732,4 +830,5 @@ class TestKBRemoteRuntimeConfig:
         assert result["updated"] is True
         assert result["runtime"]["provider"] == "ragflow"
         assert result["runtime"]["base_url"] == "http://ragflow:9380"
+        assert result["runtime"]["dataset_id"] == "dataset-001"
         mock_gateway.start_outbox_worker.assert_called_once()

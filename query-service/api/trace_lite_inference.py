@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 
@@ -54,14 +54,19 @@ def extract_request_id(attrs: Dict[str, Any], message: str = "") -> str:
 
 def to_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
-        return value
-    text = str(value or "")
-    if not text:
-        return datetime.utcnow()
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        return datetime.utcnow()
+        parsed = value
+    else:
+        text = str(value or "")
+        if not text:
+            parsed = datetime.now(timezone.utc)
+        else:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def infer_trace_lite_fragments_from_logs(

@@ -15,7 +15,9 @@ from datetime import datetime
 from api.alerts import (
     AlertRule,
     AlertEvent,
+    CreateRuleFromTemplateRequest,
     create_alert_rule,
+    create_alert_rule_from_template,
     update_alert_rule,
     delete_alert_rule,
     get_alert_rules,
@@ -395,6 +397,191 @@ class TestGetAlertEvents:
         assert result['events'][0]['severity'] == "critical"
 
     @pytest.mark.asyncio
+    async def test_get_events_with_namespace_filter(self):
+        """测试按 namespace 过滤事件"""
+        from api.alerts import _alert_events
+
+        event1 = AlertEvent(
+            id="event-1",
+            rule_id="rule-1",
+            rule_name="CPU Alert",
+            metric_name="cpu_usage",
+            service_name="api-server",
+            namespace="prod-a",
+            current_value=95.0,
+            threshold=90.0,
+            condition="gt",
+            severity="critical",
+            message="CPU is high",
+            fired_at="2026-02-09T12:00:00Z",
+            status="firing",
+        )
+        event2 = AlertEvent(
+            id="event-2",
+            rule_id="rule-2",
+            rule_name="Mem Alert",
+            metric_name="mem_usage",
+            service_name="api-server",
+            current_value=92.0,
+            threshold=90.0,
+            condition="gt",
+            severity="warning",
+            message="Memory is high",
+            fired_at="2026-02-09T12:01:00Z",
+            status="firing",
+            labels={"namespace": "prod-b"},
+        )
+
+        _alert_events.extend([event1, event2])
+
+        result = await get_alert_events(namespace="prod-a")
+
+        assert result['total'] == 1
+        assert result['events'][0]['id'] == "event-1"
+
+    @pytest.mark.asyncio
+    async def test_get_events_with_source_service_filter(self):
+        """测试按边级 source_service 精确过滤事件"""
+        from api.alerts import _alert_events
+
+        event1 = AlertEvent(
+            id="event-1",
+            rule_id="rule-1",
+            rule_name="edge latency",
+            metric_name="edge_p95_ms_5m",
+            service_name="checkout->payment",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod-a",
+            current_value=1200.0,
+            threshold=1000.0,
+            condition="gt",
+            severity="warning",
+            message="latency high",
+            fired_at="2026-02-09T12:00:00Z",
+            status="firing",
+        )
+        event2 = AlertEvent(
+            id="event-2",
+            rule_id="rule-2",
+            rule_name="edge error",
+            metric_name="edge_error_rate_5m",
+            service_name="gateway->payment",
+            source_service="gateway",
+            target_service="payment",
+            namespace="prod-a",
+            current_value=8.0,
+            threshold=5.0,
+            condition="gt",
+            severity="warning",
+            message="error high",
+            fired_at="2026-02-09T12:01:00Z",
+            status="firing",
+        )
+
+        _alert_events.extend([event1, event2])
+
+        result = await get_alert_events(source_service="checkout")
+
+        assert result['total'] == 1
+        assert result['events'][0]['id'] == "event-1"
+
+    @pytest.mark.asyncio
+    async def test_get_events_with_target_service_filter(self):
+        """测试按边级 target_service 精确过滤事件"""
+        from api.alerts import _alert_events
+
+        event1 = AlertEvent(
+            id="event-1",
+            rule_id="rule-1",
+            rule_name="edge latency",
+            metric_name="edge_p95_ms_5m",
+            service_name="checkout->payment",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod-a",
+            current_value=1200.0,
+            threshold=1000.0,
+            condition="gt",
+            severity="warning",
+            message="latency high",
+            fired_at="2026-02-09T12:00:00Z",
+            status="firing",
+        )
+        event2 = AlertEvent(
+            id="event-2",
+            rule_id="rule-2",
+            rule_name="edge timeout",
+            metric_name="edge_timeout_rate_5m",
+            service_name="checkout->inventory",
+            source_service="checkout",
+            target_service="inventory",
+            namespace="prod-a",
+            current_value=3.0,
+            threshold=2.0,
+            condition="gt",
+            severity="warning",
+            message="timeout high",
+            fired_at="2026-02-09T12:01:00Z",
+            status="firing",
+        )
+
+        _alert_events.extend([event1, event2])
+
+        result = await get_alert_events(target_service="payment")
+
+        assert result['total'] == 1
+        assert result['events'][0]['id'] == "event-1"
+
+    @pytest.mark.asyncio
+    async def test_get_events_with_scope_filter(self):
+        """测试按 edge/service scope 过滤事件"""
+        from api.alerts import _alert_events
+
+        service_event = AlertEvent(
+            id="event-service",
+            rule_id="rule-service",
+            rule_name="CPU Alert",
+            metric_name="cpu_usage",
+            service_name="api-server",
+            namespace="prod-a",
+            current_value=95.0,
+            threshold=90.0,
+            condition="gt",
+            severity="critical",
+            message="CPU high",
+            fired_at="2026-02-09T12:00:00Z",
+            status="firing",
+        )
+        edge_event = AlertEvent(
+            id="event-edge",
+            rule_id="rule-edge",
+            rule_name="Edge Latency",
+            metric_name="edge_p95_ms_5m",
+            service_name="checkout->payment",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod-a",
+            current_value=1200.0,
+            threshold=1000.0,
+            condition="gt",
+            severity="warning",
+            message="latency high",
+            fired_at="2026-02-09T12:01:00Z",
+            status="firing",
+        )
+
+        _alert_events.extend([service_event, edge_event])
+
+        edge_result = await get_alert_events(scope="edge")
+        service_result = await get_alert_events(scope="service")
+
+        assert edge_result['total'] == 1
+        assert edge_result['events'][0]['id'] == "event-edge"
+        assert service_result['total'] == 1
+        assert service_result['events'][0]['id'] == "event-service"
+
+    @pytest.mark.asyncio
     async def test_get_events_with_limit(self):
         """测试限制返回数量"""
         from api.alerts import _alert_events
@@ -433,7 +620,8 @@ class TestGetAlertEvents:
 
         result = await get_alert_events(limit=1)
 
-        assert result['total'] == 1
+        # total 表示筛选后的总条数，不受分页 limit 影响
+        assert result['total'] == 2
 
 
 class TestEvaluateAlertRules:
@@ -451,8 +639,8 @@ class TestEvaluateAlertRules:
             with pytest.raises(Exception) as exc_info:
                 await evaluate_alert_rules()
 
-            # 代码在实际调用 storage.get_metrics() 时会失败
-            assert exc_info.value.status_code == 500
+            # storage 未初始化时应返回 503
+            assert exc_info.value.status_code == 503
         finally:
             alerts._STORAGE_ADAPTER = original_storage
 
@@ -481,6 +669,7 @@ class TestEvaluateAlertRules:
             metric_name="cpu_usage",
             condition="gt",
             threshold=80.0,
+            duration=0,
             enabled=True
         )
         await create_alert_rule(rule)
@@ -490,6 +679,41 @@ class TestEvaluateAlertRules:
         assert result['status'] == 'ok'
         assert result['evaluated_rules'] >= 1
         assert result['triggered_alerts'] >= 1
+
+    @pytest.mark.asyncio
+    async def test_evaluate_namespace_rule_ignores_unknown_namespace_metric(self):
+        """指定 namespace 的规则不应被未知 namespace 指标触发。"""
+        from api.alerts import _alert_events
+
+        mock_storage = Mock()
+        mock_storage.get_metrics = Mock(return_value=[
+            {
+                'service_name': 'api-server',
+                'metric_name': 'cpu_usage',
+                'value': 95.0,
+                'labels': {},
+            }
+        ])
+        mock_storage.execute_query = Mock(return_value=[])
+
+        set_storage_adapter(mock_storage)
+
+        rule = AlertRule(
+            name="CPU Alert Namespace Scoped",
+            metric_name="cpu_usage",
+            service_name="api-server",
+            namespace="prod-a",
+            condition="gt",
+            threshold=80.0,
+            enabled=True,
+        )
+        await create_alert_rule(rule)
+
+        result = await evaluate_alert_rules()
+
+        assert result['status'] == 'ok'
+        assert result['triggered_alerts'] == 0
+        assert len(_alert_events) == 0
 
     @pytest.mark.asyncio
     async def test_evaluate_disabled_rule(self):
@@ -519,6 +743,200 @@ class TestEvaluateAlertRules:
 
         # 规则应该被评估但不会触发
         assert result['evaluated_rules'] >= 1
+
+
+    @pytest.mark.asyncio
+    async def test_create_edge_rule_from_template_with_services(self):
+        """边级模板建规则应保留 source/target 维度。"""
+        payload = CreateRuleFromTemplateRequest(
+            template_id="edge-error-rate-5m",
+            name="checkout->payment error",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod",
+        )
+
+        result = await create_alert_rule_from_template(payload)
+
+        assert result['status'] == 'ok'
+        assert result['rule']['metric_name'] == 'edge_error_rate_5m'
+        assert result['rule']['source_service'] == 'checkout'
+        assert result['rule']['target_service'] == 'payment'
+        assert result['rule']['labels']['scope'] == 'edge'
+        assert result['rule']['labels']['template_id'] == 'edge-error-rate-5m'
+
+    @pytest.mark.asyncio
+    async def test_evaluate_edge_rule_from_edge_red_metrics(self):
+        """边级规则应能够基于 edge RED 指标触发。"""
+        from api.alerts import _alert_events
+
+        mock_storage = Mock()
+        mock_storage.get_metrics = Mock(return_value=[])
+        mock_storage.execute_query = Mock(return_value=[])
+        mock_storage.get_edge_red_metrics = Mock(return_value={
+            'checkout->payment': {
+                'call_count': 120,
+                'error_count': 18,
+                'error_rate': 0.15,
+                'p95': 3200.0,
+                'timeout_rate': 0.04,
+            }
+        })
+        set_storage_adapter(mock_storage)
+
+        rule = AlertRule(
+            name="checkout payment edge error",
+            metric_name="edge_error_rate_5m",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod",
+            condition="gt",
+            threshold=10.0,
+            duration=0,
+            enabled=True,
+            labels={'scope': 'edge'},
+        )
+        await create_alert_rule(rule)
+
+        result = await evaluate_alert_rules()
+
+        assert result['status'] == 'ok'
+        assert result['triggered_alerts'] >= 1
+        assert len(_alert_events) >= 1
+        event = _alert_events[0]
+        assert event.metric_name == 'edge_error_rate_5m'
+        assert event.source_service == 'checkout'
+        assert event.target_service == 'payment'
+        assert event.service_name == 'checkout->payment'
+        assert event.current_value == 15.0
+        assert event.labels['source_service'] == 'checkout'
+        assert event.labels['target_service'] == 'payment'
+
+    @pytest.mark.asyncio
+    async def test_evaluate_edge_p99_rule_from_edge_red_metrics(self):
+        """边级 P99 规则应能够使用 edge RED 的 p99 指标。"""
+        from api.alerts import _alert_events
+
+        mock_storage = Mock()
+        mock_storage.get_metrics = Mock(return_value=[])
+        mock_storage.execute_query = Mock(return_value=[])
+        mock_storage.get_edge_red_metrics = Mock(return_value={
+            'checkout->payment': {
+                'call_count': 180,
+                'error_count': 9,
+                'error_rate': 0.05,
+                'p95': 2400.0,
+                'p99': 5400.0,
+                'timeout_rate': 0.01,
+            }
+        })
+        set_storage_adapter(mock_storage)
+
+        rule = AlertRule(
+            name="checkout payment edge p99",
+            metric_name="edge_p99_ms_5m",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod",
+            condition="gt",
+            threshold=3000.0,
+            duration=0,
+            enabled=True,
+            labels={'scope': 'edge'},
+        )
+        await create_alert_rule(rule)
+
+        result = await evaluate_alert_rules()
+
+        assert result['status'] == 'ok'
+        assert result['triggered_alerts'] >= 1
+        assert len(_alert_events) >= 1
+        event = _alert_events[0]
+        assert event.metric_name == 'edge_p99_ms_5m'
+        assert event.current_value == 5400.0
+        assert event.service_name == 'checkout->payment'
+
+    @pytest.mark.asyncio
+    async def test_evaluate_edge_call_count_rule_zero_fill_when_edge_missing(self):
+        """固定边级调用量过低规则在窗口内无数据时应按 0 处理。"""
+        from api.alerts import _alert_events
+
+        mock_storage = Mock()
+        mock_storage.get_metrics = Mock(return_value=[])
+        mock_storage.execute_query = Mock(return_value=[])
+        mock_storage.get_edge_red_metrics = Mock(return_value={})
+        set_storage_adapter(mock_storage)
+
+        rule = AlertRule(
+            name="checkout payment edge traffic drop",
+            metric_name="edge_call_count_5m",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod",
+            condition="lt",
+            threshold=1.0,
+            duration=0,
+            enabled=True,
+            labels={'scope': 'edge'},
+        )
+        await create_alert_rule(rule)
+
+        result = await evaluate_alert_rules()
+
+        assert result['status'] == 'ok'
+        assert result['triggered_alerts'] >= 1
+        assert len(_alert_events) >= 1
+        event = _alert_events[0]
+        assert event.metric_name == 'edge_call_count_5m'
+        assert event.current_value == 0.0
+        assert event.source_service == 'checkout'
+        assert event.target_service == 'payment'
+
+    @pytest.mark.asyncio
+    async def test_evaluate_edge_retries_rule_from_edge_red_metrics(self):
+        """边级重试密度规则应能够使用 edge RED 的 retries 指标。"""
+        from api.alerts import _alert_events
+
+        mock_storage = Mock()
+        mock_storage.get_metrics = Mock(return_value=[])
+        mock_storage.execute_query = Mock(return_value=[])
+        mock_storage.get_edge_red_metrics = Mock(return_value={
+            'checkout->payment': {
+                'call_count': 120,
+                'error_count': 6,
+                'error_rate': 0.05,
+                'p95': 900.0,
+                'timeout_rate': 0.01,
+                'retries': 0.25,
+                'pending': 0.03,
+                'dlq': 0.0,
+            }
+        })
+        set_storage_adapter(mock_storage)
+
+        rule = AlertRule(
+            name="checkout payment edge retries",
+            metric_name="edge_retries_per_call_5m",
+            source_service="checkout",
+            target_service="payment",
+            namespace="prod",
+            condition="gt",
+            threshold=0.1,
+            duration=0,
+            enabled=True,
+            labels={'scope': 'edge'},
+        )
+        await create_alert_rule(rule)
+
+        result = await evaluate_alert_rules()
+
+        assert result['status'] == 'ok'
+        assert result['triggered_alerts'] >= 1
+        assert len(_alert_events) >= 1
+        event = _alert_events[0]
+        assert event.metric_name == 'edge_retries_per_call_5m'
+        assert event.current_value == 0.25
+        assert event.service_name == 'checkout->payment'
 
 
 class TestGetAlertStats:

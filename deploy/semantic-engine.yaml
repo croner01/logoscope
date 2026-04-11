@@ -23,7 +23,7 @@ metadata:
   labels:
     app: semantic-engine
 spec:
-  replicas: 1  # 降低副本数以节省资源
+  replicas: 3  # prod 参考: 2
   selector:
     matchLabels:
       app: semantic-engine
@@ -93,23 +93,31 @@ spec:
         - name: USE_QUEUE
           value: "true"  # 启用队列模式
         - name: QUEUE_TYPE
-          value: "redis"  # 使用Redis Stream
-        # Redis配置
-        - name: REDIS_HOST
-          value: "redis"  # 使用Service名
-        - name: REDIS_PORT
-          value: "6379"
-        - name: REDIS_DB
-          value: "0"
-        # 批量处理配置 (P0 优化)
-        - name: REDIS_BATCH_SIZE
-          value: "100"
-        - name: REDIS_BLOCK_MS
-          value: "100"
+          value: "kafka"
+        - name: KAFKA_BROKERS
+          value: "kafka:9092"
+        - name: KAFKA_GROUP_ID
+          value: "log-workers"
+        - name: KAFKA_CLIENT_ID
+          value: "semantic-engine"
+        - name: KAFKA_AUTO_OFFSET_RESET
+          value: "earliest"
+        - name: KAFKA_POLL_TIMEOUT_MS
+          value: "1000"
+        - name: KAFKA_MAX_BATCH_SIZE
+          value: "200"
+        - name: KAFKA_MAX_RETRY_ATTEMPTS
+          value: "3"
+        - name: KAFKA_RETRY_DELAY_SECONDS
+          value: "2"
         - name: CH_BATCH_SIZE
-          value: "2000"
+          value: "1000"  # prod 参考: 2500
         - name: CH_FLUSH_INTERVAL
-          value: "0.5"
+          value: "0.2"  # prod 参考: 0.5
+        - name: CH_BATCH_ASYNC_INSERT
+          value: "true"
+        - name: CH_BATCH_WAIT_FOR_ASYNC_INSERT
+          value: "true"
         - name: DLQ_ENABLED
           value: "true"
         # OpenTelemetry 分布式追踪配置
@@ -125,6 +133,7 @@ spec:
           value: "http://ai-service:8090"
         resources:
           limits:
+            cpu: "2"
             memory: 2Gi
           requests:
             cpu: 500m
@@ -145,47 +154,23 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 10
-      # Worker 容器 - 处理日志队列
-      #      - name: worker
-      #        image: localhost:5000/logoscope/semantic-engine:2.0.0
-      #        imagePullPolicy: IfNotPresent
-      #        command: ["python", "start.py", "worker"]
-      #        env:
-      #        - name: APP_NAME
-      #          value: "semantic-engine-worker"
-      #        - name: CLICKHOUSE_HOST
-      #          value: "clickhouse"
-      #        - name: CLICKHOUSE_PORT
-      #          value: "9000"
-      #        - name: CLICKHOUSE_DATABASE
-      #          value: "logs"
-      #        - name: CLICKHOUSE_USER
-      #          value: "default"
-      #        - name: CLICKHOUSE_PASSWORD
-      #          value: ""
-      #        - name: NEO4J_HOST
-      #          value: "neo4j"
-      #        - name: NEO4J_PORT
-      #          value: "7687"
-      #        - name: NEO4J_USER
-      #          value: "neo4j"
-      #        - name: NEO4J_PASSWORD
-      #          value: "password"
-      #        - name: NEO4J_DATABASE
-      #          value: "neo4j"
-      #        - name: LOG_LEVEL
-      #          value: "info"
-      #        - name: QUEUE_TYPE
-      #          value: "redis"
-      #        - name: REDIS_HOST
-      #          value: "redis"
-      #        - name: REDIS_PORT
-      #          value: "6379"
-      #        - name: REDIS_DB
-      #          value: "0"
-      #        resources:
-      #          limits:
-      #            memory: 1Gi
-      #          requests:
-      #            cpu: 200m
-      #            memory: 512Mi
+---
+#apiVersion: autoscaling/v2
+#kind: HorizontalPodAutoscaler
+#metadata:
+#  name: semantic-engine-hpa
+#  namespace: islap
+#spec:
+#  scaleTargetRef:
+#    apiVersion: apps/v1
+#    kind: Deployment
+#    name: semantic-engine
+#  minReplicas: 3  # prod 参考: 2
+#  maxReplicas: 10  # prod 参考: 8
+#  metrics:
+#  - type: Resource
+#    resource:
+#      name: cpu
+#      target:
+#        type: Utilization
+#        averageUtilization: 70

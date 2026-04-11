@@ -2,7 +2,7 @@
  * Dashboard 页面 - 指挥台增强版
  * 优化目标：更快感知加载、更清晰业务态势、更接近业内可观测性看板风格
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -10,7 +10,6 @@ import {
   Bell,
   BellOff,
   Clock3,
-  Download,
   Gauge,
   Network,
   RefreshCw,
@@ -21,6 +20,7 @@ import {
 import EmptyState from '../components/common/EmptyState';
 import Tooltip from '../components/common/Tooltip';
 import { api } from '../utils/api';
+import { useNavigation } from '../hooks/useNavigation';
 import {
   useAlertEvents,
   useEvents,
@@ -29,9 +29,9 @@ import {
   useInferenceQualityAlerts,
   useLogsStats,
   useTraceStats,
-  useValueKpi,
 } from '../hooks/useApi';
 import { formatColor, formatTime } from '../utils/formatters';
+import { resolveCanonicalServiceName } from '../utils/serviceName';
 
 interface ServicePulse {
   service: string;
@@ -40,8 +40,40 @@ interface ServicePulse {
   errorRate: number;
 }
 
+type LooseRecord = Record<string, unknown>;
+
+const HOTSPOT_TIME_WINDOW = '1 HOUR';
+const HOTSPOT_EXCLUDED_SERVICES_STORAGE_KEY = 'dashboard.hotspot.excluded_services';
+
+function loadExcludedHotspotServices(): string[] {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  const raw = window.localStorage.getItem(HOTSPOT_EXCLUDED_SERVICES_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return Array.from(
+      new Set(
+        parsed
+          .map((item) => resolveCanonicalServiceName(item))
+          .filter((item) => item && item !== 'unknown'),
+      ),
+    );
+  } catch (error) {
+    console.warn('Failed to parse hotspot excluded services:', error);
+    return [];
+  }
+}
+
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
+  const navigation = useNavigation();
 
   // 减少单次请求体积，优先提升首页响应速度
   const {
@@ -49,24 +81,24 @@ const Dashboard: React.FC = () => {
     loading: eventsLoading,
     error: eventsError,
     refetch: refetchEvents,
-  } = useEvents({ limit: 40, exclude_health_check: true });
+  } = useEvents({ limit: 40, time_window: HOTSPOT_TIME_WINDOW, exclude_health_check: true });
   const {
     data: logsStatsData,
     loading: logsStatsLoading,
     error: logsStatsError,
     refetch: refetchLogsStats,
-  } = useLogsStats({ time_window: '1 HOUR' });
+  } = useLogsStats({ time_window: HOTSPOT_TIME_WINDOW });
   const {
     data: traceStatsData,
     loading: traceStatsLoading,
     error: traceStatsError,
     refetch: refetchTraceStats,
-  } = useTraceStats();
+  } = useTraceStats({ time_window: HOTSPOT_TIME_WINDOW });
   const {
     data: topologyData,
     loading: topologyLoading,
     error: topologyError,
-  } = useHybridTopology({ time_window: '1 HOUR' });
+  } = useHybridTopology({ time_window: HOTSPOT_TIME_WINDOW });
   const {
     data: alertsData,
     loading: alertsLoading,
@@ -79,43 +111,53 @@ const Dashboard: React.FC = () => {
     loading: inferenceQualityLoading,
     error: inferenceQualityError,
     refetch: refetchInferenceQuality,
-  } = useInferenceQuality({ time_window: '1 HOUR' });
+  } = useInferenceQuality({ time_window: HOTSPOT_TIME_WINDOW });
   const {
     data: inferenceAlertsData,
     loading: inferenceAlertsLoading,
     error: inferenceAlertsError,
     refetch: refetchInferenceAlerts,
   } = useInferenceQualityAlerts({
-    time_window: '1 HOUR',
+    time_window: HOTSPOT_TIME_WINDOW,
     min_coverage: 0.20,
     max_inferred_ratio: 0.80,
     max_false_positive_rate: 0.30,
   });
 
-  const {
-    data: valueKpiData,
-    loading: valueKpiLoading,
-    error: valueKpiError,
-    refetch: refetchValueKpi,
-  } = useValueKpi({ time_window: '7 DAY' });
-
   const [suppressingMetric, setSuppressingMetric] = useState<string | null>(null);
-  const [exportingValueReport, setExportingValueReport] = useState<boolean>(false);
   const [refreshingAll, setRefreshingAll] = useState<boolean>(false);
+  const [hotspotExcludeInput, setHotspotExcludeInput] = useState<string>('');
+  const [excludedHotspotServices, setExcludedHotspotServices] = useState<string[]>(() => loadExcludedHotspotServices());
 
-  const events = eventsData?.events || [];
-  const alerts = alertsData?.events || [];
-  const topologyNodes = topologyData?.nodes || [];
-  const topologyEdges = topologyData?.edges || [];
+  const events = useMemo(() => eventsData?.events || [], [eventsData?.events]);
+  const alerts = useMemo(() => alertsData?.events || [], [alertsData?.events]);
+  const topologyNodes = useMemo(() => topologyData?.nodes || [], [topologyData?.nodes]);
+  const topologyEdges = useMemo(() => topologyData?.edges || [], [topologyData?.edges]);
 
-  const levelBuckets = logsStatsData?.byLevel || {};
+  const levelBuckets = useMemo(() => logsStatsData?.byLevel || {}, [logsStatsData?.byLevel]);
+  const serviceBuckets = useMemo(() => logsStatsData?.byService || {}, [logsStatsData?.byService]);
+  const serviceErrorBuckets = useMemo(
+    () => logsStatsData?.byServiceErrors || {},
+    [logsStatsData?.byServiceErrors],
+  );
   const totalEvents = Number(logsStatsData?.total || eventsData?.total || 0);
+  const warnCount = Number(levelBuckets.WARN || 0) + Number(levelBuckets.WARNING || 0);
   const errorCount = Number(levelBuckets.ERROR || 0) + Number(levelBuckets.FATAL || 0);
+  const abnormalCount = warnCount + errorCount;
+  const debugTraceCount = Number(levelBuckets.DEBUG || 0) + Number(levelBuckets.TRACE || 0);
+  const activeLogServices = Object.keys(serviceBuckets).length;
+  const topLogServiceEntry = Object.entries(serviceBuckets).sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0];
+  const topLogServiceName = topLogServiceEntry?.[0] || '--';
+  const topLogServiceCount = Number(topLogServiceEntry?.[1] || 0);
+  const topLogServiceRatio = totalEvents > 0 ? (topLogServiceCount / totalEvents) * 100 : 0;
   const errorRate = totalEvents > 0 ? (errorCount / totalEvents) * 100 : 0;
+  const abnormalRate = totalEvents > 0 ? (abnormalCount / totalEvents) * 100 : 0;
+  const debugTraceRate = totalEvents > 0 ? (debugTraceCount / totalEvents) * 100 : 0;
   const firingAlerts = alertsData?.total || 0;
   const topologyNodeCount = topologyNodes.length;
-  const serviceNodeCount = topologyNodes.filter((node: any) => {
-    const type = String(node?.type || '').trim().toLowerCase();
+  const serviceNodeCount = topologyNodes.filter((node) => {
+    const nodeRecord = node as unknown as LooseRecord;
+    const type = String(nodeRecord?.type || '').trim().toLowerCase();
     if (!type) {
       return true;
     }
@@ -124,64 +166,121 @@ const Dashboard: React.FC = () => {
   const activeServices = serviceNodeCount > 0 ? serviceNodeCount : topologyNodeCount;
 
   const avgDuration = Number(traceStatsData?.avg_duration ?? traceStatsData?.avg_latency ?? 0);
+  const excludedHotspotServiceSet = useMemo(
+    () => new Set(excludedHotspotServices.map((service) => service.toLowerCase())),
+    [excludedHotspotServices],
+  );
 
-  const servicePulse = useMemo<ServicePulse[]>(() => {
-    const topologyPulse = topologyNodes
-      .map((node: any) => {
-        const metrics = node?.metrics || {};
-        const service = String(metrics?.service_name || node?.service?.name || node?.label || node?.id || 'unknown').trim() || 'unknown';
-        const total = Number(metrics?.log_count ?? metrics?.trace_count ?? 0);
-        const errors = Number(metrics?.error_count ?? 0);
-        return {
-          service,
-          total: Number.isFinite(total) ? Math.max(total, 0) : 0,
-          errors: Number.isFinite(errors) ? Math.max(errors, 0) : 0,
-        };
-      })
-      .filter((item) => item.service && (item.total > 0 || item.errors > 0))
-      .map((item) => ({
-        ...item,
-        errorRate: item.total > 0 ? (item.errors / item.total) * 100 : (item.errors > 0 ? 100 : 0),
-      }))
-      .sort((a, b) => {
-        if (b.errorRate !== a.errorRate) {
-          return b.errorRate - a.errorRate;
-        }
-        return b.total - a.total;
-      })
-      .slice(0, 6);
-    if (topologyPulse.length > 0) {
-      return topologyPulse;
-    }
-
+  const servicePulseBaseline = useMemo<ServicePulse[]>(() => {
     const buckets: Record<string, { total: number; errors: number }> = {};
-
-    events.forEach((event) => {
-      const service = (event.service_name || 'unknown').trim() || 'unknown';
+    const ingest = (serviceValue: unknown, totalValue: unknown, errorValue: unknown): void => {
+      const service = resolveCanonicalServiceName(serviceValue);
+      if (!service || service === 'unknown') {
+        return;
+      }
+      const totalNum = Number(totalValue);
+      const errorNum = Number(errorValue);
+      const total = Number.isFinite(totalNum) ? Math.max(totalNum, 0) : 0;
+      const errors = Number.isFinite(errorNum) ? Math.max(errorNum, 0) : 0;
+      if (total <= 0 && errors <= 0) {
+        return;
+      }
       if (!buckets[service]) {
         buckets[service] = { total: 0, errors: 0 };
       }
-      buckets[service].total += 1;
-      if (event.level === 'ERROR' || event.level === 'FATAL') {
-        buckets[service].errors += 1;
+      buckets[service].total += total;
+      buckets[service].errors += errors;
+    };
+
+    topologyNodes.forEach((node) => {
+      const nodeRecord = node as unknown as LooseRecord;
+      const metrics = (nodeRecord?.metrics as LooseRecord | undefined) || {};
+      const hasLogCount = metrics?.log_count !== undefined && metrics?.log_count !== null;
+      if (!hasLogCount) {
+        return;
       }
-    });
+      const serviceMeta = nodeRecord?.service as LooseRecord | undefined;
+        ingest(
+          metrics?.service_name || serviceMeta?.name || nodeRecord?.label || nodeRecord?.id || 'unknown',
+          metrics?.log_count,
+          metrics?.error_count ?? 0,
+        );
+      });
+
+    // 当拓扑侧没有日志口径字段时，回退到 logs stats 聚合口径，避免受 events limit 采样影响。
+    if (Object.keys(buckets).length === 0) {
+      Object.entries(serviceBuckets).forEach(([service, total]) => {
+        ingest(service, total, serviceErrorBuckets[service] || 0);
+      });
+    }
 
     return Object.entries(buckets)
       .map(([service, v]) => ({
         service,
         total: v.total,
         errors: v.errors,
-        errorRate: v.total > 0 ? (v.errors / v.total) * 100 : 0,
+        errorRate: v.total > 0 ? (v.errors / v.total) * 100 : (v.errors > 0 ? 100 : 0),
       }))
       .sort((a, b) => {
         if (b.errorRate !== a.errorRate) {
           return b.errorRate - a.errorRate;
         }
         return b.total - a.total;
-      })
-      .slice(0, 6);
-  }, [events, topologyNodes]);
+      });
+  }, [serviceBuckets, serviceErrorBuckets, topologyNodes]);
+
+  const servicePulse = useMemo<ServicePulse[]>(
+    () => servicePulseBaseline
+      .filter((item) => !excludedHotspotServiceSet.has(item.service.toLowerCase()))
+      .slice(0, 6),
+    [excludedHotspotServiceSet, servicePulseBaseline],
+  );
+
+  const hotspotLogsPath = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set('time_window', HOTSPOT_TIME_WINDOW);
+    params.set('exclude_health_check', 'true');
+    return `/logs?${params.toString()}`;
+  }, []);
+
+  const addExcludedHotspotServices = (rawValue: string): void => {
+    const tokens = rawValue
+      .split(/[\n,;]+/)
+      .map((item) => resolveCanonicalServiceName(item))
+      .filter((item) => item && item !== 'unknown');
+    if (tokens.length === 0) {
+      return;
+    }
+    setExcludedHotspotServices((prev) => Array.from(new Set([...prev, ...tokens])).sort((a, b) =>
+      a.localeCompare(b, 'zh-CN', { sensitivity: 'base' }),
+    ));
+    setHotspotExcludeInput('');
+  };
+
+  const removeExcludedHotspotService = (service: string): void => {
+    setExcludedHotspotServices((prev) => prev.filter((item) => item !== service));
+  };
+
+  const jumpToHotspotLogs = (service: string): void => {
+    const normalizedService = resolveCanonicalServiceName(service);
+    const params = new URLSearchParams();
+    params.set('service', normalizedService);
+    params.set('time_window', HOTSPOT_TIME_WINDOW);
+    params.set('exclude_health_check', 'true');
+    navigate(`/logs?${params.toString()}`);
+  };
+
+  const allHotspotServicesExcluded = servicePulseBaseline.length > 0 && servicePulse.length === 0;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem(
+      HOTSPOT_EXCLUDED_SERVICES_STORAGE_KEY,
+      JSON.stringify(excludedHotspotServices),
+    );
+  }, [excludedHotspotServices]);
 
   const latestEventTime = useMemo(() => {
     const first = events[0]?.timestamp;
@@ -203,9 +302,6 @@ const Dashboard: React.FC = () => {
     ? `推断样本不足（<${falsePositiveMinSample || 1}）`
     : '当前窗口无观测基线';
 
-  const valueMetrics = valueKpiData?.metrics;
-  const valueGateSummary = valueKpiData?.release_gate_summary;
-
   const handleRefreshAll = async () => {
     try {
       setRefreshingAll(true);
@@ -216,7 +312,6 @@ const Dashboard: React.FC = () => {
         refetchAlerts(),
         refetchInferenceQuality(),
         refetchInferenceAlerts(),
-        refetchValueKpi(),
       ]);
     } finally {
       setRefreshingAll(false);
@@ -236,24 +331,6 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  const handleExportWeeklyValueReport = async () => {
-    try {
-      setExportingValueReport(true);
-      const csvContent = await api.exportValueKpiWeekly({ weeks: 8 });
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `value-kpi-weekly-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Failed to export value weekly report:', error);
-    } finally {
-      setExportingValueReport(false);
-    }
-  };
-
   return (
     <div className="space-y-6 pb-2">
       <section className="rounded-2xl border border-slate-200 bg-[linear-gradient(120deg,#0f172a_0%,#1e293b_45%,#0f766e_100%)] text-white shadow-lg">
@@ -266,7 +343,7 @@ const Dashboard: React.FC = () => {
               </div>
               <h1 className="mt-3 text-2xl font-bold tracking-tight md:text-3xl">仪表盘总览</h1>
               <p className="mt-2 text-sm text-slate-200">
-                面向故障定位与稳定性运营，聚焦异常密度、服务健康和发布质量。
+                面向故障定位与稳定性运营，聚焦异常密度、服务健康和日志质量。
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -338,15 +415,64 @@ const Dashboard: React.FC = () => {
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-900">服务健康热区</h2>
-              <p className="text-xs text-slate-500">按错误率 + 流量排序，优先排查上方服务</p>
+              <p className="text-xs text-slate-500">按错误率 + 流量排序，统计窗口：最近 1 小时日志</p>
             </div>
-            <Link to="/logs" className="text-xs font-medium text-teal-700 hover:text-teal-800">查看日志明细</Link>
+            <Link to={hotspotLogsPath} className="text-xs font-medium text-teal-700 hover:text-teal-800">查看日志明细</Link>
           </div>
           <div className="p-4">
+            <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  value={hotspotExcludeInput}
+                  onChange={(e) => setHotspotExcludeInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addExcludedHotspotServices(hotspotExcludeInput);
+                    }
+                  }}
+                  placeholder="屏蔽服务，支持逗号分隔"
+                  className="h-8 min-w-[220px] flex-1 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-700 placeholder:text-slate-400"
+                />
+                <button
+                  onClick={() => addExcludedHotspotServices(hotspotExcludeInput)}
+                  className="h-8 rounded-md bg-slate-800 px-3 text-xs font-medium text-white hover:bg-slate-700"
+                >
+                  添加屏蔽
+                </button>
+                {excludedHotspotServices.length > 0 ? (
+                  <button
+                    onClick={() => setExcludedHotspotServices([])}
+                    className="h-8 rounded-md border border-slate-300 px-3 text-xs text-slate-600 hover:bg-white"
+                  >
+                    清空
+                  </button>
+                ) : null}
+              </div>
+              {excludedHotspotServices.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {excludedHotspotServices.map((service) => (
+                    <button
+                      key={`excluded-${service}`}
+                      onClick={() => removeExcludedHotspotService(service)}
+                      className="rounded-full border border-slate-300 bg-white px-2.5 py-0.5 text-[11px] text-slate-600 hover:border-slate-400"
+                    >
+                      {service} · 移除
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-2 text-[11px] text-slate-500">未配置屏蔽服务，热区将展示全部服务。</div>
+              )}
+            </div>
+
             {topologyLoading ? (
               <InlineLoading text="分析服务健康中..." />
             ) : topologyError ? (
               <InlineError text={topologyError.message || '服务健康计算失败'} />
+            ) : allHotspotServicesExcluded ? (
+              <EmptyState title="热区服务已全部屏蔽" description="请移除部分屏蔽服务后再查看热区排行" />
             ) : servicePulse.length === 0 ? (
               <EmptyState title="暂无服务健康样本" description="等待日志数据进入分析窗口" />
             ) : (
@@ -358,20 +484,29 @@ const Dashboard: React.FC = () => {
                       ? 'bg-amber-500'
                       : 'bg-emerald-500';
                   return (
-                    <button
-                      key={item.service}
-                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-left hover:bg-slate-50"
-                      onClick={() => navigate(`/logs?service=${encodeURIComponent(item.service)}`)}
-                    >
-                      <div className="mb-1 flex items-center justify-between text-xs">
-                        <span className="font-semibold text-slate-800">{item.service}</span>
-                        <span className="text-slate-500">{item.errors}/{item.total} error</span>
+                    <div key={item.service} className="rounded-lg border border-slate-200">
+                      <button
+                        className="w-full px-3 py-2 text-left hover:bg-slate-50"
+                        onClick={() => jumpToHotspotLogs(item.service)}
+                      >
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-800">{item.service}</span>
+                          <span className="text-slate-500">{item.errors}/{item.total} error</span>
+                        </div>
+                        <div className="h-2 rounded bg-slate-100">
+                          <div className={`h-2 rounded ${barColor}`} style={{ width: `${Math.min(item.errorRate, 100)}%` }} />
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-500">错误率 {item.errorRate.toFixed(1)}%</div>
+                      </button>
+                      <div className="border-t border-slate-100 px-3 py-1.5">
+                        <button
+                          onClick={() => addExcludedHotspotServices(item.service)}
+                          className="text-[11px] text-slate-500 hover:text-slate-700"
+                        >
+                          屏蔽此服务
+                        </button>
                       </div>
-                      <div className="h-2 rounded bg-slate-100">
-                        <div className={`h-2 rounded ${barColor}`} style={{ width: `${Math.min(item.errorRate, 100)}%` }} />
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-500">错误率 {item.errorRate.toFixed(1)}%</div>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -382,7 +517,7 @@ const Dashboard: React.FC = () => {
         <div className="xl:col-span-2 rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
             <h2 className="text-sm font-semibold text-slate-900">实时告警流</h2>
-            <Link to="/alerts" className="text-xs font-medium text-teal-700 hover:text-teal-800">全部告警</Link>
+            <Link to="/alerts?tab=events&status=firing" className="text-xs font-medium text-teal-700 hover:text-teal-800">全部告警</Link>
           </div>
           <div className="p-4">
             {alertsLoading ? (
@@ -395,7 +530,21 @@ const Dashboard: React.FC = () => {
                   <button
                     key={alert.id}
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-left hover:bg-slate-50"
-                    onClick={() => navigate(`/alerts?service=${encodeURIComponent(alert.service_name)}&severity=${alert.severity}`)}
+                    onClick={() => {
+                      const sourceService = String(alert.source_service || '').trim();
+                      const targetService = String(alert.target_service || '').trim();
+                      const edgeScope = sourceService || targetService ? 'edge' : 'service';
+                      navigation.goToAlerts({
+                        tab: 'events',
+                        status: 'firing',
+                        severity: alert.severity,
+                        serviceName: alert.service_name || undefined,
+                        namespace: alert.namespace || undefined,
+                        scope: edgeScope,
+                        sourceService: sourceService || undefined,
+                        targetService: targetService || undefined,
+                      });
+                    }}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs font-semibold text-slate-800">{alert.rule_name}</span>
@@ -457,22 +606,29 @@ const Dashboard: React.FC = () => {
               <InlineError text={inferenceQualityError?.message || inferenceAlertsError?.message || '推断质量加载失败'} />
             ) : inferenceAlertsData?.alerts?.length ? (
               <div className="space-y-2">
-                {inferenceAlertsData.alerts.slice(0, 4).map((alert: any) => (
-                  <div key={`${alert.metric}-${alert.expression}`} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
-                    <div>
-                      <div className="text-xs font-semibold text-slate-800">{alert.metric}</div>
-                      <div className="text-[11px] text-slate-500">{alert.expression} · 当前 {formatPercent(Number(alert.value || 0))}</div>
+                {inferenceAlertsData.alerts.slice(0, 4).map((alert: unknown) => {
+                  const alertRecord = alert as LooseRecord;
+                  const metric = String(alertRecord.metric || '');
+                  const expression = String(alertRecord.expression || '');
+                  const value = Number(alertRecord.value || 0);
+                  const suppressed = Boolean(alertRecord.suppressed);
+                  return (
+                    <div key={`${metric}-${expression}`} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
+                      <div>
+                        <div className="text-xs font-semibold text-slate-800">{metric}</div>
+                        <div className="text-[11px] text-slate-500">{expression} · 当前 {formatPercent(value)}</div>
+                      </div>
+                      <button
+                        onClick={() => handleToggleInferenceSuppression(metric, suppressed)}
+                        disabled={!metric || suppressingMetric === metric}
+                        className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-200 disabled:opacity-50"
+                      >
+                        {suppressed ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
+                        {suppressed ? '取消抑制' : '抑制'}
+                      </button>
                     </div>
-                    <button
-                      onClick={() => handleToggleInferenceSuppression(alert.metric, !!alert.suppressed)}
-                      disabled={suppressingMetric === alert.metric}
-                      className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-200 disabled:opacity-50"
-                    >
-                      {alert.suppressed ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
-                      {alert.suppressed ? '取消抑制' : '抑制'}
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
@@ -486,50 +642,44 @@ const Dashboard: React.FC = () => {
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
             <div>
               <div className="flex items-center gap-1">
-                <h2 className="text-sm font-semibold text-slate-900">价值指标（7 DAY）</h2>
+                <h2 className="text-sm font-semibold text-slate-900">日志质量指标（最近 1 小时）</h2>
                 <Tooltip
-                  title="价值指标口径"
+                  title="日志质量指标口径"
                   lines={[
-                    'MTTD/MTTR 用于衡量发现与修复效率，越低越好。',
-                    'Trace-Log 关联率与拓扑覆盖率反映可观测性链路完整度。',
-                    '发布回归通过率与 Gate 结果用于验证发布稳定性。',
+                    '仅基于日志数据统计，不包含发布回归/质量门禁口径。',
+                    '错误率 = (ERROR + FATAL) / 总日志量。',
+                    '告警级占比 = (WARN + ERROR + FATAL) / 总日志量。',
                   ]}
                   widthClass="w-[320px]"
                 />
               </div>
-              <p className="text-xs text-slate-500">借鉴 Datadog/New Relic 的价值追踪视图</p>
+              <p className="text-xs text-slate-500">用于快速识别日志异常密度、服务覆盖与集中度</p>
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={refetchValueKpi}
+                onClick={refetchLogsStats}
                 className="rounded-md bg-slate-100 px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-200"
               >
                 刷新
-              </button>
-              <button
-                onClick={handleExportWeeklyValueReport}
-                disabled={exportingValueReport}
-                className="inline-flex items-center gap-1 rounded-md bg-teal-50 px-2.5 py-1.5 text-xs text-teal-700 hover:bg-teal-100 disabled:opacity-50"
-              >
-                <Download className="h-3.5 w-3.5" />
-                {exportingValueReport ? '导出中...' : '导出周报'}
               </button>
             </div>
           </div>
 
           <div className="p-4">
-            {valueKpiLoading ? (
-              <InlineLoading text="加载价值指标中..." />
-            ) : valueKpiError ? (
-              <InlineError text={valueKpiError.message || '价值指标加载失败'} />
+            {logsStatsLoading ? (
+              <InlineLoading text="加载日志质量指标中..." />
+            ) : logsStatsError ? (
+              <InlineError text={logsStatsError.message || '日志质量指标加载失败'} />
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <ValueLine title="MTTD" value={`${Number(valueMetrics?.mttd_minutes || 0).toFixed(1)} min`} good={Number(valueMetrics?.mttd_minutes || 0) <= 15} />
-                <ValueLine title="MTTR" value={`${Number(valueMetrics?.mttr_minutes || 0).toFixed(1)} min`} good={Number(valueMetrics?.mttr_minutes || 0) <= 30} />
-                <ValueLine title="Trace-Log 关联率" value={formatPercent(Number(valueMetrics?.trace_log_correlation_rate || 0))} good={Number(valueMetrics?.trace_log_correlation_rate || 0) >= 0.5} />
-                <ValueLine title="拓扑覆盖率" value={formatPercent(Number(valueMetrics?.topology_coverage_rate || 0))} good={Number(valueMetrics?.topology_coverage_rate || 0) >= 0.5} />
-                <ValueLine title="发布回归通过率" value={formatPercent(Number(valueMetrics?.release_regression_pass_rate || 0))} good={Number(valueMetrics?.release_regression_pass_rate || 0) >= 0.95} />
-                <ValueLine title="Gate 结果" value={`P:${valueGateSummary?.passed || 0} / F:${valueGateSummary?.failed || 0}`} good={Number(valueGateSummary?.failed || 0) === 0} />
+                <ValueLine title="日志总量" value={totalEvents.toLocaleString()} tone={totalEvents > 0 ? 'good' : 'neutral'} />
+                <ValueLine title="错误日志数" value={errorCount.toLocaleString()} tone={errorRate <= 5 ? 'good' : 'warning'} />
+                <ValueLine title="错误日志占比" value={`${errorRate.toFixed(2)}%`} tone={errorRate <= 5 ? 'good' : 'warning'} />
+                <ValueLine title="告警级占比 (WARN+)" value={`${abnormalRate.toFixed(2)}%`} tone={abnormalRate <= 10 ? 'good' : 'warning'} />
+                <ValueLine title="调试日志占比 (TRACE+DEBUG)" value={`${debugTraceRate.toFixed(2)}%`} tone={debugTraceRate <= 30 ? 'good' : 'warning'} />
+                <ValueLine title="产生日志服务数" value={activeLogServices.toLocaleString()} tone={activeLogServices > 0 ? 'good' : 'neutral'} />
+                <ValueLine title="Top 服务" value={`${topLogServiceName} (${topLogServiceCount.toLocaleString()})`} tone={topLogServiceCount > 0 ? 'good' : 'neutral'} />
+                <ValueLine title="Top 服务占比" value={`${topLogServiceRatio.toFixed(2)}%`} tone={topLogServiceRatio <= 40 ? 'good' : 'warning'} />
               </div>
             )}
           </div>
@@ -650,11 +800,17 @@ function QualityBlock(props: { title: string; value: string; status: 'ok' | 'war
   );
 }
 
-function ValueLine(props: { title: string; value: string; good: boolean }): JSX.Element {
+function ValueLine(props: { title: string; value: string; tone: 'good' | 'warning' | 'neutral' }): JSX.Element {
+  const valueClass =
+    props.tone === 'good'
+      ? 'text-emerald-700'
+      : props.tone === 'warning'
+        ? 'text-amber-700'
+        : 'text-slate-700';
   return (
     <div className="rounded-lg border border-slate-200 px-3 py-2">
       <div className="text-xs text-slate-500">{props.title}</div>
-      <div className={`mt-1 text-sm font-semibold ${props.good ? 'text-emerald-700' : 'text-amber-700'}`}>
+      <div className={`mt-1 text-sm font-semibold ${valueClass}`}>
         {props.value}
       </div>
     </div>

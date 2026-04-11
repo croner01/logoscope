@@ -1,6 +1,6 @@
 """Tests for extracted trace-lite inference helpers."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from api import trace_lite_inference
 
@@ -43,9 +43,20 @@ def test_to_datetime_parses_iso_and_falls_back():
     assert parsed.year == 2026
     assert parsed.month == 3
     assert parsed.day == 1
+    assert parsed.tzinfo == timezone.utc
 
     fallback = trace_lite_inference.to_datetime("not-a-datetime")
     assert isinstance(fallback, datetime)
+    assert fallback.tzinfo == timezone.utc
+
+
+def test_to_datetime_normalizes_naive_and_aware_values_to_utc():
+    naive = trace_lite_inference.to_datetime("2026-03-01 01:02:03")
+    aware = trace_lite_inference.to_datetime("2026-03-01T09:02:03+08:00")
+
+    assert naive.tzinfo == timezone.utc
+    assert aware.tzinfo == timezone.utc
+    assert aware.hour == 1
 
 
 def test_infer_trace_lite_fragments_request_id_and_time_window():
@@ -98,3 +109,30 @@ def test_infer_trace_lite_fragments_request_id_and_time_window():
     assert "billing->ledger" in edge_ids
     assert stats["request_id_edges"] >= 1
     assert stats["time_window_edges"] >= 1
+
+
+def test_infer_trace_lite_fragments_handles_mixed_timestamp_timezones():
+    rows = [
+        {
+            "id": "1",
+            "timestamp": "2026-03-01T00:00:00Z",
+            "service_name": "gateway",
+            "namespace": "prod",
+            "message": "request_id=req-1 start",
+            "trace_id": "trace-1",
+            "attributes_json": '{"request_id":"req-1"}',
+        },
+        {
+            "id": "2",
+            "timestamp": "2026-03-01 00:00:01",
+            "service_name": "order",
+            "namespace": "prod",
+            "message": "request_id=req-1 process",
+            "trace_id": "trace-1",
+            "attributes_json": '{"request_id":"req-1"}',
+        },
+    ]
+
+    fragments, stats = trace_lite_inference.infer_trace_lite_fragments_from_logs(rows)
+    assert any(item["fragment_id"] == "gateway->order" for item in fragments)
+    assert stats["request_id_edges"] >= 1

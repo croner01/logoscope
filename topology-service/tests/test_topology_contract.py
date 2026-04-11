@@ -57,7 +57,8 @@ class TestTopologyContract:
             },
         }
         node = apply_node_contract(node)
-        assert node["node_key"] == "default:checkout:prod"
+        assert node["node_key"] == "unknown:checkout:prod"
+        assert node["service"]["namespace"] == "unknown"
         assert node["service"]["name"] == "checkout"
         assert node["evidence_type"] == "observed"
         assert "coverage" in node

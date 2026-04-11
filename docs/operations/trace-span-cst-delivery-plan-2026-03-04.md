@@ -93,7 +93,7 @@
 Chart 默认包含：
 
 - clickhouse
-- redis
+- kafka
 - neo4j
 - otel-gateway
 - otel-collector
@@ -110,10 +110,11 @@ Chart 默认包含：
 ### 6.3 安装命令
 
 ```bash
-helm upgrade --install logoscope charts/logoscope -n islap --create-namespace
+helm upgrade --install logoscope charts/logoscope -n islap --create-namespace \
+  --set components.kafka.enabled=true \
+  --set components.redis.enabled=false
 ```
 
 ### 6.4 包产物
 
 - `dist/helm/logoscope-0.1.0.tgz`
-

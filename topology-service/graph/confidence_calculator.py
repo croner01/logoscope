@@ -372,7 +372,7 @@ class ConfidenceCalculator:
             node_metrics["confidence_details"] = {
                 "error_rate": node_metrics.get("error_rate", 0),
                 "data_sources": data_sources,
-                "calculated_at": self.reference_time.isoformat() + "Z"
+                "calculated_at": self.reference_time.isoformat()
             }
 
         # 重新计算边置信度
@@ -418,11 +418,11 @@ class ConfidenceCalculator:
                 "error_rate": edge_metrics.get("error_rate", 0),
                 "call_count": edge_metrics.get("call_count", 0),
                 "data_sources": data_sources,
-                "calculated_at": self.reference_time.isoformat() + "Z"
+                "calculated_at": self.reference_time.isoformat()
             }
             edge_metrics["quality_details"] = {
                 "breakdown": quality["breakdown"],
-                "calculated_at": self.reference_time.isoformat() + "Z"
+                "calculated_at": self.reference_time.isoformat()
             }
 
         # 重新计算平均置信度

@@ -7,7 +7,7 @@
 import React, { memo, useCallback, useMemo } from 'react';
 import { FixedSizeList as List, ListChildComponentProps, ListOnItemsRenderedProps } from 'react-window';
 import { ChevronRight, Network, BrainCircuit, Zap } from 'lucide-react';
-import { formatTime } from '../../utils/formatters';
+import { formatTime, parseTimestamp } from '../../utils/formatters';
 
 const LEVEL_COLORS: Record<string, { bg: string; text: string; border: string; dot: string; solid: string }> = {
   TRACE: { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-300', dot: 'bg-gray-400', solid: '#9ca3af' },
@@ -24,6 +24,9 @@ export interface LogItem {
   service_name: string;
   level: string;
   message: string;
+  message_preview?: string;
+  edge_side?: 'source' | 'target' | 'correlated';
+  edge_match_kind?: 'source_mentions_target' | 'target_mentions_source' | 'dual_text' | 'source_service' | 'target_service' | 'correlated_text';
   pod_name?: string;
   namespace?: string;
   node_name?: string;
@@ -34,7 +37,7 @@ export interface LogItem {
   trace_id?: string;
   span_id?: string;
   labels?: Record<string, string>;
-  attributes?: Record<string, any>;
+  attributes?: Record<string, unknown>;
   log_meta?: {
     wrapped: boolean;
     stream?: string;
@@ -50,7 +53,7 @@ export interface VirtualLogListProps {
   columnTemplate: string;
   selectedLogId: string | null;
   onSelectLog: (logId: string) => void;
-  onGoToTopology: (serviceName: string) => void;
+  onGoToTopology: (serviceName: string, namespace?: string) => void;
   onGoToAIAnalysis: (log: LogItem) => void;
   onGoToTraces?: (traceId: string) => void;
   onNearEnd?: () => void;
@@ -62,14 +65,41 @@ interface RowData {
   columnTemplate: string;
   selectedLogId: string | null;
   onSelectLog: (logId: string) => void;
-  onGoToTopology: (serviceName: string) => void;
+  onGoToTopology: (serviceName: string, namespace?: string) => void;
   onGoToAIAnalysis: (log: LogItem) => void;
   onGoToTraces?: (traceId: string) => void;
 }
 
 const ROW_HEIGHT = 44;
+
+function resolveEdgeMatchMeta(log: LogItem): { label: string; className: string } | null {
+  switch (log.edge_match_kind) {
+    case 'source_mentions_target':
+      return { label: '源端命中', className: 'border-cyan-200 bg-cyan-50 text-cyan-700' };
+    case 'target_mentions_source':
+      return { label: '目标命中', className: 'border-amber-200 bg-amber-50 text-amber-700' };
+    case 'dual_text':
+      return { label: '双边文本', className: 'border-violet-200 bg-violet-50 text-violet-700' };
+    case 'source_service':
+      return { label: '源端候选', className: 'border-sky-200 bg-sky-50 text-sky-700' };
+    case 'target_service':
+      return { label: '目标候选', className: 'border-orange-200 bg-orange-50 text-orange-700' };
+    case 'correlated_text':
+      return { label: '关联候选', className: 'border-slate-200 bg-slate-50 text-slate-700' };
+    default:
+      return null;
+  }
+}
 const TIME_CELL_CACHE_LIMIT = 5000;
 const timeCellCache = new Map<string, string>();
+
+function getAttributeLineCount(attributes?: Record<string, unknown>): unknown {
+  const logMeta = attributes?.log_meta;
+  if (!logMeta || typeof logMeta !== 'object') {
+    return undefined;
+  }
+  return (logMeta as Record<string, unknown>).line_count;
+}
 
 function formatTimeCell(timestamp: string): string {
   const cached = timeCellCache.get(timestamp);
@@ -77,8 +107,8 @@ function formatTimeCell(timestamp: string): string {
     return cached;
   }
 
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) {
+  const date = parseTimestamp(timestamp);
+  if (!date) {
     return timestamp;
   }
   const datePart = date.toLocaleDateString('zh-CN', {
@@ -121,10 +151,15 @@ const LogRow = memo(({ index, style, data }: ListChildComponentProps<RowData>) =
   const isSelected = selectedLogId === log.id;
   const levelColors = LEVEL_COLORS[log.level] || LEVEL_COLORS.INFO;
   const isTrace = log.trace_id || log.message?.includes('trace_id');
-  const messageLines = String(log.message || '').split('\n');
-  const messagePreview = messageLines[0] || '';
-  const lineCount = log.log_meta?.line_count || log.attributes?.log_meta?.line_count || messageLines.length;
+  const messageText = String(log.message || '');
+  const newlineIndex = messageText.indexOf('\n');
+  const messagePreview = log.message_preview || (newlineIndex >= 0 ? messageText.slice(0, newlineIndex) : messageText);
+  const lineCountRaw = log.log_meta?.line_count ?? getAttributeLineCount(log.attributes);
+  const lineCount = Number.isFinite(Number(lineCountRaw))
+    ? Number(lineCountRaw)
+    : (messageText ? messageText.split('\n').length : 0);
   const hasMultiline = lineCount > 1;
+  const edgeMatchMeta = resolveEdgeMatchMeta(log);
 
   return (
     <div
@@ -151,16 +186,23 @@ const LogRow = memo(({ index, style, data }: ListChildComponentProps<RowData>) =
         </div>
         
         {/* 服务列 */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onGoToTopology(log.service_name);
-          }}
-          className="text-sm text-blue-600 font-medium truncate hover:underline text-left"
-          title={log.service_name}
-        >
-          {log.service_name}
-        </button>
+        <div className="min-w-0 flex items-center gap-1.5">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onGoToTopology(log.service_name, log.namespace);
+            }}
+            className="min-w-0 text-sm text-blue-600 font-medium truncate hover:underline text-left"
+            title={log.service_name}
+          >
+            {log.service_name}
+          </button>
+          {edgeMatchMeta ? (
+            <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${edgeMatchMeta.className}`} title={edgeMatchMeta.label}>
+              {edgeMatchMeta.label}
+            </span>
+          ) : null}
+        </div>
         
         {/* Pod列 */}
         <div className="text-xs text-gray-600 font-mono truncate" title={log.pod_name}>
@@ -206,7 +248,7 @@ const LogRow = memo(({ index, style, data }: ListChildComponentProps<RowData>) =
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onGoToTopology(log.service_name);
+              onGoToTopology(log.service_name, log.namespace);
             }}
             className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
             title="查看服务拓扑"

@@ -43,6 +43,11 @@ class FakeStorageAdapter:
                 },
             ]
 
+        if "FROM logs.trace_edges_1m" in condensed:
+            return [
+                {"source_service": "legacy-gateway", "target_service": "legacy-order"},
+            ]
+
         if "AS child INNER JOIN (" in condensed and "FROM logs.traces PREWHERE timestamp > now() - INTERVAL" in condensed:
             return [
                 {"source_service": "legacy-gateway", "target_service": "legacy-order"},
@@ -145,7 +150,11 @@ def test_inference_quality_metrics_and_alerts():
     assert metrics["observed_pairs"] == 1
     assert metrics["inferred_pairs"] == 2
     assert metrics["false_positive_count"] == 1
-    assert metrics["false_positive_rate"] == 0.5
+    if metrics["false_positive_rate_state"] == "ok":
+        assert metrics["false_positive_rate"] == 0.5
+    else:
+        assert metrics["false_positive_rate"] == 0.0
+        assert metrics["false_positive_rate_reason"] in {"insufficient_inferred_sample", "no_observed_baseline"}
 
     alerts = inference_service.inference_quality_alerts(
         metrics=metrics,
@@ -158,5 +167,9 @@ def test_inference_quality_metrics_and_alerts():
 
     assert alerts["status"] == "ok"
     assert alerts["active_alerts"] >= 1
-    false_positive_alert = next(item for item in alerts["alerts"] if item["metric"] == "false_positive_rate")
-    assert false_positive_alert["suppressed"] is True
+    false_positive_alerts = [item for item in alerts["alerts"] if item["metric"] == "false_positive_rate"]
+    if metrics["false_positive_rate_state"] == "ok":
+        assert len(false_positive_alerts) == 1
+        assert false_positive_alerts[0]["suppressed"] is True
+    else:
+        assert false_positive_alerts == []

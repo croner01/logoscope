@@ -7,10 +7,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from utils.otlp import parse_otlp_attributes
+
+logger = logging.getLogger(__name__)
 
 
 def infer_data_type(subject: str, headers: Optional[Dict[str, str]]) -> str:
@@ -95,8 +99,8 @@ def _to_iso8601_from_unix_nano(raw_ns: Any) -> str:
         if ns > 0:
             dt = datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
             return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Invalid unix nano timestamp: %r (%s)", raw_ns, exc)
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
@@ -128,22 +132,40 @@ def _to_unix_nano(raw_ns: Any) -> int:
         return 0
 
     # 纯数字：按量级自动识别单位
-    if text.replace(".", "", 1).isdigit():
+    numeric_text = text.lstrip("+-")
+    if numeric_text.replace(".", "", 1).isdigit():
+        if "." not in numeric_text:
+            try:
+                numeric_value = int(text)
+            except Exception:
+                numeric_value = 0
+            if numeric_value <= 0:
+                return 0
+
+            absolute_value = abs(numeric_value)
+            if absolute_value < 10**11:  # seconds
+                return numeric_value * 1_000_000_000
+            if absolute_value < 10**14:  # milliseconds
+                return numeric_value * 1_000_000
+            if absolute_value < 10**17:  # microseconds
+                return numeric_value * 1_000
+            return numeric_value  # nanoseconds
+
         try:
-            numeric_value = float(text)
-        except Exception:
-            numeric_value = 0.0
-        if numeric_value <= 0:
+            numeric_decimal = Decimal(text)
+        except (InvalidOperation, ValueError):
+            numeric_decimal = Decimal(0)
+        if numeric_decimal <= 0:
             return 0
 
-        absolute_value = abs(numeric_value)
-        if absolute_value < 1e11:  # seconds
-            return int(numeric_value * 1_000_000_000)
-        if absolute_value < 1e14:  # milliseconds
-            return int(numeric_value * 1_000_000)
-        if absolute_value < 1e17:  # microseconds
-            return int(numeric_value * 1_000)
-        return int(numeric_value)  # nanoseconds
+        absolute_value = abs(numeric_decimal)
+        if absolute_value < Decimal("1e11"):  # seconds
+            return int(numeric_decimal * Decimal("1000000000"))
+        if absolute_value < Decimal("1e14"):  # milliseconds
+            return int(numeric_decimal * Decimal("1000000"))
+        if absolute_value < Decimal("1e17"):  # microseconds
+            return int(numeric_decimal * Decimal("1000"))
+        return int(numeric_decimal)  # nanoseconds
 
     normalized = text
     if " " in normalized and "T" not in normalized:

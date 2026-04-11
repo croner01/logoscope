@@ -3,9 +3,9 @@
 import os
 import sys
 
-_SHARED_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "shared_src"))
-if os.path.isdir(_SHARED_SRC_DIR) and _SHARED_SRC_DIR not in sys.path:
-    sys.path.append(_SHARED_SRC_DIR)
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if os.path.isdir(_PROJECT_ROOT) and _PROJECT_ROOT not in sys.path:
+    sys.path.append(_PROJECT_ROOT)
 
 from shared_src.utils import timestamp as _shared_timestamp
 

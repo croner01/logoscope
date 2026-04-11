@@ -102,7 +102,9 @@ export function toEpochMs(timestamp: string): number {
 }
 
 /**
- * 解析多种时间戳格式（优先按 UTC 解析）
+ * 解析多种时间戳格式
+ * - 带时区信息（Z / +08:00）的字符串：按原始时区解析
+ * - 不带时区信息的字符串：按浏览器本地时区解析，避免重复偏移
  */
 export function parseTimestamp(value: string | number | Date | null | undefined): Date | null {
   if (value === null || value === undefined) {
@@ -139,8 +141,20 @@ export function parseTimestamp(value: string | number | Date | null | undefined)
   }
   // Date 仅支持毫秒精度，截断更高精度的小数位
   normalized = normalized.replace(/(\.\d{3})\d+/, '$1');
-  if (!/([zZ]|[+-]\d{2}:\d{2})$/.test(normalized)) {
-    normalized = `${normalized}Z`;
+
+  const hasTimezone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(normalized);
+  if (!hasTimezone) {
+    // 无时区时按本地时间理解，避免把本地日志误当 UTC 再展示时二次偏移。
+    let localDate = new Date(normalized);
+    if (!Number.isFinite(localDate.getTime()) && normalized.includes('T')) {
+      localDate = new Date(normalized.replace('T', ' '));
+    }
+    if (Number.isFinite(localDate.getTime())) {
+      return localDate;
+    }
+  } else if (/([+-]\d{2})(\d{2})$/.test(normalized)) {
+    // 兼容 +0800 这类偏移写法，规范化为 +08:00 供 Date 解析。
+    normalized = normalized.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
   }
 
   let date = new Date(normalized);
@@ -248,7 +262,7 @@ export function formatError(error: Error): string {
 /**
  * 格式化 JSON
  */
-export function formatJSON(obj: any): string {
+export function formatJSON(obj: unknown): string {
   return JSON.stringify(obj, null, 2);
 }
 
@@ -270,7 +284,7 @@ export function formatText(text: string, maxLength: number = 100): string {
 /**
  * 格式化数组
  */
-export function formatArray(arr: any[], maxItems: number = 5): string {
+export function formatArray(arr: unknown[], maxItems: number = 5): string {
   if (arr.length <= maxItems) return arr.join(', ');
   return arr.slice(0, maxItems).join(', ') + `... (${arr.length} 项)`;
 }
@@ -278,13 +292,19 @@ export function formatArray(arr: any[], maxItems: number = 5): string {
 /**
  * 格式化对象
  */
-export function formatObject(obj: any, maxKeys: number = 5): string {
-  const keys = Object.keys(obj);
-  if (keys.length <= maxKeys) return JSON.stringify(obj, null, 2);
-  const truncated = keys.slice(0, maxKeys).reduce((acc, key) => {
-    acc[key] = obj[key];
+export function formatObject(obj: unknown, maxKeys: number = 5): string {
+  if (!obj || typeof obj !== 'object') {
+    return JSON.stringify(obj);
+  }
+  const record = obj as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length <= maxKeys) {
+    return JSON.stringify(record, null, 2);
+  }
+  const truncated = keys.slice(0, maxKeys).reduce<Record<string, unknown>>((acc, key) => {
+    acc[key] = record[key];
     return acc;
-  }, {} as any);
+  }, {});
   return JSON.stringify(truncated, null, 2) + `... (${keys.length} 个键)`;
 }
 
@@ -355,9 +375,9 @@ export function formatPath(path: string): string {
 /**
  * 格式化查询参数
  */
-export function formatQueryParams(params: Record<string, any>): string {
+export function formatQueryParams(params: Record<string, unknown>): string {
   return Object.entries(params)
-    .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+    .map(([key, value]) => `${key}=${encodeURIComponent(String(value ?? ''))}`)
     .join('&');
 }
 

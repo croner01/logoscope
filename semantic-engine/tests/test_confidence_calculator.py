@@ -9,7 +9,7 @@ Graph Confidence Calculator 单元测试
 - 多数据源融合
 """
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import isclose
 
 from graph.confidence_calculator import (
@@ -31,7 +31,7 @@ class TestConfidenceCalculatorInit:
         """测试自定义时间初始化"""
         custom_time = datetime(2026, 2, 9, 12, 0, 0)
         calculator = ConfidenceCalculator(reference_time=custom_time)
-        assert calculator.reference_time == custom_time
+        assert calculator.reference_time == custom_time.replace(tzinfo=timezone.utc)
 
 
 class TestTimeDecay:
@@ -545,7 +545,7 @@ class TestConvenienceFunction:
         custom_time = datetime(2026, 2, 9, 12, 0, 0)
         calculator = get_confidence_calculator(reference_time=custom_time)
 
-        assert calculator.reference_time == custom_time
+        assert calculator.reference_time == custom_time.replace(tzinfo=timezone.utc)
 
 
 class TestEdgeCases:

@@ -17,12 +17,10 @@ class BaseServiceConfig:
         default_port: int,
         enable_clickhouse: bool = True,
         enable_neo4j: bool = True,
-        enable_redis: bool = True,
         warn_if_empty_neo4j_password: bool = True,
     ) -> None:
         self._enable_clickhouse = enable_clickhouse
         self._enable_neo4j = enable_neo4j
-        self._enable_redis = enable_redis
 
         self.app_name = os.getenv("APP_NAME", app_name)
         self.app_version = os.getenv("APP_VERSION", "1.0.0")
@@ -47,12 +45,6 @@ class BaseServiceConfig:
                 logging.getLogger(__name__).warning(
                     "NEO4J_PASSWORD not set. Neo4j connection may fail if authentication is required."
                 )
-
-        if self._enable_redis:
-            self.redis_host = os.getenv("REDIS_HOST", "redis")
-            self.redis_port = self.parse_port(os.getenv("REDIS_PORT", "6379"))
-            self.redis_db = self.parse_int_env("REDIS_DB", 0, min_value=0)
-            self.redis_password = os.getenv("REDIS_PASSWORD")
 
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -106,19 +98,6 @@ class BaseServiceConfig:
             "password": self.neo4j_password,
             "database": self.neo4j_database,
         }
-
-    def get_redis_config(self) -> Dict[str, Any]:
-        if not self._enable_redis:
-            return {}
-        config: Dict[str, Any] = {
-            "host": self.redis_host,
-            "port": self.redis_port,
-            "db": self.redis_db,
-            "decode_responses": True,
-        }
-        if self.redis_password:
-            config["password"] = self.redis_password
-        return config
 
     def get_storage_config(self) -> Dict[str, Any]:
         config: Dict[str, Any] = {}

@@ -125,8 +125,7 @@ def parse_any_timestamp(timestamp: Any) -> str:
     """
     if timestamp is None:
         # 使用当前时间（UTC）
-        from datetime import datetime
-        return datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     if isinstance(timestamp, str):
         # 已经是字符串格式

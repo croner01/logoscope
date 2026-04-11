@@ -81,6 +81,7 @@ class TestBuildTopology:
         result = builder.build_topology(time_window="15 MINUTE")
 
         assert result["metadata"]["time_window"] == "15 MINUTE"
+        assert result["metadata"]["effective_time_window"] == "24 HOUR"
 
     def test_build_topology_with_confidence_filter(self, builder, mock_storage):
         """测试置信度过滤"""
@@ -188,7 +189,7 @@ class TestGetTracesTopology:
         # 验证查询包含命名空间过滤
         mock_storage.execute_query.assert_called_once()
         call_args = mock_storage.execute_query.call_args[0][0]
-        assert "namespace = 'islap'" in call_args
+        assert "traces_namespace = 'islap'" in call_args
 
 
 class TestGetLogsTopology:

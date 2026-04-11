@@ -1,0 +1,158 @@
+{{- if .Values.components.execService.enabled }}
+{{- $raw := `
+apiVersion: v1
+kind: Service
+metadata:
+  name: exec-service
+  namespace: islap
+  labels:
+    app: exec-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8095
+    name: http
+    protocol: TCP
+    targetPort: 8095
+  selector:
+    app: exec-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exec-service
+  namespace: islap
+  labels:
+    app: exec-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exec-service
+  template:
+    metadata:
+      labels:
+        app: exec-service
+    spec:
+      containers:
+      - name: exec-service
+        image: localhost:5000/logoscope/exec-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8095
+          name: http
+          protocol: TCP
+        env:
+        - name: APP_NAME
+          value: "exec-service"
+        - name: APP_VERSION
+          value: "1.0.0"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: EXEC_POLICY_DECISION_MODE
+          value: "opa_enforced"
+        - name: EXEC_POLICY_ALLOW_NON_ENFORCED_MODES
+          value: "false"
+        - name: EXEC_POLICY_OPA_URL
+          value: "http://opa:8181/v1/data/runtime/command/v1"
+        - name: EXEC_POLICY_OPA_TIMEOUT_MS
+          value: "800"
+        - name: EXEC_POLICY_DECISION_STORE_BACKEND
+          value: "clickhouse"
+        - name: EXEC_POLICY_DECISION_SQLITE_ENABLED
+          value: "false"
+        - name: EXEC_POLICY_DECISION_CH_URL
+          value: "http://clickhouse:8123"
+        - name: EXEC_POLICY_DECISION_CH_DATABASE
+          value: "logs"
+        - name: EXEC_POLICY_DECISION_CH_TABLE
+          value: "exec_policy_decisions"
+        - name: EXEC_POLICY_DECISION_CH_USER
+          value: "default"
+        - name: EXEC_POLICY_DECISION_CH_PASSWORD
+          value: ""
+        - name: EXEC_POLICY_DECISION_CH_FAIL_OPEN
+          value: "false"
+        - name: EXEC_RUNTIME_HISTORY_STORE_BACKEND
+          value: "clickhouse"
+        - name: EXEC_RUNTIME_HISTORY_CH_URL
+          value: "http://clickhouse:8123"
+        - name: EXEC_RUNTIME_HISTORY_CH_DATABASE
+          value: "logs"
+        - name: EXEC_RUNTIME_HISTORY_RUN_TABLE
+          value: "exec_command_runs"
+        - name: EXEC_RUNTIME_HISTORY_EVENT_TABLE
+          value: "exec_command_events"
+        - name: EXEC_RUNTIME_HISTORY_AUDIT_TABLE
+          value: "exec_command_audits"
+        - name: EXEC_RUNTIME_HISTORY_CH_USER
+          value: "default"
+        - name: EXEC_RUNTIME_HISTORY_CH_PASSWORD
+          value: ""
+        - name: EXEC_RUNTIME_HISTORY_CH_FAIL_OPEN
+          value: "false"
+        - name: EXEC_WRITE_ENABLED
+          value: "true"
+        - name: EXEC_COMMAND_TEST_PERMISSIVE
+          value: "false"
+        - name: EXEC_CONTROLLED_GATEWAY_REQUIRED
+          value: "true"
+        - name: EXEC_TARGET_REGISTRY_MODE
+          value: "enforced"
+        - name: EXEC_TARGET_REGISTRY_BASE_URL
+          value: "http://ai-service:8090"
+        - name: EXEC_TARGET_REGISTRY_TIMEOUT_MS
+          value: "800"
+        - name: EXEC_TICKET_TTL_SECONDS
+          value: "900"
+        - name: EXEC_DEFAULT_HOST_TARGET
+          value: "host:primary"
+        - name: EXEC_EXECUTOR_TEMPLATE__BUSYBOX_READONLY
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__BUSYBOX_MUTATING
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_K8S_READONLY
+          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_K8S_MUTATING
+          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_CLICKHOUSE_READONLY
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_CLICKHOUSE_MUTATING
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_OPENSTACK_READONLY
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_OPENSTACK_MUTATING
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__HOST_SSH_READONLY
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__HOST_SSH_MUTATING
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_READONLY
+          value: ""
+        - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_MUTATING
+          value: ""
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8095
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8095
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 10
+` -}}
+{{ include "logoscope.renderManifest" (dict "ctx" . "raw" $raw "component" "execService") }}
+{{- end }}

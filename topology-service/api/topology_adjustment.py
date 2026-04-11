@@ -58,8 +58,8 @@ storage = None
 
 
 async def _run_blocking(func, *args, **kwargs):
-    """Execute blocking topology builder calls in thread pool."""
-    return await asyncio.to_thread(func, *args, **kwargs)
+    """Execute blocking topology builder calls inline."""
+    return func(*args, **kwargs)
 
 
 def set_storage_adapter(storage_adapter):
@@ -101,6 +101,8 @@ async def add_manual_node(request: NodeRequest) -> Dict[str, Any]:
         logger.info(f"Added manual node: {request.node_id} (type: {request.node_type})")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error adding manual node: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -130,6 +132,8 @@ async def remove_manual_node(node_id: str) -> Dict[str, Any]:
         logger.info(f"Removed manual node: {node_id}")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error removing manual node: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -174,6 +178,8 @@ async def add_manual_edge(request: EdgeRequest) -> Dict[str, Any]:
         logger.info(f"Added manual edge: {request.source} -> {request.target}")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error adding manual edge: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -207,6 +213,8 @@ async def remove_manual_edge(
         logger.info(f"Removed manual edge: {source} -> {target}")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error removing manual edge: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -266,6 +274,8 @@ async def add_manual_edges_batch(request: BatchEdgeRequest) -> Dict[str, Any]:
             "results": results
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error adding manual edges batch: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -301,6 +311,8 @@ async def suppress_edge(
         logger.info(f"Suppressed edge: {source} -> {target}")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error suppressing edge: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -334,6 +346,8 @@ async def unsuppress_edge(
         logger.info(f"Unsuppressed edge: {source} -> {target}")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error unsuppress edge: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -365,6 +379,8 @@ async def get_manual_configurations() -> Dict[str, Any]:
 
         return config
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting manual configurations: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -392,6 +408,8 @@ async def clear_manual_configurations() -> Dict[str, Any]:
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error clearing manual configurations: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -464,6 +482,8 @@ async def get_enhanced_topology(
 
         return topology
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error building enhanced topology: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -583,6 +603,8 @@ async def compare_with_industry() -> Dict[str, Any]:
             }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error comparing topology: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

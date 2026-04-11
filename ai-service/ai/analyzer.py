@@ -1047,7 +1047,7 @@ class LogAnalyzer:
                 'description': '应用发生了错误，需要查看日志详情',
                 'confidence': 0.5
             }
-        elif level == 'warn':
+        elif level in {'warn', 'warning'}:
             return {
                 'title': '应用警告',
                 'severity': 'warning',
@@ -1064,11 +1064,12 @@ class LogAnalyzer:
 
     def _determine_severity(self, level: str, confidence: float) -> str:
         """确定严重级别"""
-        if level == 'error':
+        normalized_level = str(level or '').strip().lower()
+        if normalized_level == 'error':
             return 'error'
-        elif level == 'warn':
+        elif normalized_level in {'warn', 'warning'}:
             return 'warning'
-        elif level == 'info' and confidence > 0.7:
+        elif normalized_level == 'info' and confidence > 0.7:
             return 'warning'
         else:
             return 'info'

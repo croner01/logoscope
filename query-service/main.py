@@ -6,6 +6,7 @@ import logging
 import sys
 import asyncio
 import os
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 
@@ -41,6 +42,38 @@ setup_logging(
 )
 logger = get_logger(__name__)
 
+
+def _utc_now_iso() -> str:
+    """Return timezone-aware UTC timestamp string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _build_storage_adapter() -> StorageAdapter:
+    """Build storage adapter from runtime settings."""
+    return StorageAdapter({
+        "clickhouse": {
+            "host": settings.clickhouse_host,
+            "port": settings.clickhouse_port,
+            "database": settings.clickhouse_database,
+            "user": settings.clickhouse_user,
+            "password": settings.clickhouse_password,
+        },
+        "neo4j": {
+            "host": settings.neo4j_host,
+            "port": settings.neo4j_port,
+            "user": settings.neo4j_user,
+            "password": settings.neo4j_password,
+            "database": settings.neo4j_database,
+        },
+    })
+
+
+def _is_storage_adapter_ready(adapter: StorageAdapter | None) -> bool:
+    """Return True when ClickHouse-backed queries can be served."""
+    if adapter is None:
+        return False
+    return bool(getattr(adapter, "ch_client", None) or getattr(adapter, "ch_http_client", None))
+
 # 全局 storage 实例
 _storage_adapter: StorageAdapter = None
 _health_preagg_last_error: str = ""
@@ -63,40 +96,71 @@ async def lifespan(app: FastAPI):
     # 后台初始化 Storage Adapter
     async def init_storage_async():
         global _storage_adapter
+        logger.info("Initializing Storage Adapter in background...")
         try:
-            logger.info("Initializing Storage Adapter in background...")
-            _storage_adapter = StorageAdapter({
-                "clickhouse": {
-                    "host": settings.clickhouse_host,
-                    "port": settings.clickhouse_port,
-                    "database": settings.clickhouse_database,
-                    "user": settings.clickhouse_user,
-                    "password": settings.clickhouse_password
-                },
-                "neo4j": {
-                    "host": settings.neo4j_host,
-                    "port": settings.neo4j_port,
-                    "user": settings.neo4j_user,
-                    "password": settings.neo4j_password,
-                    "database": settings.neo4j_database
-                }
-            })
+            _storage_adapter = _build_storage_adapter()
             query_routes.set_storage_adapter(_storage_adapter)
             data_quality.set_storage_adapter(_storage_adapter)
-            logger.info("Storage Adapter initialized successfully")
+            if _is_storage_adapter_ready(_storage_adapter):
+                logger.info("Storage Adapter initialized successfully")
+            else:
+                logger.warning("Storage Adapter initialized in degraded mode: ClickHouse client not ready")
         except Exception as e:
             logger.error(f"Failed to initialize Storage Adapter: {e}")
             # 即使初始化失败，服务也继续运行（降级模式）
 
+    async def reconcile_storage_async():
+        global _storage_adapter
+        last_ready_state: bool | None = None
+        while True:
+            try:
+                ready = _is_storage_adapter_ready(_storage_adapter)
+                if ready:
+                    if last_ready_state is not True:
+                        logger.info("Storage Adapter reconcile loop: ClickHouse connectivity ready")
+                    last_ready_state = True
+                    await asyncio.sleep(10)
+                    continue
+
+                if last_ready_state is not False:
+                    logger.warning("Storage Adapter reconcile loop: ClickHouse connectivity unavailable, retrying")
+                last_ready_state = False
+
+                candidate = _build_storage_adapter()
+                if _is_storage_adapter_ready(candidate):
+                    old_adapter = _storage_adapter
+                    _storage_adapter = candidate
+                    query_routes.set_storage_adapter(_storage_adapter)
+                    data_quality.set_storage_adapter(_storage_adapter)
+                    if old_adapter and old_adapter is not candidate:
+                        try:
+                            old_adapter.close()
+                        except Exception as close_error:
+                            logger.debug("Failed to close stale storage adapter: %s", close_error)
+                    logger.info("Storage Adapter reconcile loop: ClickHouse connectivity recovered")
+                    last_ready_state = True
+                else:
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Storage Adapter reconcile loop failed: %s", exc)
+                await asyncio.sleep(5)
+
     # 启动后台初始化任务
     init_task = asyncio.create_task(init_storage_async())
+    reconcile_task = asyncio.create_task(reconcile_storage_async())
 
     # 启动日志轮询任务（备用实时推送方案）- 但不立即启动，等 storage adapter 就绪
     poller_task = None
 
     async def start_poller_when_ready():
         nonlocal poller_task
-        while _storage_adapter is None:
+        while not _is_storage_adapter_ready(_storage_adapter):
             await asyncio.sleep(1)
         poller_task = asyncio.create_task(log_poller(_storage_adapter, interval=2.0))
         logger.info("Log poller task started")
@@ -109,6 +173,7 @@ async def lifespan(app: FastAPI):
     # 清理
     logger.info("Shutting down Query Service...")
     init_task.cancel()
+    reconcile_task.cancel()
     poller_starter.cancel()
     if poller_task:
         poller_task.cancel()
@@ -116,6 +181,10 @@ async def lifespan(app: FastAPI):
             await poller_task
         except asyncio.CancelledError:
             pass
+    try:
+        await reconcile_task
+    except asyncio.CancelledError:
+        pass
     if _storage_adapter:
         _storage_adapter.close()
     logger.info("Query Service shutdown complete")
@@ -168,7 +237,7 @@ async def health_check():
     """
     global _health_preagg_last_error
 
-    storage_connected = _storage_adapter is not None
+    storage_connected = _is_storage_adapter_ready(_storage_adapter)
     try:
         preagg_status = query_routes.refresh_preagg_runtime_status(force_reload=False)
         if _health_preagg_last_error:
@@ -208,7 +277,7 @@ async def readiness_check():
     return {
         "ready": True,
         "service": "query-service",
-        "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+        "timestamp": _utc_now_iso()
     }
 
 

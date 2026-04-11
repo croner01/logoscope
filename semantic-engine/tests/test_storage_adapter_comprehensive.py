@@ -66,13 +66,14 @@ def mock_adapter():
 class TestInitHttpClient:
     """测试 HTTP 客户端初始化"""
 
-    @patch('storage.adapter.CLICKHOUSE_DRIVER_AVAILABLE', False)
-    @patch('storage.adapter.requests.get')
+    @patch('storage.adapter._shared_adapter.CLICKHOUSE_DRIVER_AVAILABLE', False)
+    @patch('storage.adapter._shared_adapter.requests.Session.get')
     def test_init_http_client_with_basic_auth(self, mock_get):
         """测试使用基本认证的 HTTP 客户端"""
         # Mock HTTP 连接测试成功
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.text = '{"data":[{"1":1}]}'
         mock_get.return_value = mock_response
 
         config = {
@@ -97,7 +98,7 @@ class TestInitHttpClient:
         if adapter.ch_http_client:
             assert adapter.ch_http_client['database'] == 'logs'
 
-    @patch('storage.adapter.CLICKHOUSE_DRIVER_AVAILABLE', False)
+    @patch('storage.adapter._shared_adapter.CLICKHOUSE_DRIVER_AVAILABLE', False)
     def test_init_http_client_with_custom_http_port(self):
         """测试自定义 HTTP 端口"""
         config = {
@@ -127,7 +128,7 @@ class TestInitHttpClient:
 class TestInitTables:
     """测试表初始化"""
 
-    @patch('storage.adapter.CLICKHOUSE_DRIVER_AVAILABLE', False)
+    @patch('storage.adapter._shared_adapter.CLICKHOUSE_DRIVER_AVAILABLE', False)
     def test_init_tables_without_driver(self):
         """测试没有驱动时的表初始化"""
         adapter = StorageAdapter()
@@ -157,7 +158,7 @@ class TestSaveRelation:
         # Mock 模式应该返回 True
         assert result is True
 
-    @patch('storage.adapter.NEO4J_AVAILABLE', True)
+    @patch('storage.adapter._shared_adapter.NEO4J_AVAILABLE', True)
     def test_save_relation_with_neo4j_mock(self):
         """测试使用 Neo4j mock 保存关系"""
         adapter = StorageAdapter()
@@ -288,7 +289,9 @@ class TestGetEvents:
         # 验证查询包含 LIMIT
         mock_client.execute.assert_called_once()
         query = mock_client.execute.call_args[0][0]
-        assert "LIMIT 50" in query
+        params = mock_client.execute.call_args[0][1]
+        assert "LIMIT {limit:Int32}" in query
+        assert params["limit"] == 50
 
 
 # ============================================================================
@@ -626,14 +629,17 @@ class TestExecuteQuery:
         """测试执行查询返回数据"""
         adapter = StorageAdapter()
         mock_client = Mock()
-        mock_client.execute = Mock(return_value=[(1, "test"), (2, "test2")])
+        mock_client.execute = Mock(return_value=(
+            [(1, "test"), (2, "test2")],
+            [("id", "UInt8"), ("name", "String")],
+        ))
         adapter.ch_client = mock_client
 
         result = adapter.execute_query("SELECT * FROM test")
 
         assert len(result) == 2
-        assert result[0] == (1, "test")
-        assert result[1] == (2, "test2")
+        assert result[0] == {"id": 1, "name": "test"}
+        assert result[1] == {"id": 2, "name": "test2"}
 
 
 # ============================================================================

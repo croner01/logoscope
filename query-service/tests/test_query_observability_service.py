@@ -1,5 +1,6 @@
 """Tests for extracted observability query service helpers."""
 
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -38,18 +39,40 @@ class FakeStorageAdapter:
         if "FROM system.tables" in condensed and "database = 'logs'" in condensed:
             return [{"name": name} for name in sorted(self.preagg_tables)]
 
-        if "FROM logs.obs_counts_1m" in condensed and "signal = 'log'" in condensed and "sum(count) AS total" in condensed:
+        if (
+            "FROM logs.obs_counts_1m" in condensed
+            and "signal = 'log'" in condensed
+            and "sum(count) AS total" in condensed
+            and "GROUP BY service_name" not in condensed
+        ):
             return [{"total": 33}]
-        if "FROM logs.obs_counts_1m" in condensed and "signal = 'log'" in condensed and "GROUP BY service_name" in condensed:
+        if (
+            "FROM logs.obs_counts_1m" in condensed
+            and "signal = 'log'" in condensed
+            and "GROUP BY service_name" in condensed
+            and "error_count" in condensed
+        ):
+            return [{"service_name": "checkout", "total_count": 20, "error_count": 4}]
+        if (
+            "FROM logs.obs_counts_1m" in condensed
+            and "signal = 'log'" in condensed
+            and "GROUP BY service_name" in condensed
+        ):
             return [{"service_name": "checkout", "count": 20}]
         if (
             "FROM logs.obs_counts_1m" in condensed
             and "signal = 'log'" in condensed
             and "AS level" in condensed
+            and "GROUP BY service_name" not in condensed
         ):
             return [{"level": "ERROR", "count": 4}, {"level": "OTHER", "count": 1}]
 
-        if "FROM logs.obs_counts_1m" in condensed and "signal = 'metric'" in condensed and "sum(count) AS total" in condensed:
+        if (
+            "FROM logs.obs_counts_1m" in condensed
+            and "signal = 'metric'" in condensed
+            and "sum(count) AS total" in condensed
+            and "GROUP BY service_name" not in condensed
+        ):
             return [{"total": 44}]
         if "FROM logs.obs_counts_1m" in condensed and "signal = 'metric'" in condensed and "GROUP BY service_name" in condensed:
             return [{"service_name": "checkout", "count": 30}]
@@ -80,8 +103,20 @@ class FakeStorageAdapter:
         if "FROM logs.metrics" in condensed and "GROUP BY metric_name" in condensed:
             return [{"metric_name": "http.server.duration", "count": 6}]
 
+        if (
+            "FROM logs.traces" in condensed
+            and "toUInt64(uniqCombined64(trace_id)) AS total" in condensed
+            and "span_count" not in condensed
+            and "AS total_traces" not in condensed
+            and "uniqCombined64If(trace_id" not in condensed
+        ):
+            return [{"total": len(self.traces_rows)}]
+
         if "FROM logs.traces" in condensed and "GROUP BY t.trace_id" in condensed and "argMin(t.operation_name" in condensed:
-            return self.traces_rows
+            rows = list(self.traces_rows)
+            limit = int((params or {}).get("limit", len(rows)))
+            offset = int((params or {}).get("offset", 0))
+            return rows[offset: offset + limit]
 
         if "FROM logs.traces" in condensed and "PREWHERE trace_id = {trace_id:String}" in condensed:
             return self.spans_rows
@@ -154,8 +189,8 @@ def test_query_metrics_end_time_only_backfills_lower_bound_window():
     )
 
     query_call = storage.calls[0]
-    assert "timestamp <= toDateTime64({end_time:String}, 9)" in query_call["query"]
-    assert "timestamp > toDateTime64({end_time:String}, 9) - INTERVAL 24 HOUR" in query_call["query"]
+    assert "timestamp <= toDateTime64({end_time:String}, 9, 'UTC')" in query_call["query"]
+    assert "timestamp > toDateTime64({end_time:String}, 9, 'UTC') - INTERVAL 24 HOUR" in query_call["query"]
 
 
 def test_query_traces_and_spans_contract():
@@ -231,8 +266,8 @@ def test_query_traces_end_time_only_backfills_lower_bound_window():
     )
 
     trace_query = next(call for call in storage.calls if "FROM logs.traces" in call["query"])
-    assert "timestamp <= toDateTime64({end_time:String}, 9)" in trace_query["query"]
-    assert "timestamp > toDateTime64({end_time:String}, 9) - INTERVAL 24 HOUR" in trace_query["query"]
+    assert "timestamp <= toDateTime64({end_time:String}, 9, 'UTC')" in trace_query["query"]
+    assert "timestamp > toDateTime64({end_time:String}, 9, 'UTC') - INTERVAL 24 HOUR" in trace_query["query"]
 
 
 def test_query_logs_stats_and_traces_stats():
@@ -269,8 +304,8 @@ def test_query_traces_stats_end_time_only_backfills_lower_bound_window():
     )
 
     total_query = next(call for call in storage.calls if "uniqCombined64(trace_id)" in call["query"])
-    assert "timestamp <= toDateTime64({stats_end:String}, 9)" in total_query["query"]
-    assert "timestamp > toDateTime64({stats_end:String}, 9) - INTERVAL 24 HOUR" in total_query["query"]
+    assert "timestamp <= toDateTime64({stats_end:String}, 9, 'UTC')" in total_query["query"]
+    assert "timestamp > toDateTime64({stats_end:String}, 9, 'UTC') - INTERVAL 24 HOUR" in total_query["query"]
 
 
 def test_query_traces_rejects_non_whitelisted_time_column():
@@ -330,3 +365,53 @@ def test_query_stats_preaggregated_paths_preferred_when_tables_exist():
     assert traces_stats["spanCount"] == 55
     assert traces_stats["byService"]["checkout"] == 12
     assert traces_stats["byOperation"]["GET /checkout"] == 25
+
+
+def test_query_traces_stats_sanitizes_non_finite_duration_values():
+    _reset_preagg_cache()
+
+    class NonFiniteStorage(FakeStorageAdapter):
+        def execute_query(self, query: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+            condensed = " ".join(query.split())
+            self.calls.append({"query": condensed, "params": params or {}})
+            if "uniqCombined64(trace_id)" in condensed and "count() AS span_count" in condensed:
+                return [{"total_traces": 3, "span_count": 9}]
+            if "FROM logs.traces" in condensed and "GROUP BY service_name" in condensed:
+                return [{"service_name": "checkout", "count": 3}]
+            if "FROM logs.traces" in condensed and "GROUP BY operation_name" in condensed:
+                return [{"operation_name": "GET /checkout", "count": 3}]
+            if "avg(trace_duration) AS avg_duration" in condensed:
+                return [{"avg_duration": math.nan, "p99_duration": math.inf}]
+            if "uniqCombined64If(trace_id" in condensed:
+                return [{"error_traces": 1, "total_traces": 3}]
+            return super().execute_query(query, params)
+
+    storage = NonFiniteStorage()
+    traces_stats = obs_service.query_traces_stats(
+        storage_adapter=storage,
+        resolve_trace_schema_fn=_resolve_trace_schema,
+        build_grouped_trace_duration_expr_fn=lambda _schema: "max(toFloat64OrZero(duration_ms))",
+    )
+
+    assert traces_stats["avg_duration"] == 0.0
+    assert traces_stats["p99_duration"] == 0.0
+    assert traces_stats["error_rate"] == round(1 / 3, 4)
+
+
+def test_query_logs_stats_preaggregated_avoids_nested_aggregate_alias_for_error_count():
+    _reset_preagg_cache()
+    storage = FakeStorageAdapter(preagg_tables=["obs_counts_1m"])
+
+    logs_stats = obs_service.query_logs_stats(storage, time_window="1 HOUR")
+
+    by_service_query = next(
+        call for call in storage.calls
+        if "FROM logs.obs_counts_1m" in call["query"]
+        and "GROUP BY service_name" in call["query"]
+        and "error_count" in call["query"]
+    )
+    assert "sum(count) AS total_count" in by_service_query["query"]
+    assert "sumIf(logs.obs_counts_1m.count" in by_service_query["query"]
+    assert "ORDER BY total_count DESC" in by_service_query["query"]
+    assert logs_stats["byService"]["checkout"] == 20
+    assert logs_stats["byServiceErrors"]["checkout"] == 4

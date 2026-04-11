@@ -398,6 +398,16 @@ class TestEdgeCases:
 
         assert result is not None
 
+    def test_warning_level_defaults_to_warning_severity(self, analyzer):
+        """测试 warning 级别在默认分析中保持 warning 严重度"""
+        log_data = {
+            'event': {'raw': 'Service started successfully', 'level': 'warning'},
+            'entity': {'name': 'test-service'}
+        }
+        result = analyzer.analyze_log(log_data)
+
+        assert result['overview']['severity'] == 'warning'
+
 
 class TestAnalyzeLogStructure:
     """测试 analyze_log 返回结构"""

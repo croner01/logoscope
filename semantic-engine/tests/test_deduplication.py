@@ -191,6 +191,21 @@ class TestIsDuplicateById:
         assert result is True
         assert "evt-123" in duplicator._event_id_cache
 
+    def test_check_existing_database_query_escapes_event_id(self, duplicator):
+        """event_id 进入 SQL 前应进行字符串转义。"""
+        duplicator.storage.ch_client = Mock()
+        captured = {}
+
+        def _capture(query):
+            captured["query"] = query
+            return [[0]]
+
+        duplicator.storage.execute_query = Mock(side_effect=_capture)
+
+        duplicator._is_duplicate_by_id("evt-' OR 1=1 --", check_existing=True)
+
+        assert "PREWHERE id = 'evt-'' OR 1=1 --'" in captured["query"]
+
     def test_check_existing_database_not_found(self, duplicator):
         """测试数据库未找到"""
         duplicator.storage.ch_client = Mock()
@@ -338,6 +353,25 @@ class TestIsDuplicateBySemanticKey:
         )
         assert result is True
         assert "api-server|2026-02-09T12:34:56|82dfa5549ebc9afc" in duplicator._semantic_key_cache
+
+    def test_check_existing_database_query_escapes_semantic_key_parts(self, duplicator):
+        """语义键拆分后的 service/message_hash 进入 SQL 前应转义。"""
+        duplicator.storage.ch_client = Mock()
+        captured = {}
+
+        def _capture(query):
+            captured["query"] = query
+            return [[0]]
+
+        duplicator.storage.execute_query = Mock(side_effect=_capture)
+
+        duplicator._is_duplicate_by_semantic_key(
+            "api-'srv|2026-02-09T12:34:56|82dfa55'49ebc9afc",
+            check_existing=True,
+        )
+
+        assert "WHERE service_name = 'api-''srv'" in captured["query"]
+        assert "substring(MD5(message), 1, 16) = '82dfa55''49ebc9afc'" in captured["query"]
 
     def test_check_existing_database_not_found(self, duplicator):
         """测试数据库未找到"""

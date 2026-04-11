@@ -209,15 +209,15 @@ def reset_modules_state():
     monitor_topology.set_storage_adapter(None)
     ws_api.topology_manager.active_connections.clear()
     ws_api.topology_manager._subscriptions.clear()
-    ws_api.topology_manager._last_topology_data = None
-    ws_api.topology_manager._last_topology_hash = None
+    ws_api.topology_manager._last_topology_data_by_key.clear()
+    ws_api.topology_manager._last_topology_hash_by_key.clear()
     yield
     topology_routes.set_storage_and_builders(None, None, None)
     monitor_topology.set_storage_adapter(None)
     ws_api.topology_manager.active_connections.clear()
     ws_api.topology_manager._subscriptions.clear()
-    ws_api.topology_manager._last_topology_data = None
-    ws_api.topology_manager._last_topology_hash = None
+    ws_api.topology_manager._last_topology_data_by_key.clear()
+    ws_api.topology_manager._last_topology_hash_by_key.clear()
 
 
 @pytest.mark.asyncio
@@ -325,3 +325,42 @@ async def test_ws_topology_contract_messages():
 
     # 断开后应清理连接状态
     assert len(ws_api.topology_manager.active_connections) == 0
+
+
+def test_ws_subscription_cache_cleanup_on_disconnect():
+    """断连后无活跃订阅时，应清理缓存拓扑 key。"""
+    manager = ws_api.TopologyConnectionManager()
+    ws = object()
+    default_params = manager._normalize_subscription()
+    default_key = manager._subscription_key(default_params)
+    stale_key = manager._subscription_key({"namespace": "stale"})
+
+    manager.active_connections.add(ws)
+    manager._subscriptions[ws] = default_params
+    manager._last_topology_hash_by_key = {default_key: "h1", stale_key: "h2"}
+    manager._last_topology_data_by_key = {default_key: {"nodes": []}, stale_key: {"nodes": []}}
+
+    manager.disconnect(ws)
+
+    assert default_key not in manager._last_topology_hash_by_key
+    assert stale_key not in manager._last_topology_hash_by_key
+    assert default_key not in manager._last_topology_data_by_key
+    assert stale_key not in manager._last_topology_data_by_key
+
+
+def test_ws_subscription_cache_cleanup_on_resubscribe():
+    """同一连接更换订阅后，旧订阅缓存 key 应清理。"""
+    manager = ws_api.TopologyConnectionManager()
+    ws = object()
+    manager.active_connections.add(ws)
+    manager._subscriptions[ws] = manager._normalize_subscription()
+
+    old_key = manager.get_subscription_key(ws)
+    manager.cache_topology(old_key, {"nodes": [{"id": "n1"}], "edges": []})
+
+    manager.update_subscription(ws, {"namespace": "prod"})
+    new_key = manager.get_subscription_key(ws)
+
+    assert new_key != old_key
+    assert old_key not in manager._last_topology_hash_by_key
+    assert old_key not in manager._last_topology_data_by_key

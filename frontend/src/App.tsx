@@ -11,6 +11,7 @@ const TracesExplorer = lazy(() => import('./pages/TracesExplorer'));
 const TopologyPage = lazy(() => import('./pages/TopologyPage'));
 const AlertCenter = lazy(() => import('./pages/AlertCenter'));
 const AIAnalysis = lazy(() => import('./pages/AIAnalysis'));
+const AIRuntimePlayground = lazy(() => import('./pages/AIRuntimePlayground'));
 const AICaseManagement = lazy(() => import('./pages/AICaseManagement'));
 const LabelsDiscovery = lazy(() => import('./pages/LabelsDiscovery'));
 const Settings = lazy(() => import('./pages/Settings'));
@@ -41,6 +42,7 @@ const App: React.FC = () => {
           <Route path="/topology" element={renderRoute(<TopologyPage />)} />
           <Route path="/alerts" element={renderRoute(<AlertCenter />)} />
           <Route path="/ai-analysis" element={renderRoute(<AIAnalysis />)} />
+          <Route path="/ai-runtime-lab" element={renderRoute(<AIRuntimePlayground />)} />
           <Route path="/ai-cases" element={renderRoute(<AICaseManagement />)} />
           <Route path="/labels" element={renderRoute(<LabelsDiscovery />)} />
           <Route path="/settings" element={renderRoute(<Settings />)} />

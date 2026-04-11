@@ -148,7 +148,12 @@ class TopologySnapshotManager:
                 # 转换为 UTC
                 if timestamp.tzinfo is not None:
                     timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-            except:
+            except (AttributeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "Failed to parse topology generated_at timestamp '%s', fallback to now: %s",
+                    topology_time,
+                    exc,
+                )
                 timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
         else:
             timestamp = datetime.now(timezone.utc).replace(tzinfo=None)

@@ -3,7 +3,7 @@ Logoscope 基础配置类
 所有服务共享的配置逻辑
 """
 import os
-from typing import Dict, Any, Optional
+from typing import Any, Dict
 
 
 class BaseConfig:
@@ -29,7 +29,6 @@ class BaseConfig:
         self._init_app_config(app_name, default_port)
         self._init_clickhouse_config()
         self._init_neo4j_config()
-        self._init_redis_config()
         self._init_log_config()
     
     def _init_app_config(self, app_name: str, default_port: int):
@@ -55,16 +54,6 @@ class BaseConfig:
         self.neo4j_user = os.getenv("NEO4J_USER", "neo4j")
         self.neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
         self.neo4j_database = os.getenv("NEO4J_DATABASE", "neo4j")
-    
-    def _init_redis_config(self):
-        """初始化 Redis 配置"""
-        self.redis_host = os.getenv("REDIS_HOST", "redis")
-        self.redis_port = self._parse_port(os.getenv("REDIS_PORT", "6379"))
-        self.redis_db = int(os.getenv("REDIS_DB", "0"))
-        self.redis_password = os.getenv("REDIS_PASSWORD")
-        
-        self.use_queue = os.getenv("USE_QUEUE", "false").lower() == "true"
-        self.queue_type = os.getenv("QUEUE_TYPE", "redis")
     
     def _init_log_config(self):
         """初始化日志配置"""
@@ -103,15 +92,6 @@ class BaseConfig:
             "user": self.neo4j_user,
             "password": self.neo4j_password,
             "database": self.neo4j_database
-        }
-    
-    def get_redis_config(self) -> Dict[str, Any]:
-        """获取 Redis 连接配置"""
-        return {
-            "host": self.redis_host,
-            "port": self.redis_port,
-            "db": self.redis_db,
-            "password": self.redis_password
         }
     
     def get_storage_config(self) -> Dict[str, Any]:

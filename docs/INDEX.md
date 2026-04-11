@@ -1,7 +1,7 @@
 # Logoscope 文档索引
 
-> 版本: v3.21.0  
-> 更新: 2026-02-27
+> 版本: v3.25.0  
+> 更新: 2026-04-01
 
 ---
 
@@ -16,6 +16,7 @@ doc/
 │   └── API_UPDATE_SUMMARY.md      # API 更新总结
 ├── architecture/                 # 架构文档
 │   ├── data-flow.md               # 数据流设计
+│   ├── log-ingest-query-runtime-path.zh-CN.md # 单条日志接入到前端查询的当前运行时全链路
 │   └── service-topology.md        # 服务拓扑设计
 ├── design/                      # 设计文档
 │   ├── SYSTEM_DESIGN.md           # 系统设计文档
@@ -24,10 +25,14 @@ doc/
 │   └── setup.md                  # 开发环境搭建
 ├── operations/                  # 运维文档
 │   ├── database-check-report.md  # 数据库检查报告
+│   ├── log-not-found-troubleshooting-map.zh-CN.md # 单条日志查不到时的逐层排查地图
+│   ├── clickhouse-release3-performance-2026-03-05.md # ClickHouse 性能优化发布记录（Release 3）
+│   ├── redmine-db-profile-single-ha-2026-03-04.md # Redmine 发布记录（数据库 SINGLE/HA）
+│   ├── trace-span-cst-delivery-plan-2026-03-04.md # 追踪页面时间与 Span 时长修复方案
+│   ├── trace-correlation-release-record-2026-03-03.md # 链路追踪优化发布记录（trace关联修复）
 │   ├── core-requirements-iteration-backlog-2026-02-27.md # 核心需求迭代任务清单
 │   ├── int03-release-notes-2026-02-27.md # 迭代发布说明（INT-03）
-│   ├── redmine-release-record-ai-followup-2026-02-28.md # Redmine 发布记录（AI 会话增强）
-│   └── trace-correlation-release-record-2026-03-03.md # 链路追踪优化发布记录（trace关联修复）
+│   └── observability-preagg-v2-ddl.sql # 预聚合 DDL
 └── user-guide/                 # 用户指南
     └── quick-start.md            # 快速入门
 ```
@@ -46,7 +51,8 @@ doc/
 #### 深入开发
 1. [系统设计文档](design/SYSTEM_DESIGN.md) - 架构和模块设计
 2. [数据流设计](architecture/data-flow.md) - 数据流转和处理
-3. [服务拓扑设计](architecture/service-topology.md) - 拓扑生成算法
+3. [单条日志接入到前端查询的运行时全链路](architecture/log-ingest-query-runtime-path.zh-CN.md) - 当前代码实现下的日志主链路
+4. [服务拓扑设计](architecture/service-topology.md) - 拓扑生成算法
 
 #### 代码贡献
 1. 查看项目根目录的 `CLAUDE.md` (如有) - 编码规范和最佳实践
@@ -62,8 +68,9 @@ doc/
 
 #### 日常运维
 1. [系统设计文档](design/SYSTEM_DESIGN.md) - 了解系统架构
-2. [故障排查指南](design/IMPLEMENTATION_GUIDE.md#故障排查) - 常见问题解决
-3. [性能优化指南](design/IMPLEMENTATION_GUIDE.md#优化调整) - 性能调优
+2. [单条日志查不到时的故障排查地图](operations/log-not-found-troubleshooting-map.zh-CN.md) - 按 topic / 表 / 接口 / 字段逐层排查
+3. [故障排查指南](design/IMPLEMENTATION_GUIDE.md#故障排查) - 常见问题解决
+4. [性能优化指南](design/IMPLEMENTATION_GUIDE.md#优化调整) - 性能调优
 
 #### 监控告警
 1. [实施指南 - 监控配置](design/IMPLEMENTATION_GUIDE.md#监控运维) - Prometheus/Grafana 配置
@@ -75,7 +82,8 @@ doc/
 #### 系统概览
 1. [系统设计文档](design/SYSTEM_DESIGN.md) - 完整的系统设计
 2. [数据流设计](architecture/data-flow.md) - 数据流转架构
-3. [服务拓扑设计](architecture/service-topology.md) - 拓扑发现和增强
+3. [单条日志接入到前端查询的运行时全链路](architecture/log-ingest-query-runtime-path.zh-CN.md) - 以代码为准的运行时路径
+4. [服务拓扑设计](architecture/service-topology.md) - 拓扑发现和增强
 
 #### API 了解
 1. [API 参考手册](api/reference.md) - 完整的 API 规范
@@ -105,9 +113,12 @@ doc/
 - [设计实施指南](design/IMPLEMENTATION_GUIDE.md) ⭐ **推荐**
 - [开发环境搭建](development/setup.md)
 - [数据库检查报告](operations/database-check-report.md)
+- [数据库 SINGLE/HA Runbook](database-ha-runbook.md) ⭐ **推荐**
+- [ClickHouse 性能优化发布记录（Release 3，2026-03-05）](operations/clickhouse-release3-performance-2026-03-05.md) ⭐ **推荐**
+- [Redmine 发布记录（数据库 SINGLE/HA，2026-03-04）](operations/redmine-db-profile-single-ha-2026-03-04.md) ⭐ **推荐**
 - [INT-03 发布说明](operations/int03-release-notes-2026-02-27.md) ⭐ **推荐**
-- [Redmine 发布记录（2026-02-28）](operations/redmine-release-record-ai-followup-2026-02-28.md) ⭐ **推荐**
 - [链路追踪优化发布记录（2026-03-03）](operations/trace-correlation-release-record-2026-03-03.md) ⭐ **推荐**
+- [追踪页面时间与 Span 时长修复方案（2026-03-04）](operations/trace-span-cst-delivery-plan-2026-03-04.md)
 
 ### API 相关
 - [API 参考手册](api/reference.md) ⭐ **推荐**
@@ -117,6 +128,7 @@ doc/
 ### 架构设计相关
 - [系统设计文档](design/SYSTEM_DESIGN.md) ⭐ **推荐**
 - [数据流设计](architecture/data-flow.md)
+- [单条日志接入到前端查询的运行时全链路](architecture/log-ingest-query-runtime-path.zh-CN.md) ⭐ **推荐**
 - [服务拓扑设计](architecture/service-topology.md)
 
 ### 性能优化相关
@@ -126,6 +138,7 @@ doc/
 - [核心需求迭代任务清单](operations/core-requirements-iteration-backlog-2026-02-27.md) ⭐ **推荐**
 
 ### 故障排查相关
+- [单条日志查不到时的故障排查地图](operations/log-not-found-troubleshooting-map.zh-CN.md) ⭐ **推荐**
 - [实施指南 - 故障排查](design/IMPLEMENTATION_GUIDE.md#故障排查) ⭐ **推荐**
 - [系统优化分析](../SYSTEM_COMPREHENSIVE_OPTIMIZATION_ANALYSIS.md)
 - [数据库检查报告](operations/database-check-report.md)
@@ -134,15 +147,31 @@ doc/
 
 ## 📝 文档更新记录
 
+### 2026-04-01
+
+#### 新增文档
+- ✅ `docs/architecture/log-ingest-query-runtime-path.zh-CN.md` - 单条日志从接入到前端查询的当前运行时全链路
+- ✅ `docs/operations/log-not-found-troubleshooting-map.zh-CN.md` - 单条日志查不到时的逐层排查地图
+
+#### 说明
+- ⚠️ `docs/architecture/data-flow.md` 包含历史 Redis/旧路径描述，阅读当前日志链路时应以新增文档和代码实现为准
+
+### 2026-03-05
+
+#### 新增文档
+- ✅ `docs/operations/clickhouse-release3-performance-2026-03-05.md` - ClickHouse Release 3 性能优化发布记录（镜像发布、SQL 执行、滚动聚合验证证据）
+
+### 2026-03-04
+
+#### 新增文档
+- ✅ `docs/operations/redmine-db-profile-single-ha-2026-03-04.md` - 数据库 `SINGLE/HA` 双 Profile 的 Redmine 发布记录与操作步骤
+- ✅ `docs/database-ha-runbook.md` - 数据库双 Profile 运维手册（部署、校验、故障处理）
+- ✅ `docs/operations/trace-span-cst-delivery-plan-2026-03-04.md` - 追踪页面时间与 Span 时长修复交付方案
+
 ### 2026-03-03
 
 #### 新增文档
 - ✅ `docs/operations/trace-correlation-release-record-2026-03-03.md` - 链路追踪优化发布记录（构建/push/部署/验证证据归档）
-
-### 2026-02-28
-
-#### 新增文档
-- ✅ `docs/operations/redmine-release-record-ai-followup-2026-02-28.md` - AI 会话增强版本的 Redmine 发布记录（变更/API/证据/回滚）
 
 ### 2026-02-27
 
@@ -256,6 +285,6 @@ doc/
 
 ---
 
-**文档版本**: v3.21.0  
-**最后更新**: 2026-02-11  
+**文档版本**: v3.24.0  
+**最后更新**: 2026-03-05  
 **维护者**: Semantic Engine Team

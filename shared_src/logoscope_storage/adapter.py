@@ -191,6 +191,10 @@ def _normalize_trace_status(value: Any) -> str:
 SLOW_QUERY_THRESHOLD_MS = _read_int_env("SLOW_QUERY_THRESHOLD_MS", 500)
 AGG_QUERY_LOG_SAMPLE_RATE = _read_float_env("AGG_QUERY_LOG_SAMPLE_RATE", 0.2)
 QUERY_LOG_MAX_CHARS = _read_int_env("QUERY_LOG_MAX_CHARS", 1200)
+CH_NATIVE_CONNECT_TIMEOUT_SECONDS = _read_int_env("CH_NATIVE_CONNECT_TIMEOUT_SECONDS", 3)
+CH_NATIVE_SEND_RECEIVE_TIMEOUT_SECONDS = _read_int_env("CH_NATIVE_SEND_RECEIVE_TIMEOUT_SECONDS", 30)
+CH_NATIVE_SYNC_REQUEST_TIMEOUT_SECONDS = _read_int_env("CH_NATIVE_SYNC_REQUEST_TIMEOUT_SECONDS", 30)
+CH_HTTP_TIMEOUT_SECONDS = _read_int_env("CH_HTTP_TIMEOUT_SECONDS", 30)
 _STATS_DEFAULT_WINDOW = _sanitize_interval(os.getenv("CH_STATS_TIME_WINDOW", "24 HOUR"), default_value="24 HOUR")
 _TOPOLOGY_DEFAULT_WINDOW = _sanitize_interval(
     os.getenv("CH_TOPOLOGY_TIME_WINDOW", "24 HOUR"),
@@ -225,6 +229,61 @@ def _should_log_query_info(sql: str) -> bool:
     if not _is_aggregation_query(sql):
         return True
     return random.random() < AGG_QUERY_LOG_SAMPLE_RATE
+
+
+def _parse_json_object_payload(
+    payload: Any,
+    *,
+    field_name: str,
+    event_id: str,
+    **context: Any,
+) -> Dict[str, Any]:
+    """解析 JSON 对象字段，失败时记录结构化告警并返回空字典。"""
+    if payload in (None, "", b"", bytearray()):
+        return {}
+
+    if isinstance(payload, dict):
+        return payload
+
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, TypeError) as exc:
+            _log_event(
+                logging.WARNING,
+                "Failed to parse JSON object payload",
+                event_id=event_id,
+                field=field_name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                payload_preview=str(payload)[:200],
+                **context,
+            )
+            return {}
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        _log_event(
+            logging.WARNING,
+            "JSON payload is not an object",
+            event_id=event_id,
+            field=field_name,
+            payload_type=type(parsed).__name__,
+            payload_preview=str(payload)[:200],
+            **context,
+        )
+        return {}
+
+    _log_event(
+        logging.WARNING,
+        "Unexpected payload type for JSON object field",
+        event_id=event_id,
+        field=field_name,
+        payload_type=type(payload).__name__,
+        **context,
+    )
+    return {}
 
 
 class StorageAdapter:
@@ -314,13 +373,19 @@ class StorageAdapter:
         self.events = []
         self.graphs = []
         self._traces_namespace_column_exists_cache: Any = None
+        self._traces_namespace_column_exists_cache_expires_at: float = 0.0
+        self._trace_edges_schema_cache: Any = None
+        self._trace_edges_schema_cache_expires_at: float = 0.0
 
         # 初始化数据库表
         self._init_tables()
 
     def _has_traces_namespace_column(self) -> bool:
         """探测 logs.traces 是否已存在 traces_namespace 物化列。"""
-        if self._traces_namespace_column_exists_cache is not None:
+        if (
+            self._traces_namespace_column_exists_cache is not None
+            and time.time() < float(self._traces_namespace_column_exists_cache_expires_at or 0.0)
+        ):
             return bool(self._traces_namespace_column_exists_cache)
 
         try:
@@ -336,11 +401,266 @@ class StorageAdapter:
             )
             exists = int(rows[0].get("cnt", 0) or 0) > 0 if rows else False
             self._traces_namespace_column_exists_cache = exists
+            self._traces_namespace_column_exists_cache_expires_at = time.time() + 300.0
             return exists
         except Exception as exc:
             logger.debug("Failed to inspect traces_namespace column: %s", exc)
             self._traces_namespace_column_exists_cache = False
+            self._traces_namespace_column_exists_cache_expires_at = time.time() + 60.0
             return False
+
+    def _get_trace_edges_schema(self) -> Dict[str, Any]:
+        """探测 logs.trace_edges_1m 是否存在及可用列。"""
+        cached = self._trace_edges_schema_cache
+        if isinstance(cached, dict) and time.time() < float(self._trace_edges_schema_cache_expires_at or 0.0):
+            return dict(cached)
+
+        schema: Dict[str, Any] = {
+            "table_exists": False,
+            "has_namespace": False,
+            "has_timeout_count": False,
+            "has_retries_sum": False,
+            "has_pending_sum": False,
+            "has_dlq_sum": False,
+            "has_p95_ms": False,
+            "has_p99_ms": False,
+            "has_duration_sum_ms": False,
+        }
+        try:
+            table_rows = self.execute_query(
+                """
+                SELECT count() AS cnt
+                FROM system.tables
+                WHERE database = {database:String}
+                  AND name = 'trace_edges_1m'
+                """,
+                {"database": self.ch_database},
+            )
+            table_exists = int(table_rows[0].get("cnt", 0) or 0) > 0 if table_rows else False
+            schema["table_exists"] = table_exists
+            if not table_exists:
+                self._trace_edges_schema_cache = schema
+                return dict(schema)
+
+            column_rows = self.execute_query(
+                """
+                SELECT name
+                FROM system.columns
+                WHERE database = {database:String}
+                  AND table = 'trace_edges_1m'
+                """,
+                {"database": self.ch_database},
+            )
+            column_set = {
+                str(row.get("name") or "").strip()
+                for row in column_rows
+                if isinstance(row, dict)
+            }
+            schema["has_namespace"] = "namespace" in column_set
+            schema["has_timeout_count"] = "timeout_count" in column_set
+            schema["has_retries_sum"] = "retries_sum" in column_set
+            schema["has_pending_sum"] = "pending_sum" in column_set
+            schema["has_dlq_sum"] = "dlq_sum" in column_set
+            schema["has_p95_ms"] = "p95_ms" in column_set
+            schema["has_p99_ms"] = "p99_ms" in column_set
+            schema["has_duration_sum_ms"] = "duration_sum_ms" in column_set
+        except Exception as exc:
+            logger.debug("Failed to inspect trace_edges_1m schema: %s", exc)
+
+        self._trace_edges_schema_cache = schema
+        self._trace_edges_schema_cache_expires_at = time.time() + 120.0
+        return dict(schema)
+
+    def _format_edge_red_metrics_rows(self, rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        metrics: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            source = row.get("source_service")
+            target = row.get("target_service")
+            if not source or not target:
+                continue
+            key = f"{source}->{target}"
+            metrics[key] = {
+                "call_count": int(row.get("call_count") or 0),
+                "error_count": int(row.get("error_count") or 0),
+                "error_rate": float(row.get("error_rate") or 0.0),
+                "p95": float(row.get("p95") or 0.0),
+                "p99": float(row.get("p99") or 0.0),
+                "timeout_rate": float(row.get("timeout_rate") or 0.0),
+                "retries": float(row.get("retries") or 0.0),
+                "pending": float(row.get("pending") or 0.0),
+                "dlq": float(row.get("dlq") or 0.0),
+            }
+        return metrics
+
+    def _query_edge_red_metrics_from_trace_edges(
+        self,
+        safe_time_window: str,
+        namespace: str = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """优先从预聚合 trace_edges_1m 读取边 RED 指标。"""
+        schema = self._get_trace_edges_schema()
+        if not bool(schema.get("table_exists")):
+            return {}
+
+        params: Dict[str, Any] = {}
+        namespace_prewhere_filter = ""
+        if namespace:
+            if not bool(schema.get("has_namespace")):
+                return {}
+            namespace_prewhere_filter = " AND namespace = {namespace:String}"
+            params["namespace"] = namespace
+
+        # 兼容 release-2 老结构（仅 call/error/avg_duration），以及 release-3 扩展结构。
+        if all(
+            bool(schema.get(flag))
+            for flag in (
+                "has_timeout_count",
+                "has_retries_sum",
+                "has_pending_sum",
+                "has_dlq_sum",
+                "has_p95_ms",
+                "has_p99_ms",
+            )
+        ):
+            query = f"""
+            SELECT
+                source_service,
+                target_service,
+                sum(call_count) AS call_count,
+                sum(error_count) AS error_count,
+                if(sum(call_count) = 0, 0, sum(error_count) / sum(call_count)) AS error_rate,
+                max(p95_ms) AS p95,
+                max(p99_ms) AS p99,
+                if(sum(call_count) = 0, 0, sum(timeout_count) / sum(call_count)) AS timeout_rate,
+                if(sum(call_count) = 0, 0, sum(retries_sum) / sum(call_count)) AS retries,
+                if(sum(call_count) = 0, 0, sum(pending_sum) / sum(call_count)) AS pending,
+                if(sum(call_count) = 0, 0, sum(dlq_sum) / sum(call_count)) AS dlq
+            FROM logs.trace_edges_1m
+            PREWHERE ts_minute > now() - INTERVAL {safe_time_window}
+            {namespace_prewhere_filter}
+            WHERE notEmpty(source_service)
+              AND notEmpty(target_service)
+              AND source_service != target_service
+            GROUP BY source_service, target_service
+            """
+        else:
+            query = f"""
+            SELECT
+                source_service,
+                target_service,
+                sum(call_count) AS call_count,
+                sum(error_count) AS error_count,
+                if(sum(call_count) = 0, 0, sum(error_count) / sum(call_count)) AS error_rate,
+                if(sum(call_count) = 0, 0, sum(avg_duration_ms * call_count) / sum(call_count)) AS p95,
+                if(sum(call_count) = 0, 0, sum(avg_duration_ms * call_count) / sum(call_count)) AS p99,
+                toFloat64(0.0) AS timeout_rate,
+                toFloat64(0.0) AS retries,
+                toFloat64(0.0) AS pending,
+                toFloat64(0.0) AS dlq
+            FROM logs.trace_edges_1m
+            PREWHERE ts_minute > now() - INTERVAL {safe_time_window}
+            {namespace_prewhere_filter}
+            WHERE notEmpty(source_service)
+              AND notEmpty(target_service)
+              AND source_service != target_service
+            GROUP BY source_service, target_service
+            """
+
+        try:
+            rows = self.execute_query(query, params=params if params else None)
+            return self._format_edge_red_metrics_rows(rows)
+        except Exception as exc:
+            logger.debug("Failed to query trace_edges_1m aggregation, fallback to traces: %s", exc)
+            return {}
+
+    def _query_edge_red_metrics_from_traces_self_join(
+        self,
+        safe_time_window: str,
+        namespace: str = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """回退路径：直接基于 traces 父子 span 关系实时聚合。"""
+        namespace_prewhere_filter = ""
+        params: Dict[str, Any] = {}
+        if namespace:
+            if self._has_traces_namespace_column():
+                namespace_prewhere_filter = " AND child.traces_namespace = {namespace:String}"
+            else:
+                namespace_prewhere_filter = (
+                    " AND ("
+                    "JSONExtractString(child.attributes_json, 'k8s.namespace.name') = {namespace:String} "
+                    "OR JSONExtractString(child.attributes_json, 'service_namespace') = {namespace:String} "
+                    "OR JSONExtractString(child.attributes_json, 'namespace') = {namespace:String}"
+                    ")"
+                )
+            params["namespace"] = namespace
+
+        query = f"""
+        SELECT
+            source_service,
+            target_service,
+            sum(calls_per_minute) AS call_count,
+            sum(errors_per_minute) AS error_count,
+            if(sum(calls_per_minute) = 0, 0, sum(errors_per_minute) / sum(calls_per_minute)) AS error_rate,
+            max(p95_per_minute) AS p95,
+            max(p99_per_minute) AS p99,
+            if(sum(calls_per_minute) = 0, 0, sum(timeouts_per_minute) / sum(calls_per_minute)) AS timeout_rate,
+            avg(retries_per_minute) AS retries,
+            avg(pending_per_minute) AS pending,
+            avg(dlq_per_minute) AS dlq
+        FROM (
+            SELECT
+                source_service,
+                target_service,
+                ts_minute,
+                count() AS calls_per_minute,
+                countIf(lower(toString(status)) IN ('error', 'failed', 'status_code_error', '2')) AS errors_per_minute,
+                quantileTDigest(0.95)(span_duration_ms) AS p95_per_minute,
+                quantileTDigest(0.99)(span_duration_ms) AS p99_per_minute,
+                countIf(span_duration_ms >= 1000) AS timeouts_per_minute,
+                avg(retries_value) AS retries_per_minute,
+                avg(pending_value) AS pending_per_minute,
+                avg(dlq_value) AS dlq_per_minute
+            FROM (
+                SELECT
+                    parent.service_name AS source_service,
+                    child.service_name AS target_service,
+                    child.status AS status,
+                    toStartOfMinute(child.timestamp) AS ts_minute,
+                    greatest(
+                        toFloat64OrZero(toString(child.duration_ms)),
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration_ms')),
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration')),
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'elapsed_ms'))
+                    ) AS span_duration_ms,
+                    greatest(
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'retry_count')),
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'retries'))
+                    ) AS retries_value,
+                    greatest(
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'pending')),
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'pending_count'))
+                    ) AS pending_value,
+                    greatest(
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'dlq')),
+                        toFloat64OrZero(JSONExtractString(child.attributes_json, 'dlq_count'))
+                    ) AS dlq_value
+                FROM logs.traces AS child
+                INNER JOIN logs.traces AS parent
+                    ON child.trace_id = parent.trace_id
+                   AND child.parent_span_id = parent.span_id
+                PREWHERE child.timestamp > now() - INTERVAL {safe_time_window}
+                {namespace_prewhere_filter}
+                WHERE notEmpty(child.parent_span_id)
+                  AND notEmpty(child.service_name)
+                  AND notEmpty(parent.service_name)
+                  AND child.service_name != parent.service_name
+            )
+            GROUP BY source_service, target_service, ts_minute
+        )
+        GROUP BY source_service, target_service
+        """
+        rows = self.execute_query(query, params=params if params else None)
+        return self._format_edge_red_metrics_rows(rows)
 
     def _create_native_clickhouse_client(self):
         """创建一个新的 ClickHouse Native Client 实例。"""
@@ -350,6 +670,9 @@ class StorageAdapter:
             database=self.config['clickhouse']['database'],
             user=self.config['clickhouse']['user'],
             password=self.config['clickhouse']['password'],
+            connect_timeout=CH_NATIVE_CONNECT_TIMEOUT_SECONDS,
+            send_receive_timeout=CH_NATIVE_SEND_RECEIVE_TIMEOUT_SECONDS,
+            sync_request_timeout=CH_NATIVE_SYNC_REQUEST_TIMEOUT_SECONDS,
             settings={'use_numpy': False}
         )
 
@@ -394,7 +717,7 @@ class StorageAdapter:
         }
         auth = (user, password) if password else None
         client = self.http_session if self.http_session is not None else requests
-        response = client.post(url, params=params, auth=auth, timeout=30)
+        response = client.post(url, params=params, auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
 
@@ -524,20 +847,37 @@ class StorageAdapter:
         user = self.ch_http_client['user']
         password = self.ch_http_client['password']
 
+        def _extract_insert_columns(insert_sql: str) -> List[str]:
+            """从 INSERT INTO ... (col1, col2) VALUES 语句中提取列名。"""
+            matched = re.search(
+                r"INSERT\s+INTO\s+[^(]+\((?P<columns>[^)]+)\)\s*VALUES\s*$",
+                str(insert_sql or "").strip(),
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if not matched:
+                return []
+            return [
+                col.strip().strip("`").strip('"')
+                for col in matched.group("columns").split(",")
+                if col.strip()
+            ]
+
         # 构建 SQL 查询
         if data:
             # INSERT 查询 - 使用 FORMAT JSONEachRow
-            import json
             from datetime import datetime
 
             # 转换数据为 JSON 格式
+            insert_columns = _extract_insert_columns(query)
             formatted_data = []
             for row in data:
-                row_dict = {}
-                # 获取列名（从 INSERT 语句中解析）
-                if 'INSERT INTO logs' in query.upper():
-                    columns = ['id', 'timestamp', 'service_name', 'pod_name', 'namespace', 'node_name', 'level', 'message', 'trace_id', 'span_id', 'labels', 'host_ip']
-                    for i, col in enumerate(columns):
+                if isinstance(row, dict):
+                    row_dict = dict(row)
+                else:
+                    if not insert_columns:
+                        raise ValueError("Cannot parse INSERT columns for HTTP batch insert")
+                    row_dict = {}
+                    for i, col in enumerate(insert_columns):
                         val = row[i] if i < len(row) else ''
                         # 转换 datetime 为字符串
                         if isinstance(val, datetime):
@@ -546,7 +886,12 @@ class StorageAdapter:
                 formatted_data.append(row_dict)
 
             # 构建 INSERT 查询
-            insert_query = query.replace('VALUES', '') + ' FORMAT JSONEachRow'
+            insert_query = re.sub(
+                r"\bVALUES\s*$",
+                "",
+                str(query or "").strip(),
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip() + " FORMAT JSONEachRow"
             body = '\n'.join(json.dumps(row) for row in formatted_data)
 
             params = {
@@ -556,7 +901,7 @@ class StorageAdapter:
 
             auth = (user, password) if password else None
             client = self.http_session if self.http_session is not None else requests
-            response = client.post(url, params=params, data=body, auth=auth, timeout=30)
+            response = client.post(url, params=params, data=body, auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
         else:
             # SELECT 查询 - 使用 FORMAT JSON
             params = {
@@ -566,16 +911,24 @@ class StorageAdapter:
 
             auth = (user, password) if password else None
             client = self.http_session if self.http_session is not None else requests
-            response = client.get(url, params=params, auth=auth, timeout=30)
+            response = client.get(url, params=params, auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
 
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-        # 解析 JSON 响应
+        # 解析 JSON 响应；非 JSON 时记录告警，避免静默吞异常
         try:
-            import json
             return json.loads(response.text)
-        except:
+        except json.JSONDecodeError as exc:
+            _log_event(
+                logging.WARNING,
+                "ClickHouse HTTP response is not valid JSON",
+                event_id="CH_HTTP_NON_JSON_RESPONSE",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                sql=_clip_sql(query),
+                response_preview=str(response.text)[:200],
+            )
             return response.text
 
     def save_event(self, event: Dict[str, Any]) -> bool:
@@ -695,7 +1048,7 @@ class StorageAdapter:
             auth = (user, password) if password else None
 
             client = self.http_session if self.http_session is not None else requests
-            response = client.post(url, params=params, data=json.dumps(row), auth=auth, timeout=30)
+            response = client.post(url, params=params, data=json.dumps(row), auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
 
             if response.status_code == 200:
                 logger.debug("Event saved to ClickHouse (HTTP): %s", event.get("id", "unknown"))
@@ -1168,7 +1521,15 @@ class StorageAdapter:
                     from datetime import datetime
                     dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                     return dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                except:
+                except (TypeError, ValueError) as exc:
+                    _log_event(
+                        logging.WARNING,
+                        "Failed to parse ISO timestamp, fallback to raw value",
+                        event_id="CH_TIMESTAMP_PARSE_FALLBACK",
+                        raw_timestamp=str(ts),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
                     return ts
             
             if start_time:
@@ -1202,13 +1563,12 @@ class StorageAdapter:
             events = []
             for row in result:
                 if len(row) >= 10:
-                    # 解析labels JSON
-                    labels = {}
-                    try:
-                        if len(row) > 12 and row[12]:  # labels字段 (索引12)
-                            labels = json.loads(row[12])
-                    except:
-                        pass
+                    labels = _parse_json_object_payload(
+                        row[12] if len(row) > 12 else None,
+                        field_name="labels",
+                        event_id="CH_EVENT_LABELS_PARSE_FAILED",
+                        event_log_id=row[0],
+                    )
 
                     # 将 ClickHouse DateTime64 格式转换为 RFC 3339
                     ts_datetime64 = row[1]  # 已经是字符串格式
@@ -1569,14 +1929,12 @@ class StorageAdapter:
 
             metrics = []
             for row in result:
-                # 解析attributes_json作为labels
-                labels = {}
-                try:
-                    attrs_payload = row.get("attributes_json")
-                    if attrs_payload:
-                        labels = json.loads(attrs_payload) if isinstance(attrs_payload, str) else attrs_payload
-                except Exception:
-                    pass
+                labels = _parse_json_object_payload(
+                    row.get("attributes_json"),
+                    field_name="attributes_json",
+                    event_id="CH_METRIC_ATTRS_PARSE_FAILED",
+                    metric_name=row.get("metric_name", ""),
+                )
 
                 metrics.append({
                     'metric_name': row.get("metric_name", ""),
@@ -1632,11 +1990,13 @@ class StorageAdapter:
 
             traces = []
             for row in result:
-                tags = {}
-                try:
-                    tags = json.loads(row.get("attributes_json") or "{}")
-                except Exception:
-                    tags = {}
+                tags = _parse_json_object_payload(
+                    row.get("attributes_json"),
+                    field_name="attributes_json",
+                    event_id="CH_TRACE_TAGS_PARSE_FAILED",
+                    trace_id=row.get("trace_id", ""),
+                    span_id=row.get("span_id", ""),
+                )
 
                 traces.append({
                     'trace_id': row.get("trace_id", ""),
@@ -1683,11 +2043,13 @@ class StorageAdapter:
 
             spans = []
             for row in result:
-                tags = {}
-                try:
-                    tags = json.loads(row.get("attributes_json") or "{}")
-                except Exception:
-                    tags = {}
+                tags = _parse_json_object_payload(
+                    row.get("attributes_json"),
+                    field_name="attributes_json",
+                    event_id="CH_SPAN_TAGS_PARSE_FAILED",
+                    trace_id=row.get("trace_id", ""),
+                    span_id=row.get("span_id", ""),
+                )
 
                 spans.append({
                     'trace_id': row.get("trace_id", ""),
@@ -1732,7 +2094,15 @@ class StorageAdapter:
                 # 解析 ISO 8601 格式 (2026-02-25T15:26:23.354442Z)
                 dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                 ch_timestamp = dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # 转换为 ClickHouse 格式
-            except:
+            except (TypeError, ValueError) as exc:
+                _log_event(
+                    logging.WARNING,
+                    "Failed to parse log context timestamp, fallback to raw value",
+                    event_id="CH_LOG_CONTEXT_TIMESTAMP_FALLBACK",
+                    raw_timestamp=str(timestamp),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
                 ch_timestamp = timestamp
 
             from utils.timestamp import datetime64_to_rfc3339
@@ -1756,13 +2126,13 @@ class StorageAdapter:
             )
             before_logs = []
             for row in before_result:
-                labels = {}
-                try:
-                    labels_payload = row.get("labels")
-                    if labels_payload:
-                        labels = json.loads(labels_payload) if isinstance(labels_payload, str) else labels_payload
-                except Exception:
-                    pass
+                labels = _parse_json_object_payload(
+                    row.get("labels"),
+                    field_name="labels",
+                    event_id="CH_LOG_CONTEXT_LABELS_PARSE_FAILED",
+                    log_position="before",
+                    log_id=row.get("id", ""),
+                )
                 before_logs.append({
                     'id': row.get("id", ""),
                     'timestamp': datetime64_to_rfc3339(str(row.get("timestamp_str", ""))),
@@ -1795,13 +2165,13 @@ class StorageAdapter:
             )
             after_logs = []
             for row in after_result:
-                labels = {}
-                try:
-                    labels_payload = row.get("labels")
-                    if labels_payload:
-                        labels = json.loads(labels_payload) if isinstance(labels_payload, str) else labels_payload
-                except Exception:
-                    pass
+                labels = _parse_json_object_payload(
+                    row.get("labels"),
+                    field_name="labels",
+                    event_id="CH_LOG_CONTEXT_LABELS_PARSE_FAILED",
+                    log_position="after",
+                    log_id=row.get("id", ""),
+                )
                 after_logs.append({
                     'id': row.get("id", ""),
                     'timestamp': datetime64_to_rfc3339(str(row.get("timestamp_str", ""))),
@@ -1833,13 +2203,13 @@ class StorageAdapter:
             current_log = None
             if len(current_result) > 0:
                 row = current_result[0]
-                labels = {}
-                try:
-                    labels_payload = row.get("labels")
-                    if labels_payload:
-                        labels = json.loads(labels_payload) if isinstance(labels_payload, str) else labels_payload
-                except Exception:
-                    pass
+                labels = _parse_json_object_payload(
+                    row.get("labels"),
+                    field_name="labels",
+                    event_id="CH_LOG_CONTEXT_LABELS_PARSE_FAILED",
+                    log_position="current",
+                    log_id=row.get("id", ""),
+                )
                 current_log = {
                     'id': row.get("id", ""),
                     'timestamp': datetime64_to_rfc3339(str(row.get("timestamp_str", ""))),
@@ -2077,36 +2447,8 @@ class StorageAdapter:
 
                     # 如果有 parent_span_id，说明这是子服务，存在调用关系
                     if parent_span_id and parent_span_id != "":
-                        # 这里简化处理：假设 parent_span_id 对应的服务
-                        # 实际可能需要额外的查询来获取父服务名
-                        # 暂时使用 "unknown" 作为占位
-                        parent_service = "unknown"
-                        if parent_service not in nodes:
-                            nodes[parent_service] = {
-                                "id": parent_service,
-                                "label": parent_service,
-                                "type": "service",
-                                "metrics": {
-                                    "request_count": 0,
-                                    "error_count": 0,
-                                    "avg_duration": 0,
-                                    "error_rate": 0
-                                }
-                            }
-
-                        # 添加边
-                        edge_id = f"{parent_service}-{service_name}"
-                        edges.append({
-                            "id": edge_id,
-                            "source": parent_service,
-                            "target": service_name,
-                            "label": "calls",
-                            "metrics": {
-                                "request_count": call_count,
-                                "avg_duration": avg_duration,
-                                "error_rate": error_count / call_count if call_count > 0 else 0
-                            }
-                        })
+                        # parent_span_id 无法直接反查父服务名，避免构造 unknown 假边污染拓扑。
+                        continue
 
             # 计算每个节点的错误率和平均延迟
             for node in nodes.values():
@@ -2558,111 +2900,17 @@ class StorageAdapter:
 
         try:
             safe_time_window = _sanitize_interval(time_window, default_value="1 HOUR")
-            namespace_prewhere_filter = ""
-            params: Dict[str, Any] = {}
-            if namespace:
-                if self._has_traces_namespace_column():
-                    namespace_prewhere_filter = " AND child.traces_namespace = {namespace:String}"
-                else:
-                    namespace_prewhere_filter = (
-                        " AND ("
-                        "JSONExtractString(child.attributes_json, 'k8s.namespace.name') = {namespace:String} "
-                        "OR JSONExtractString(child.attributes_json, 'service_namespace') = {namespace:String} "
-                        "OR JSONExtractString(child.attributes_json, 'namespace') = {namespace:String}"
-                        ")"
-                    )
-                params["namespace"] = namespace
-
-            query = f"""
-            SELECT
-                source_service,
-                target_service,
-                sum(calls_per_minute) AS call_count,
-                sum(errors_per_minute) AS error_count,
-                if(sum(calls_per_minute) = 0, 0, sum(errors_per_minute) / sum(calls_per_minute)) AS error_rate,
-                max(p95_per_minute) AS p95,
-                max(p99_per_minute) AS p99,
-                if(sum(calls_per_minute) = 0, 0, sum(timeouts_per_minute) / sum(calls_per_minute)) AS timeout_rate,
-                avg(retries_per_minute) AS retries,
-                avg(pending_per_minute) AS pending,
-                avg(dlq_per_minute) AS dlq
-            FROM (
-                SELECT
-                    parent.service_name AS source_service,
-                    child.service_name AS target_service,
-                    toStartOfMinute(child.timestamp) AS ts_minute,
-                    count() AS calls_per_minute,
-                    countIf(lower(toString(child.status)) IN ('error', 'failed', 'status_code_error', '2')) AS errors_per_minute,
-                    quantileTDigest(0.95)(
-                        greatest(
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration_ms')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'elapsed_ms'))
-                        )
-                    ) AS p95_per_minute,
-                    quantileTDigest(0.99)(
-                        greatest(
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration_ms')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'elapsed_ms'))
-                        )
-                    ) AS p99_per_minute,
-                    countIf(
-                        greatest(
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration_ms')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'duration')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'elapsed_ms'))
-                        ) >= 1000
-                    ) AS timeouts_per_minute,
-                    avg(
-                        greatest(
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'retry_count')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'retries'))
-                        )
-                    ) AS retries_per_minute,
-                    avg(
-                        greatest(
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'pending')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'pending_count'))
-                        )
-                    ) AS pending_per_minute,
-                    avg(
-                        greatest(
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'dlq')),
-                            toFloat64OrZero(JSONExtractString(child.attributes_json, 'dlq_count'))
-                        )
-                    ) AS dlq_per_minute
-                FROM logs.traces AS child
-                INNER JOIN logs.traces AS parent
-                    ON child.trace_id = parent.trace_id
-                   AND child.parent_span_id = parent.span_id
-                PREWHERE child.timestamp > now() - INTERVAL {safe_time_window}
-                {namespace_prewhere_filter}
-                GROUP BY source_service, target_service, ts_minute
+            metrics = self._query_edge_red_metrics_from_trace_edges(
+                safe_time_window=safe_time_window,
+                namespace=namespace,
             )
-            GROUP BY source_service, target_service
-            """
+            if metrics:
+                return metrics
 
-            rows = self.execute_query(query, params=params if params else None)
-            metrics: Dict[str, Dict[str, Any]] = {}
-            for row in rows:
-                source = row.get("source_service")
-                target = row.get("target_service")
-                if not source or not target:
-                    continue
-                key = f"{source}->{target}"
-                metrics[key] = {
-                    "call_count": int(row.get("call_count") or 0),
-                    "error_count": int(row.get("error_count") or 0),
-                    "error_rate": float(row.get("error_rate") or 0.0),
-                    "p95": float(row.get("p95") or 0.0),
-                    "p99": float(row.get("p99") or 0.0),
-                    "timeout_rate": float(row.get("timeout_rate") or 0.0),
-                    "retries": float(row.get("retries") or 0.0),
-                    "pending": float(row.get("pending") or 0.0),
-                    "dlq": float(row.get("dlq") or 0.0),
-                }
-            return metrics
+            return self._query_edge_red_metrics_from_traces_self_join(
+                safe_time_window=safe_time_window,
+                namespace=namespace,
+            )
         except Exception as e:
             logger.warning("Failed to build edge RED metrics: %s", e)
             return {}

@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,13 @@ ALLOWED_SESSION_SORT_ORDERS: Dict[str, str] = {
     "asc": "ASC",
     "desc": "DESC",
 }
+MESSAGE_METADATA_MAX_CHARS = max(4096, int(os.getenv("AI_HISTORY_MESSAGE_METADATA_MAX_CHARS", "65536")))
+MESSAGE_METADATA_TEXT_MAX_CHARS = max(120, int(os.getenv("AI_HISTORY_MESSAGE_METADATA_TEXT_MAX_CHARS", "1200")))
+MESSAGE_METADATA_LIST_MAX_ITEMS = max(1, int(os.getenv("AI_HISTORY_MESSAGE_METADATA_LIST_MAX_ITEMS", "40")))
 
 
 def _iso_now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _to_datetime(value: Any) -> datetime:
@@ -41,13 +45,13 @@ def _to_datetime(value: Any) -> datetime:
         return value
     text = str(value or "").strip()
     if not text:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc).replace(tzinfo=None)
     normalized = text.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(normalized)
         return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
     except ValueError:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _to_iso(value: Any) -> str:
@@ -154,6 +158,154 @@ def _extract_summary_text(result: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
+def _deleted_message_count_from_context(context: Any) -> int:
+    """计算 context.deleted_message_ids 条数。"""
+    if not isinstance(context, dict):
+        return 0
+    raw = context.get("deleted_message_ids")
+    if not isinstance(raw, list):
+        return 0
+    seen = set()
+    count = 0
+    for item in raw:
+        mid = str(item or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        count += 1
+    return count
+
+
+def _truncate_text(value: Any, max_chars: int = MESSAGE_METADATA_TEXT_MAX_CHARS) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n...<truncated>..."
+
+
+def _compact_action_observation(item: Any) -> Dict[str, Any]:
+    obs = item if isinstance(item, dict) else {}
+    return {
+        "status": str(obs.get("status") or "").strip().lower(),
+        "action_id": str(obs.get("action_id") or "").strip(),
+        "command_run_id": str(obs.get("command_run_id") or "").strip(),
+        "command": _truncate_text(obs.get("command"), max_chars=320),
+        "command_type": str(obs.get("command_type") or "").strip(),
+        "risk_level": str(obs.get("risk_level") or "").strip(),
+        "exit_code": int(obs.get("exit_code") or 0),
+        "timed_out": bool(obs.get("timed_out")),
+        "auto_executed": bool(obs.get("auto_executed")),
+        "output_truncated": bool(obs.get("output_truncated")),
+        "message": _truncate_text(obs.get("message"), max_chars=360),
+        "stdout_preview": _truncate_text(obs.get("stdout"), max_chars=280),
+        "stderr_preview": _truncate_text(obs.get("stderr"), max_chars=280),
+    }
+
+
+def _compact_followup_action(item: Any) -> Dict[str, Any]:
+    action = item if isinstance(item, dict) else {}
+    return {
+        "id": str(action.get("id") or "").strip(),
+        "title": _truncate_text(action.get("title"), max_chars=240),
+        "purpose": _truncate_text(action.get("purpose"), max_chars=280),
+        "action_type": str(action.get("action_type") or "").strip(),
+        "command": _truncate_text(action.get("command"), max_chars=320),
+        "command_type": str(action.get("command_type") or "").strip(),
+        "risk_level": str(action.get("risk_level") or "").strip(),
+        "requires_confirmation": bool(action.get("requires_confirmation")),
+        "requires_elevation": bool(action.get("requires_elevation")),
+        "requires_write_permission": bool(action.get("requires_write_permission")),
+        "executable": bool(action.get("executable")),
+        "priority": int(action.get("priority") or 0),
+    }
+
+
+def _compact_message_metadata(metadata: Any) -> Dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    compact: Dict[str, Any] = dict(metadata)
+
+    if isinstance(compact.get("action_observations"), list):
+        compact["action_observations"] = [
+            _compact_action_observation(item)
+            for item in compact.get("action_observations", [])[:MESSAGE_METADATA_LIST_MAX_ITEMS]
+        ]
+
+    if isinstance(compact.get("actions"), list):
+        compact["actions"] = [
+            _compact_followup_action(item)
+            for item in compact.get("actions", [])[:MESSAGE_METADATA_LIST_MAX_ITEMS]
+        ]
+
+    if isinstance(compact.get("thoughts"), list):
+        safe_thoughts: List[Dict[str, Any]] = []
+        for item in compact.get("thoughts", [])[:MESSAGE_METADATA_LIST_MAX_ITEMS]:
+            payload = item if isinstance(item, dict) else {}
+            safe_thoughts.append(
+                {
+                    "phase": str(payload.get("phase") or "").strip(),
+                    "title": _truncate_text(payload.get("title"), max_chars=200),
+                    "detail": _truncate_text(payload.get("detail"), max_chars=320),
+                    "status": str(payload.get("status") or "").strip(),
+                    "iteration": int(payload.get("iteration") or 0),
+                }
+            )
+        compact["thoughts"] = safe_thoughts
+
+    if isinstance(compact.get("long_term_memory_summary"), str):
+        compact["long_term_memory_summary"] = _truncate_text(
+            compact.get("long_term_memory_summary"),
+            max_chars=800,
+        )
+
+    encoded = json.dumps(compact, ensure_ascii=False)
+    if len(encoded) <= MESSAGE_METADATA_MAX_CHARS:
+        return compact
+
+    drop_order = [
+        "thoughts",
+        "react_iterations",
+        "references",
+        "context_pills",
+        "subgoals",
+        "reflection",
+        "react_memory",
+        "timeout_profile",
+    ]
+    for key in drop_order:
+        if key in compact:
+            compact.pop(key, None)
+            encoded = json.dumps(compact, ensure_ascii=False)
+            if len(encoded) <= MESSAGE_METADATA_MAX_CHARS:
+                return compact
+
+    compact["actions"] = [
+        _compact_followup_action(item)
+        for item in (compact.get("actions") or [])[:10]
+    ]
+    compact["action_observations"] = [
+        _compact_action_observation(item)
+        for item in (compact.get("action_observations") or [])[:10]
+    ]
+    encoded = json.dumps(compact, ensure_ascii=False)
+    if len(encoded) <= MESSAGE_METADATA_MAX_CHARS:
+        return compact
+
+    react_loop = compact.get("react_loop") if isinstance(compact.get("react_loop"), dict) else {}
+    return {
+        "truncated": True,
+        "reason": "metadata_too_large",
+        "react_loop": {
+            "summary": _truncate_text(react_loop.get("summary"), max_chars=320),
+            "replan": react_loop.get("replan") if isinstance(react_loop.get("replan"), dict) else {},
+        },
+        "action_observations": [
+            _compact_action_observation(item)
+            for item in (compact.get("action_observations") or [])[:6]
+        ],
+    }
+
+
 def _build_session_title(
     *,
     analysis_type: str,
@@ -235,17 +387,73 @@ class AISessionStore:
         )
         self.session_table = os.getenv("AI_HISTORY_SESSION_CH_TABLE", f"{default_database}.ai_analysis_sessions")
         self.message_table = os.getenv("AI_HISTORY_MESSAGE_CH_TABLE", f"{default_database}.ai_analysis_messages")
+        self.session_latest_view = os.getenv(
+            "AI_HISTORY_SESSION_LATEST_VIEW",
+            f"{default_database}.v_ai_analysis_sessions_latest",
+        )
+        self._read_source_cache_ttl_seconds = max(
+            5,
+            int(os.getenv("AI_HISTORY_READ_SOURCE_CACHE_TTL_SECONDS", "30")),
+        )
+        self._session_read_source_cache: Optional[Tuple[str, bool]] = None
+        self._session_read_source_cache_checked_at = 0.0
 
         if self._is_clickhouse_available():
             self._ensure_clickhouse_tables()
 
     def attach_storage(self, storage_adapter) -> None:
         self.storage = storage_adapter
+        self._session_read_source_cache = None
+        self._session_read_source_cache_checked_at = 0.0
         if self._is_clickhouse_available():
             self._ensure_clickhouse_tables()
 
     def _is_clickhouse_available(self) -> bool:
         return bool(self.storage and getattr(self.storage, "ch_client", None))
+
+    @staticmethod
+    def _split_table_name(table_name: str) -> Tuple[str, str]:
+        normalized = str(table_name or "").strip()
+        if "." in normalized:
+            db_name, tbl_name = normalized.split(".", 1)
+            return db_name, tbl_name
+        return "default", normalized
+
+    def _table_exists(self, table_name: str) -> bool:
+        if not self._is_clickhouse_available():
+            return False
+        db_name, tbl_name = self._split_table_name(table_name)
+        try:
+            rows = self.storage.ch_client.execute(
+                """
+                SELECT count()
+                FROM system.tables
+                WHERE database = %(database)s
+                  AND name = %(name)s
+                """,
+                {"database": db_name, "name": tbl_name},
+            )
+            return bool(rows and rows[0] and int(rows[0][0]) > 0)
+        except Exception:
+            return False
+
+    def _get_session_read_source(self) -> Tuple[str, bool]:
+        """
+        返回会话读取数据源：
+        - 优先 latest 视图（无需 FINAL）
+        - 回退原始表（需 FINAL 保证去重语义）
+        """
+        now_ts = time.time()
+        cached = self._session_read_source_cache
+        if cached is not None and (now_ts - self._session_read_source_cache_checked_at) < self._read_source_cache_ttl_seconds:
+            return cached
+
+        if self._table_exists(self.session_latest_view):
+            self._session_read_source_cache = (self.session_latest_view, False)
+        else:
+            self._session_read_source_cache = (self.session_table, True)
+        self._session_read_source_cache_checked_at = now_ts
+        return self._session_read_source_cache
 
     def _ensure_clickhouse_tables(self) -> None:
         if not self._is_clickhouse_available():
@@ -353,6 +561,7 @@ class AISessionStore:
     def _build_message_rows(self, messages: List[AISessionMessage]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for msg in messages:
+            compacted_metadata = _compact_message_metadata(msg.metadata)
             rows.append(
                 {
                     "session_id": msg.session_id,
@@ -360,7 +569,7 @@ class AISessionStore:
                     "msg_index": max(0, int(msg.msg_index)),
                     "role": msg.role,
                     "content": msg.content,
-                    "metadata_json": json.dumps(msg.metadata or {}, ensure_ascii=False),
+                    "metadata_json": json.dumps(compacted_metadata, ensure_ascii=False),
                     "created_at": _to_datetime(msg.created_at),
                 }
             )
@@ -404,17 +613,24 @@ class AISessionStore:
     def _query_session_from_clickhouse(self, session_id: str) -> Optional[AISession]:
         if not self._is_clickhouse_available():
             return None
+        # 点查 session_id 场景强制走基表 + FINAL，避免 latest 聚合视图在内存紧张时触发全局 AggregatingTransform。
+        source_table = self.session_table
+        final_clause = "FINAL"
         sql = f"""
         SELECT
             session_id, analysis_type, title, service_name, input_text, trace_id,
             summary_text, context_json, result_json, analysis_method, llm_model, llm_provider,
             source, status, created_at, updated_at, is_pinned, is_archived, is_deleted
-        FROM {self.session_table}
-        FINAL
+        FROM {source_table}
+        {final_clause}
         WHERE session_id = %(session_id)s
         LIMIT 1
         """
-        rows = self.storage.ch_client.execute(sql, {"session_id": session_id})
+        try:
+            rows = self.storage.ch_client.execute(sql, {"session_id": session_id})
+        except Exception as exc:
+            logger.warning("query session from clickhouse failed (session_id=%s): %s", session_id, exc)
+            return None
         if not rows:
             return None
         session = self._row_to_session(rows[0])
@@ -422,16 +638,62 @@ class AISessionStore:
             return None
         return session
 
-    def _query_messages_from_clickhouse(self, session_id: str, limit: int = 500) -> List[AISessionMessage]:
+    def _query_messages_from_clickhouse(
+        self,
+        session_id: str,
+        limit: int = 500,
+        *,
+        include_metadata: bool = True,
+    ) -> List[AISessionMessage]:
+        if not self._is_clickhouse_available():
+            return []
+        metadata_expr = "metadata_json" if include_metadata else "'' AS metadata_json"
+        sql = f"""
+        SELECT
+            session_id, message_id, msg_index, role, content, {metadata_expr}, created_at
+        FROM {self.message_table}
+        WHERE session_id = %(session_id)s
+        ORDER BY msg_index ASC, created_at ASC
+        LIMIT %(limit)s
+        """
+        rows = self.storage.ch_client.execute(sql, {"session_id": session_id, "limit": max(1, int(limit))})
+        messages: List[AISessionMessage] = []
+        for row in rows:
+            if not row or len(row) < 7:
+                continue
+            messages.append(
+                AISessionMessage(
+                    session_id=str(row[0]),
+                    message_id=str(row[1]),
+                    msg_index=int(row[2]),
+                    role=str(row[3]),
+                    content=str(row[4]),
+                    metadata=_safe_json_loads(row[5], {}),
+                    created_at=_to_iso(row[6]),
+                )
+            )
+        return messages
+
+    def _query_recent_assistant_messages_from_clickhouse(
+        self,
+        session_id: str,
+        limit: int = 10,
+    ) -> List[AISessionMessage]:
         if not self._is_clickhouse_available():
             return []
         sql = f"""
         SELECT
             session_id, message_id, msg_index, role, content, metadata_json, created_at
-        FROM {self.message_table}
-        WHERE session_id = %(session_id)s
+        FROM (
+            SELECT
+                session_id, message_id, msg_index, role, content, metadata_json, created_at
+            FROM {self.message_table}
+            WHERE session_id = %(session_id)s
+              AND role = 'assistant'
+            ORDER BY msg_index DESC, created_at DESC
+            LIMIT %(limit)s
+        )
         ORDER BY msg_index ASC, created_at ASC
-        LIMIT %(limit)s
         """
         rows = self.storage.ch_client.execute(sql, {"session_id": session_id, "limit": max(1, int(limit))})
         messages: List[AISessionMessage] = []
@@ -613,10 +875,12 @@ class AISessionStore:
                 include_archived=include_archived,
                 search_query=search_query,
             )
+            source_table, use_final = self._get_session_read_source()
+            final_clause = "FINAL" if use_final else ""
             sql = f"""
             SELECT count()
-            FROM {self.session_table}
-            FINAL
+            FROM {source_table}
+            {final_clause}
             WHERE {" AND ".join(where_clauses)}
             """
             rows = self.storage.ch_client.execute(sql, params)
@@ -679,14 +943,16 @@ class AISessionStore:
                 search_query=search_query,
             )
             params.update({"limit": safe_limit, "offset": safe_offset})
+            source_table, use_final = self._get_session_read_source()
+            final_clause = "FINAL" if use_final else ""
 
             sql = f"""
             SELECT
                 session_id, analysis_type, title, service_name, input_text, trace_id,
                 summary_text, context_json, result_json, analysis_method, llm_model, llm_provider,
                 source, status, created_at, updated_at, is_pinned, is_archived, is_deleted
-            FROM {self.session_table}
-            FINAL
+            FROM {source_table}
+            {final_clause}
             WHERE {" AND ".join(where_clauses)}
             ORDER BY {order_expr}
             LIMIT %(limit)s OFFSET %(offset)s
@@ -732,12 +998,159 @@ class AISessionStore:
         )
         return sessions[safe_offset: safe_offset + safe_limit]
 
+    def list_sessions_with_total(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        analysis_type: str = "",
+        service_name: str = "",
+        include_archived: bool = False,
+        search_query: str = "",
+        pinned_first: bool = True,
+        sort_by: str = "updated_at",
+        sort_order: str = "desc",
+    ) -> Tuple[List[AISession], int]:
+        """一次查询返回分页会话与总数，减少重复扫描。"""
+        safe_limit = max(1, int(limit))
+        safe_offset = max(0, int(offset))
+        order_expr, safe_sort_field, safe_sort_order = _build_session_order_expr(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            pinned_first=pinned_first,
+        )
+        if self._is_clickhouse_available():
+            where_clauses, params = self._build_clickhouse_history_filters(
+                analysis_type=analysis_type,
+                service_name=service_name,
+                include_archived=include_archived,
+                search_query=search_query,
+            )
+            params.update({"limit": safe_limit, "offset": safe_offset})
+            source_table, use_final = self._get_session_read_source()
+            final_clause = "FINAL" if use_final else ""
+
+            sql = f"""
+            SELECT
+                session_id, analysis_type, title, service_name, input_text, trace_id,
+                summary_text, context_json, result_json, analysis_method, llm_model, llm_provider,
+                source, status, created_at, updated_at, is_pinned, is_archived, is_deleted,
+                count() OVER() AS total_count
+            FROM {source_table}
+            {final_clause}
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY {order_expr}
+            LIMIT %(limit)s OFFSET %(offset)s
+            """
+            rows = self.storage.ch_client.execute(sql, params)
+            sessions: List[AISession] = []
+            total_count = 0
+            for row in rows:
+                if not row:
+                    continue
+                session = self._row_to_session(row[:19] if len(row) >= 19 else row)
+                if not session or session.is_deleted:
+                    continue
+                self._sessions[session.session_id] = session
+                sessions.append(session)
+                if len(row) > 19:
+                    try:
+                        total_count = max(total_count, int(row[19] or 0))
+                    except (TypeError, ValueError) as exc:
+                        logger.warning(
+                            "Failed to parse total_count from row for session %s: %s",
+                            session.session_id if session else "",
+                            exc,
+                        )
+            return sessions, total_count
+
+        sessions = self.list_sessions(
+            limit=1000000,
+            offset=0,
+            analysis_type=analysis_type,
+            service_name=service_name,
+            include_archived=include_archived,
+            search_query=search_query,
+            pinned_first=pinned_first,
+            sort_by=safe_sort_field,
+            sort_order=safe_sort_order,
+        )
+        total_count = len(sessions)
+        return sessions[safe_offset: safe_offset + safe_limit], total_count
+
     def get_messages(self, session_id: str, limit: int = 500) -> List[AISessionMessage]:
         sid = (session_id or "").strip()
         if not sid:
             return []
         safe_limit = max(1, int(limit))
         raw_messages = self._get_raw_messages(sid, limit=safe_limit)
+        deleted_ids = self._get_deleted_message_ids(sid)
+        if not deleted_ids:
+            return raw_messages[:safe_limit]
+        visible = [msg for msg in raw_messages if msg.message_id not in deleted_ids]
+        return visible[:safe_limit]
+
+    def get_messages_light(self, session_id: str, limit: int = 500) -> List[AISessionMessage]:
+        """读取轻量消息视图，仅返回 role/content/timestamp，不加载 metadata_json。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return []
+        safe_limit = max(1, int(limit))
+        if self._is_clickhouse_available():
+            try:
+                raw_messages = self._query_messages_from_clickhouse(
+                    sid,
+                    limit=safe_limit,
+                    include_metadata=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "get_messages_light failed, fallback to empty list (session_id=%s): %s",
+                    sid,
+                    exc,
+                )
+                return []
+        else:
+            raw_messages = [
+                AISessionMessage(
+                    session_id=msg.session_id,
+                    message_id=msg.message_id,
+                    msg_index=msg.msg_index,
+                    role=msg.role,
+                    content=msg.content,
+                    metadata={},
+                    created_at=msg.created_at,
+                )
+                for msg in list(self._messages.get(sid, []))[:safe_limit]
+            ]
+        deleted_ids = self._get_deleted_message_ids(sid)
+        if not deleted_ids:
+            return raw_messages[:safe_limit]
+        visible = [msg for msg in raw_messages if msg.message_id not in deleted_ids]
+        return visible[:safe_limit]
+
+    def get_recent_assistant_messages_for_react(self, session_id: str, limit: int = 10) -> List[AISessionMessage]:
+        """读取 ReAct 记忆需要的最近 assistant 消息（含 metadata，数量小且可降级）。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return []
+        safe_limit = max(1, int(limit))
+        if self._is_clickhouse_available():
+            try:
+                raw_messages = self._query_recent_assistant_messages_from_clickhouse(sid, limit=safe_limit)
+            except Exception as exc:
+                logger.warning(
+                    "get_recent_assistant_messages_for_react failed, fallback to empty list "
+                    "(session_id=%s): %s",
+                    sid,
+                    exc,
+                )
+                return []
+        else:
+            raw_messages = [
+                msg
+                for msg in self._messages.get(sid, [])
+                if str(msg.role or "").strip().lower() == "assistant"
+            ][-safe_limit:]
         deleted_ids = self._get_deleted_message_ids(sid)
         if not deleted_ids:
             return raw_messages[:safe_limit]
@@ -835,10 +1248,9 @@ class AISessionStore:
                     counts[sid] = int(row[1] or 0)
                 except Exception:
                     counts[sid] = 0
+            deleted_counts = self._get_deleted_message_counts(clean_ids)
             for sid in clean_ids:
-                deleted_ids = self._get_deleted_message_ids(sid)
-                if deleted_ids:
-                    counts[sid] = max(0, int(counts.get(sid, 0)) - len(deleted_ids))
+                counts[sid] = max(0, int(counts.get(sid, 0)) - int(deleted_counts.get(sid, 0)))
             return counts
 
         counts: Dict[str, int] = {}
@@ -848,6 +1260,58 @@ class AISessionStore:
                 counts[sid] = len(self._messages.get(sid, []))
                 continue
             counts[sid] = len([msg for msg in self._messages.get(sid, []) if msg.message_id not in deleted_ids])
+        return counts
+
+    def _get_deleted_message_counts(self, session_ids: List[str]) -> Dict[str, int]:
+        """批量读取 deleted_message_ids 数量，避免逐会话查询。"""
+        clean_ids: List[str] = []
+        for session_id in session_ids:
+            sid = str(session_id or "").strip()
+            if sid and sid not in clean_ids:
+                clean_ids.append(sid)
+        if not clean_ids:
+            return {}
+
+        counts: Dict[str, int] = {}
+        missing_ids: List[str] = []
+        for sid in clean_ids:
+            cached_session = self._sessions.get(sid)
+            if isinstance(cached_session, AISession):
+                counts[sid] = _deleted_message_count_from_context(cached_session.context)
+            else:
+                missing_ids.append(sid)
+
+        if not missing_ids or not self._is_clickhouse_available():
+            for sid in clean_ids:
+                counts.setdefault(sid, 0)
+            return counts
+
+        escaped = []
+        for sid in missing_ids:
+            escaped.append("'" + sid.replace("\\", "\\\\").replace("'", "\\'") + "'")
+        in_clause = ", ".join(escaped)
+
+        source_table, use_final = self._get_session_read_source()
+        final_clause = "FINAL" if use_final else ""
+        sql = f"""
+        SELECT session_id, context_json
+        FROM {source_table}
+        {final_clause}
+        WHERE is_deleted = 0
+          AND session_id IN ({in_clause})
+        """
+        rows = self.storage.ch_client.execute(sql)
+        for row in rows:
+            if not row or len(row) < 2:
+                continue
+            sid = str(row[0] or "").strip()
+            if not sid:
+                continue
+            context = _safe_json_loads(row[1], {})
+            counts[sid] = _deleted_message_count_from_context(context)
+
+        for sid in clean_ids:
+            counts.setdefault(sid, 0)
         return counts
 
     def get_message_by_id(self, session_id: str, message_id: str) -> Optional[AISessionMessage]:

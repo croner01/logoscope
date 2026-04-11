@@ -2,6 +2,9 @@
 
 > 版本: v3.21.0
 > 更新: 2026-02-11
+> 注意: 本文包含历史运行时描述，其中 Redis Stream 与旧版 Semantic Engine API 路径已不再代表当前代码实现。
+> 当前单条日志主链路请优先参考 [单条日志接入到前端查询的运行时全链路](./log-ingest-query-runtime-path.zh-CN.md)。
+> 当前逐层排障请参考 [单条日志查不到时的故障排查地图](../operations/log-not-found-troubleshooting-map.zh-CN.md)。
 
 ## 📊 数据流概览
 

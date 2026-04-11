@@ -11,6 +11,7 @@ from datetime import datetime
 from storage.adapter import StorageAdapter
 from graph.hybrid_topology import HybridTopologyBuilder
 from graph.enhanced_topology import EnhancedTopologyBuilder
+from api.topology_build_coordinator import build_hybrid_topology_coalesced
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,8 @@ _ENHANCED_BUILDER: EnhancedTopologyBuilder = None
 
 
 async def _run_blocking(func, *args, **kwargs):
-    """Execute blocking topology/storage calls in thread pool."""
-    return await asyncio.to_thread(func, *args, **kwargs)
+    """Execute blocking topology/storage calls inline."""
+    return func(*args, **kwargs)
 
 
 def _init_storage(adapter: StorageAdapter):
@@ -301,8 +302,8 @@ async def get_hybrid_topology(
         raise HTTPException(status_code=503, detail="Hybrid topology builder not initialized")
 
     try:
-        topology = await _run_blocking(
-            _HYBRID_BUILDER.build_topology,
+        topology = await build_hybrid_topology_coalesced(
+            _HYBRID_BUILDER,
             time_window=time_window,
             namespace=namespace,
             confidence_threshold=confidence_threshold,
@@ -415,8 +416,8 @@ async def get_topology_stats(
         safe_time_window = _sanitize_interval(time_window, default_value="1 HOUR")
         # 统一使用 hybrid builder 的窗口化结果，避免与页面主图统计口径不一致。
         if _HYBRID_BUILDER:
-            topology = await _run_blocking(
-                _HYBRID_BUILDER.build_topology,
+            topology = await build_hybrid_topology_coalesced(
+                _HYBRID_BUILDER,
                 time_window=safe_time_window,
                 namespace=None,
                 confidence_threshold=0.0,

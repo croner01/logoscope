@@ -5,7 +5,6 @@
 
 export interface TopologyNodeLike {
   id: string;
-  [key: string]: any;
 }
 
 export interface TopologyEdgeLike {
@@ -13,8 +12,13 @@ export interface TopologyEdgeLike {
   source: string;
   target: string;
   evidence_type?: string;
-  metrics?: Record<string, any>;
-  [key: string]: any;
+  metrics?: Record<string, unknown>;
+  timeout_rate?: number;
+  p95?: number;
+  p99?: number;
+  quality_score?: number;
+  coverage?: number;
+  problem_summary?: unknown;
 }
 
 export type EvidenceMode = 'all' | 'observed' | 'inferred';
@@ -45,6 +49,29 @@ export function filterByEvidenceMode<TNode extends TopologyNodeLike, TEdge exten
   }
 
   const filteredEdges = edges.filter((edge) => resolveEdgeEvidence(edge) === evidenceMode);
+  const keptNodeIds = new Set<string>();
+  filteredEdges.forEach((edge) => {
+    keptNodeIds.add(edge.source);
+    keptNodeIds.add(edge.target);
+  });
+  const filteredNodes = nodes.filter((node) => keptNodeIds.has(node.id));
+
+  return {
+    nodes: filteredNodes,
+    edges: filteredEdges,
+  };
+}
+
+export function filterWeakEvidenceEdges<TNode extends TopologyNodeLike, TEdge extends TopologyEdgeLike>(
+  nodes: TNode[],
+  edges: TEdge[],
+  enabled: boolean
+): GraphFilterResult<TNode, TEdge> {
+  if (!enabled) {
+    return { nodes, edges };
+  }
+
+  const filteredEdges = edges.filter((edge) => !isWeakEvidenceEdge(edge));
   const keptNodeIds = new Set<string>();
   filteredEdges.forEach((edge) => {
     keptNodeIds.add(edge.source);
@@ -112,8 +139,10 @@ export function sortEdgesByIssueScore<TEdge extends TopologyEdgeLike>(edges: TEd
 }
 
 export function computeEdgeIssueScore(edge: TopologyEdgeLike): number {
+  const problemSummary = toRecord(edge?.problem_summary);
+  const metricsProblemSummary = toRecord(edge?.metrics?.problem_summary);
   const backendIssueScore = toNumber(
-    edge?.problem_summary?.issue_score ?? edge?.metrics?.problem_summary?.issue_score,
+    problemSummary?.issue_score ?? metricsProblemSummary?.issue_score,
     Number.NaN
   );
   if (Number.isFinite(backendIssueScore)) {
@@ -151,9 +180,47 @@ function buildAdjacency(edges: TopologyEdgeLike[]): Map<string, string[]> {
   return adjacency;
 }
 
-function toNumber(value: any, fallback: number): number {
+function isWeakEvidenceEdge(edge: TopologyEdgeLike): boolean {
+  if (resolveEdgeEvidence(edge) !== 'inferred') {
+    return false;
+  }
+
+  const metrics = edge.metrics || {};
+  const issueScore = computeEdgeIssueScore(edge);
+  const confidence = toNumber(metrics.confidence, toNumber(edge?.coverage, 0));
+  const callCount = toNumber(metrics.call_count, 0);
+  const requestRate = toNumber(metrics.rps, 0);
+  const coverage = toNumber(metrics.coverage ?? edge.coverage, 0);
+  const qualityScore = toNumber(metrics.quality_score ?? edge.quality_score, 100);
+
+  if (issueScore >= 18) {
+    return false;
+  }
+  if (confidence >= 0.55) {
+    return false;
+  }
+  if (callCount >= 5 || requestRate >= 1) {
+    return false;
+  }
+  if (coverage >= 0.2) {
+    return false;
+  }
+  if (qualityScore < 70) {
+    return false;
+  }
+  return true;
+}
+
+function toNumber(value: unknown, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object') {
+    return value as Record<string, unknown>;
+  }
+  return null;
 }
 
 function round2(value: number): number {

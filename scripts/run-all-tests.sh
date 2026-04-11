@@ -33,7 +33,7 @@ run_test() {
     
     echo -e "${YELLOW}[运行]${NC} ${test_name}"
     
-    if python3 -m pytest "${test_file}" -v --tb=short "${RESULTS_DIR}/${test_name}_report.txt" 2>&1; then
+    if python3 -m pytest "${test_file}" -v --tb=short > "${RESULTS_DIR}/${test_name}_report.txt" 2>&1; then
         echo -e "${GREEN}[PASS]${NC} ${test_name}"
         ((PASSED_TESTS++))
     else

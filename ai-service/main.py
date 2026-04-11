@@ -7,8 +7,13 @@ import logging
 import os
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response
 import uvicorn
+try:
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+except Exception:  # pragma: no cover
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+    generate_latest = None
 
 _SHARED_LIB_CANDIDATES = (
     os.getenv("LOGOSCOPE_SHARED_LIB", ""),
@@ -22,8 +27,12 @@ for _candidate in _SHARED_LIB_CANDIDATES:
 from config import config
 from storage.adapter import StorageAdapter
 from api.ai import router as ai_router
+from api.ai_runtime_v2 import router as ai_runtime_v2_router
 from api.ai import set_storage_adapter as set_ai_storage
 from api.ai import shutdown_background_tasks as shutdown_ai_background_tasks
+from ai.runtime_v4.langgraph.graph import validate_inner_engine_readiness
+from ai.runtime_v4.temporal.client import validate_outer_engine_readiness
+from ai.runtime_v4.temporal.worker import start_temporal_worker, stop_temporal_worker
 from platform_kernel.fastapi_kernel import install_common_fastapi_handlers
 from utils.logging_config import get_logger, setup_logging
 
@@ -64,8 +73,12 @@ except Exception as exc:
 async def startup_event():
     global storage
 
+    validate_outer_engine_readiness()
+    validate_inner_engine_readiness()
+
     storage = StorageAdapter(config.get_storage_config())
     await asyncio.to_thread(set_ai_storage, storage)
+    await start_temporal_worker()
 
 
 @app.on_event("shutdown")
@@ -74,6 +87,10 @@ async def shutdown_event():
         shutdown_ai_background_tasks()
     except Exception as exc:
         logger.warning("Failed to shutdown AI background tasks cleanly: %s", exc)
+    try:
+        await stop_temporal_worker()
+    except Exception as exc:
+        logger.warning("Failed to shutdown Temporal worker cleanly: %s", exc)
     if storage:
         try:
             storage.close()
@@ -90,6 +107,13 @@ async def health_check():
     }
 
 
+@app.get("/metrics")
+async def metrics() -> Response:
+    if generate_latest is None:
+        raise HTTPException(status_code=503, detail="prometheus_client not available")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/")
 async def root():
     return {
@@ -100,6 +124,7 @@ async def root():
 
 
 app.include_router(ai_router)
+app.include_router(ai_runtime_v2_router)
 
 
 if __name__ == "__main__":

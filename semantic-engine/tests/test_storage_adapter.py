@@ -75,10 +75,10 @@ class TestSaveEvent:
 
         # 验证字段顺序（ClickHouse要求）
         assert event_data[0] == sample_event['id']  # id
-        assert event_data[2] == sample_event['entity']['name']  # service_name
-        assert event_data[3] == sample_event['context']['k8s']['pod']  # pod_name ✅
-        assert event_data[4] == sample_event['context']['k8s']['namespace']  # namespace ✅
-        assert event_data[5] == sample_event['context']['k8s']['node']  # node_name ✅
+        assert event_data[3] == sample_event['entity']['name']  # service_name
+        assert event_data[4] == sample_event['context']['k8s']['pod']  # pod_name ✅
+        assert event_data[5] == sample_event['context']['k8s']['namespace']  # namespace ✅
+        assert event_data[6] == sample_event['context']['k8s']['node']  # node_name ✅
 
     def test_save_event_http_mode(self, sample_event):
         """测试HTTP模式保存事件"""
@@ -90,8 +90,9 @@ class TestSaveEvent:
             'user': 'default',
             'password': ''
         }
+        adapter.http_session = None
 
-        with patch('storage.adapter.requests.post') as mock_post:
+        with patch('storage.adapter._shared_adapter.requests.post') as mock_post:
             mock_post.return_value = Mock(status_code=200)
             result = adapter._save_event_http(sample_event)
 
@@ -135,9 +136,9 @@ class TestK8sFieldsMapping:
         data = call_args[0][1][0]  # 第一行数据
 
         # 验证K8s字段映射
-        assert data[3] == 'test-pod-123', f"Expected 'test-pod-123', got '{data[3]}'"
-        assert data[4] == 'default', f"Expected 'default', got '{data[4]}'"
-        assert data[5] == 'node-1', f"Expected 'node-1', got '{data[5]}'"
+        assert data[4] == 'test-pod-123', f"Expected 'test-pod-123', got '{data[4]}'"
+        assert data[5] == 'default', f"Expected 'default', got '{data[5]}'"
+        assert data[6] == 'node-1', f"Expected 'node-1', got '{data[6]}'"
 
     def test_http_mode_k8s_field_extraction(self, sample_event):
         """测试HTTP模式下K8s字段正确提取"""
@@ -148,8 +149,9 @@ class TestK8sFieldsMapping:
             'user': 'default',
             'password': ''
         }
+        adapter.http_session = None
 
-        with patch('storage.adapter.requests.post') as mock_post:
+        with patch('storage.adapter._shared_adapter.requests.post') as mock_post:
             mock_post.return_value = Mock(status_code=200)
             adapter._save_event_http(sample_event)
 
@@ -191,9 +193,10 @@ class TestK8sFieldsMapping:
         call_args = adapter.ch_client.execute.call_args
         data = call_args[0][1][0]
 
-        assert data[3] == 'unknown'
+        assert data[3] == 'test'
         assert data[4] == 'unknown'
         assert data[5] == 'unknown'
+        assert data[6] == 'unknown'
 
 
 class TestErrorHandling:
@@ -219,12 +222,12 @@ class TestErrorHandling:
             'user': 'default',
             'password': ''
         }
+        adapter.http_session = None
 
-        with patch('storage.adapter.requests.post') as mock_post:
+        with patch('storage.adapter._shared_adapter.requests.post') as mock_post:
             mock_post.side_effect = Exception("Network error")
-            result = adapter._save_event_http(sample_event)
-
-            assert result is False
+            with pytest.raises(Exception, match="Network error"):
+                adapter._save_event_http(sample_event)
 
 
 class TestDataIntegrity:
@@ -241,15 +244,17 @@ class TestDataIntegrity:
         call_args = adapter.ch_client.execute.call_args
         data = call_args[0][1][0]
 
-        # ClickHouse表字段顺序：
-        # id, timestamp, service_name, pod_name, namespace, node_name,
-        # level, message, trace_id, span_id, labels, host_ip
+        # ClickHouse表字段顺序（当前版本共 24 列）：
+        # id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name,
+        # pod_id, container_name, container_id, container_image, level, severity_number,
+        # message, trace_id, span_id, flags, labels, attributes_json, host_ip,
+        # cpu_limit, cpu_request, memory_limit, memory_request
 
-        assert len(data) == 12  # 12个字段
+        assert len(data) == 24
         assert data[0] != ''  # id
         assert data[1] is not None  # timestamp
-        assert data[2] != ''  # service_name
-        assert data[6] != ''  # level
+        assert data[3] != ''  # service_name
+        assert data[11] != ''  # level
 
     def test_timestamp_format(self, sample_event):
         """测试时间戳格式正确"""

@@ -68,13 +68,13 @@ class HybridTopologyBuilder:
         )
         self.MAX_INFER_SAMPLE_SHORT_WINDOW = self._parse_env_int(
             "TOPOLOGY_MAX_INFER_SAMPLE_SHORT_WINDOW",
-            8000,
+            5000,
             minimum=1000,
             maximum=50000,
         )
         self.MAX_INFER_SAMPLE_MEDIUM_WINDOW = self._parse_env_int(
             "TOPOLOGY_MAX_INFER_SAMPLE_MEDIUM_WINDOW",
-            12000,
+            8000,
             minimum=1000,
             maximum=60000,
         )
@@ -119,6 +119,15 @@ class HybridTopologyBuilder:
             minimum=1,
             maximum=12,
         )
+        self.MAX_TIME_WINDOW_FALLBACK_RECORDS = self._parse_env_int(
+            "TOPOLOGY_MAX_TIME_WINDOW_FALLBACK_RECORDS",
+            2500,
+            minimum=200,
+            maximum=20000,
+        )
+        self.ENABLE_TRACES_FAST_PATH = str(
+            os.getenv("TOPOLOGY_ENABLE_TRACES_FAST_PATH", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self.MESSAGE_TARGET_ENABLED = self._parse_env_bool(
             "TOPOLOGY_MESSAGE_TARGET_ENABLED",
             True,
@@ -301,6 +310,73 @@ class HybridTopologyBuilder:
                 alias_index.setdefault(clean, canonical_name)
 
         return alias_index
+
+    @staticmethod
+    def _normalize_namespace_token(value: Any) -> str:
+        token = str(value or "").strip()
+        if not token:
+            return ""
+        if token.lower() in {"unknown", "none", "null", "-", "n/a"}:
+            return ""
+        return token
+
+    @classmethod
+    def _normalize_service_name_token(cls, value: Any) -> str:
+        token = str(value or "").strip()
+        if not token:
+            return ""
+        if token.lower() in {"unknown", "none", "null", "-", "n/a"}:
+            return ""
+        return token
+
+    @classmethod
+    def _decode_service_identity(cls, raw_service_name: Any) -> Tuple[str, str]:
+        raw = str(raw_service_name or "").strip()
+        if not raw:
+            return "", ""
+
+        namespace_hint = ""
+        service_token = raw
+        if "::" in service_token:
+            prefix, suffix = service_token.split("::", 1)
+            normalized_prefix = cls._normalize_namespace_token(prefix)
+            if normalized_prefix:
+                namespace_hint = normalized_prefix
+            service_token = suffix or service_token
+
+        service_parts = [part.strip() for part in service_token.split(":")]
+        if len(service_parts) == 3:
+            namespace_part, service_part, env_part = service_parts
+            env_lower = env_part.lower()
+            if env_lower in {"prod", "staging", "test", "dev", "qa", "uat", "sit", "online", "release"}:
+                if not namespace_hint:
+                    namespace_hint = cls._normalize_namespace_token(namespace_part)
+                service_token = service_part
+
+        normalized_service = cls._normalize_service_name_token(service_token)
+        return normalized_service, namespace_hint
+
+    def _build_node_id(
+        self,
+        service_name: str,
+        namespace_value: Any,
+        namespace_filter: Optional[str] = None,
+    ) -> str:
+        """
+        生成节点 ID：
+        - 指定 namespace 过滤时：返回 service_name（便于测试与兼容旧调用）
+        - 未指定 namespace 且存在有效 namespace：使用 namespace::service，避免跨命名空间冲突
+        """
+        service = str(service_name or "").strip() or "unknown"
+        if str(namespace_filter or "").strip():
+            return service
+
+        normalized_namespace = self._normalize_namespace_token(namespace_value)
+        if not normalized_namespace:
+            return service
+        if normalized_namespace.lower() == service.lower():
+            return service
+        return hybrid_utils.build_service_node_id(service, normalized_namespace)
 
     @staticmethod
     def _is_likely_outbound_message(text: str) -> bool:
@@ -720,28 +796,121 @@ class HybridTopologyBuilder:
                 return {"nodes": [], "edges": []}
             safe_namespace = self._escape_sql_literal(namespace) if namespace else None
 
-            # traces 表使用 timestamp/attributes_json 字段
+            has_traces_namespace_column = self._has_traces_namespace_column()
+            namespace_expr = (
+                "traces_namespace"
+                if has_traces_namespace_column
+                else (
+                    "multiIf("
+                    "length(JSONExtractString(attributes_json, 'k8s.namespace.name')) > 0, "
+                    "JSONExtractString(attributes_json, 'k8s.namespace.name'), "
+                    "length(JSONExtractString(attributes_json, 'service_namespace')) > 0, "
+                    "JSONExtractString(attributes_json, 'service_namespace'), "
+                    "JSONExtractString(attributes_json, 'namespace')"
+                    ")"
+                )
+            )
+            # 无 traces_namespace 列且未指定 namespace 时，避免在主扫描 SQL 中做高开销 JSONExtract。
+            span_namespace_select_expr = "traces_namespace" if has_traces_namespace_column else "''"
+
+            # traces 表使用 timestamp 列做 PREWHERE 下推
             prewhere_conditions = [
                 f"timestamp > now() - INTERVAL {safe_time_window}",
                 "notEmpty(trace_id)",
                 "notEmpty(span_id)",
+                "notEmpty(service_name)",
             ]
             where_clause = ""
             if safe_namespace:
-                if self._has_traces_namespace_column():
+                if has_traces_namespace_column:
                     prewhere_conditions.append(f"traces_namespace = '{safe_namespace}'")
                 else:
-                    where_clause = (
-                        "WHERE "
-                        "multiIf("
-                        "length(JSONExtractString(attributes_json, 'k8s.namespace.name')) > 0, "
-                        "JSONExtractString(attributes_json, 'k8s.namespace.name'), "
-                        "length(JSONExtractString(attributes_json, 'service_namespace')) > 0, "
-                        "JSONExtractString(attributes_json, 'service_namespace'), "
-                        "JSONExtractString(attributes_json, 'namespace')"
-                        f") = '{safe_namespace}'"
-                    )
+                    where_clause = f"WHERE {namespace_expr} = '{safe_namespace}'"
+                span_namespace_select_expr = f"'{safe_namespace}'"
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
+            window_minutes = self._interval_to_minutes(safe_time_window, default_minutes=60)
+            trace_scan_limit = int(self.TRACES_SCAN_LIMIT)
+            if window_minutes <= 60:
+                trace_scan_limit = min(trace_scan_limit, 80_000)
+            elif window_minutes <= 24 * 60:
+                trace_scan_limit = min(trace_scan_limit, 160_000)
+
+            if self.ENABLE_TRACES_FAST_PATH:
+                # 快速路径（可选）：若窗口内不存在 parent->child span 关系，则跳过重型明细扫描。
+                has_parent_relation: Optional[bool] = None
+                try:
+                    relation_prewhere = "PREWHERE " + " AND ".join(prewhere_conditions + ["notEmpty(parent_span_id)"])
+                    relation_query = f"""
+                    SELECT parent_span_id
+                    FROM logs.traces
+                    {relation_prewhere}
+                    {where_clause}
+                    LIMIT 1
+                    SETTINGS optimize_use_projections = 1
+                    """
+                    relation_rows = self.storage.execute_query(relation_query)
+                    has_parent_relation = bool(relation_rows)
+                except Exception:
+                    has_parent_relation = None
+
+                if has_parent_relation is False:
+                    node_agg_query = f"""
+                    SELECT
+                        service_name,
+                        topK(1)({namespace_expr}) AS namespace_top,
+                        count() AS span_count,
+                        avg(toFloat64OrZero(toString(duration_ms))) AS avg_duration,
+                        countIf(lower(toString(status)) IN ('error', 'failed', 'status_code_error', '2')) AS error_count,
+                        countIf(empty(parent_span_id)) AS trace_count
+                    FROM logs.traces
+                    {prewhere_clause}
+                    {where_clause}
+                    GROUP BY service_name
+                    ORDER BY span_count DESC
+                    LIMIT 2000
+                    SETTINGS optimize_use_projections = 1
+                    """
+                    node_rows = self.storage.execute_query(node_agg_query)
+                    nodes = []
+                    for row in node_rows:
+                        service_name = str(row.get("service_name") or "").strip()
+                        if not service_name:
+                            continue
+                        namespace_top = row.get("namespace_top")
+                        if isinstance(namespace_top, (list, tuple)) and namespace_top:
+                            candidate_namespace = str(namespace_top[0] or "").strip()
+                        else:
+                            candidate_namespace = str(row.get("service_namespace") or "").strip()
+                        if safe_namespace:
+                            candidate_namespace = safe_namespace
+                        if candidate_namespace.lower() in {"unknown", "none", "null", "-", "n/a"}:
+                            candidate_namespace = ""
+                        if candidate_namespace.lower() == service_name.lower():
+                            candidate_namespace = ""
+                        node_id = self._build_node_id(
+                            service_name=service_name,
+                            namespace_value=candidate_namespace,
+                            namespace_filter=safe_namespace,
+                        )
+                        nodes.append({
+                            "id": node_id,
+                            "label": service_name,
+                            "type": "service",
+                            "name": service_name,
+                            "metrics": {
+                                "trace_count": int(row.get("trace_count") or 0),
+                                "span_count": int(row.get("span_count") or 0),
+                                "avg_duration": round(float(row.get("avg_duration") or 0.0), 2),
+                                "error_count": int(row.get("error_count") or 0),
+                                "namespace": candidate_namespace,
+                                "service_namespace": candidate_namespace,
+                                "namespace_count": 1 if candidate_namespace else 0,
+                                "namespace_ambiguous": False,
+                                "data_source": "traces",
+                                "confidence": 1.0,
+                            }
+                        })
+                    return {"nodes": nodes, "edges": []}
 
             # 查询 span 关系（通过 trace_id 和 parent_span_id）
             query = f"""
@@ -752,71 +921,69 @@ class HybridTopologyBuilder:
                 service_name,
                 operation_name,
                 status,
-                attributes_json,
-                timestamp
+                timestamp,
+                {span_namespace_select_expr} AS span_namespace,
+                toFloat64OrZero(toString(duration_ms)) AS duration_ms_norm
             FROM logs.traces
             {prewhere_clause}
             {where_clause}
             ORDER BY timestamp DESC
-            LIMIT {int(self.TRACES_SCAN_LIMIT)}
-            SETTINGS optimize_use_projections = 1
+            LIMIT {trace_scan_limit}
+            SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1
             """
 
             result = self.storage.execute_query(query)
 
-            def _extract_namespace(attrs: Dict[str, Any]) -> str:
-                """从 attributes 中提取 namespace（如果存在）"""
-                keys = [
-                    "namespace",
-                    "service_namespace",
-                    "k8s.namespace",
-                    "k8s.namespace.name",
-                    "kubernetes.namespace",
-                    "kubernetes.namespace_name",
-                ]
-                for key in keys:
-                    value = attrs.get(key)
-                    if value:
-                        return str(value)
-                # 兼容嵌套结构
-                k8s_obj = attrs.get("k8s")
-                if isinstance(k8s_obj, dict):
-                    value = (
-                        k8s_obj.get("namespace_name")
-                        or k8s_obj.get("namespace")
-                        or k8s_obj.get("namespaceName")
-                    )
-                    if value:
-                        return str(value)
-                kubernetes_obj = attrs.get("kubernetes")
-                if isinstance(kubernetes_obj, dict):
-                    value = (
-                        kubernetes_obj.get("namespace_name")
-                        or kubernetes_obj.get("namespace")
-                        or kubernetes_obj.get("namespaceName")
-                    )
-                    if value:
-                        return str(value)
-                return ""
+            def _sanitize_namespace(namespace_value: Any, service_name_value: str) -> str:
+                normalized = str(namespace_value or "").strip()
+                if not normalized:
+                    return ""
+                lowered = normalized.lower()
+                if lowered in {"unknown", "none", "null", "-", "n/a"}:
+                    return ""
+                service_token = str(service_name_value or "").strip().lower()
+                # 防止 attributes.namespace 写入 service_name 造成命名空间误判。
+                if service_token and lowered == service_token:
+                    return ""
+                return normalized
 
-            def _extract_duration_ms(attrs: Dict[str, Any]) -> float:
-                """兼容不同埋点字段提取 duration_ms"""
-                for key in ("duration_ms", "duration", "elapsed_ms"):
-                    value = attrs.get(key)
-                    if value is None:
-                        continue
-                    try:
-                        if isinstance(value, str):
-                            cleaned = value.strip().lower()
-                            if cleaned.endswith("ms"):
-                                cleaned = cleaned[:-2].strip()
-                            value = float(cleaned)
-                        return max(float(value), 0.0)
-                    except (TypeError, ValueError):
-                        continue
-                return 0.0
+            def _build_trace_node_id(service_name_value: str, namespace_value: str) -> str:
+                return self._build_node_id(
+                    service_name=service_name_value,
+                    namespace_value=namespace_value,
+                    namespace_filter=safe_namespace,
+                )
 
-            def _extract_numeric(attrs: Dict[str, Any], keys: Tuple[str, ...]) -> float:
+            def _ensure_trace_node(
+                registry: Dict[str, Dict[str, Any]],
+                service_name_value: str,
+                namespace_value: str,
+            ) -> str:
+                node_namespace = _sanitize_namespace(namespace_value, service_name_value)
+                node_id = _build_trace_node_id(service_name_value, node_namespace)
+                if node_id not in registry:
+                    registry[node_id] = {
+                        "id": node_id,
+                        "label": service_name_value,
+                        "type": "service",
+                        "name": service_name_value,
+                        "namespace": node_namespace,
+                        "metrics": {
+                            "trace_count": 0,
+                            "span_count": 0,
+                            "avg_duration": 0,
+                            "error_count": 0,
+                            "namespace": node_namespace,
+                            "service_namespace": node_namespace,
+                            "namespace_count": 1 if node_namespace else 0,
+                            "namespace_ambiguous": False,
+                            "data_source": "traces",
+                            "confidence": 1.0,
+                        }
+                    }
+                return node_id
+
+            def _extract_numeric(attrs: Dict[str, Any], keys: Tuple[str, ...], default: float = 0.0) -> float:
                 for key in keys:
                     value = attrs.get(key)
                     if value is None:
@@ -825,7 +992,7 @@ class HybridTopologyBuilder:
                         return max(float(value), 0.0)
                     except (TypeError, ValueError):
                         continue
-                return 0.0
+                return default
 
             def _is_error_status(status_value: str) -> bool:
                 normalized = str(status_value or "").strip().lower()
@@ -859,29 +1026,45 @@ class HybridTopologyBuilder:
                 timestamp_value = row.get("timestamp")
 
                 attrs = {}
-                attributes_json = row.get("attributes_json")
-                if attributes_json:
-                    try:
-                        attrs = json.loads(attributes_json)
-                    except (TypeError, ValueError):
-                        attrs = {}
+                span_namespace = _sanitize_namespace(row.get("span_namespace"), service_name)
+                duration_ms = self._to_float(row.get("duration_ms_norm"), -1.0)
+                retries = 0.0
+                pending = 0.0
+                dlq = 0.0
+                timeout_ms = 1000.0
 
-                # SQL 已优先执行 namespace 下推；仅保留应用层保护性校验。
+                # 兼容旧测试桩/旧列，必要时回退到 attributes_json 解析。
+                if not span_namespace or duration_ms < 0:
+                    attributes_json = row.get("attributes_json")
+                    if attributes_json:
+                        try:
+                            attrs = json.loads(attributes_json)
+                        except (TypeError, ValueError):
+                            attrs = {}
+
+                    if not span_namespace:
+                        span_namespace = _sanitize_namespace(
+                            attrs.get("k8s.namespace.name")
+                            or attrs.get("service_namespace")
+                            or attrs.get("namespace"),
+                            service_name,
+                        )
+                    if duration_ms < 0:
+                        duration_ms = _extract_numeric(attrs, ("duration_ms", "duration", "elapsed_ms"))
+
                 if safe_namespace:
-                    span_namespace = _extract_namespace(attrs) or safe_namespace
+                    span_namespace = span_namespace or safe_namespace
                     if span_namespace and span_namespace != safe_namespace:
                         continue
-                else:
-                    span_namespace = _extract_namespace(attrs)
 
                 if span_namespace:
                     service_namespace_counter[service_name][span_namespace] += 1
 
-                duration_ms = _extract_duration_ms(attrs)
-                retries = _extract_numeric(attrs, ("retry_count", "retries", "retry"))
-                pending = _extract_numeric(attrs, ("pending", "pending_count"))
-                dlq = _extract_numeric(attrs, ("dlq", "dlq_count"))
-                timeout_ms = _extract_numeric(attrs, ("timeout_ms", "rpc.timeout_ms")) or 1000.0
+                duration_ms = max(duration_ms, 0.0)
+                retries = max(retries, 0.0)
+                pending = max(pending, 0.0)
+                dlq = max(dlq, 0.0)
+                timeout_ms = max(timeout_ms, 1.0)
 
                 if trace_id and span_id:
                     traces_by_id[trace_id].append({
@@ -900,78 +1083,39 @@ class HybridTopologyBuilder:
                     })
 
             # 分析每个 trace 的调用关系
-            def _resolve_service_namespace(service_name_value: str) -> str:
-                counter = service_namespace_counter.get(service_name_value)
-                if counter:
-                    return str(counter.most_common(1)[0][0])
-                return ""
-
             for trace_id, spans in traces_by_id.items():
                 # 构建 span_id -> span 的映射
                 spans_by_id = {span["span_id"]: span for span in spans}
 
                 for span in spans:
                     service_name = span["service_name"]
-
-                    # 添加节点
-                    if service_name not in nodes:
-                        nodes[service_name] = {
-                            "id": service_name,
-                            "label": service_name,
-                            "type": "service",
-                            "name": service_name,
-                            "metrics": {
-                                "trace_count": 0,
-                                "span_count": 0,
-                                "avg_duration": 0,
-                                "error_count": 0,
-                                "namespace": _resolve_service_namespace(service_name),
-                                "service_namespace": _resolve_service_namespace(service_name),
-                                "data_source": "traces",
-                                "confidence": 1.0  # traces 数据最可靠
-                            }
-                        }
-
-                    nodes[service_name]["metrics"]["span_count"] += 1
-                    nodes[service_name]["metrics"]["avg_duration"] += span["duration_ms"]
                     span_namespace = span.get("namespace") or ""
-                    if span_namespace:
-                        nodes[service_name]["metrics"]["namespace"] = span_namespace
-                        nodes[service_name]["metrics"]["service_namespace"] = span_namespace
+                    node_id = _ensure_trace_node(nodes, service_name, span_namespace)
+
+                    nodes[node_id]["metrics"]["span_count"] += 1
+                    nodes[node_id]["metrics"]["avg_duration"] += span["duration_ms"]
                     if _is_error_status(span["status"]):
-                        nodes[service_name]["metrics"]["error_count"] += 1
+                        nodes[node_id]["metrics"]["error_count"] += 1
 
                     # 如果有 parent_span_id，找到父服务
                     parent_span_id = span["parent_span_id"]
                     if parent_span_id and parent_span_id in spans_by_id:
-                        parent_service = spans_by_id[parent_span_id]["service_name"]
-                        if parent_service == service_name:
+                        parent_span = spans_by_id[parent_span_id]
+                        parent_service = parent_span["service_name"]
+                        parent_namespace = parent_span.get("namespace") or ""
+                        parent_node_id = _ensure_trace_node(nodes, parent_service, parent_namespace)
+                        if parent_node_id == node_id:
                             # 服务粒度拓扑不保留 self-loop，避免图噪声。
                             continue
 
-                        # 确保父服务节点存在
-                        if parent_service not in nodes:
-                            nodes[parent_service] = {
-                                "id": parent_service,
-                                "label": parent_service,
-                                "type": "service",
-                                "name": parent_service,
-                                "metrics": {
-                                    "trace_count": 0,
-                                    "span_count": 0,
-                                    "avg_duration": 0,
-                                    "error_count": 0,
-                                    "namespace": _resolve_service_namespace(parent_service),
-                                    "service_namespace": _resolve_service_namespace(parent_service),
-                                    "data_source": "traces",
-                                    "confidence": 1.0
-                                }
-                            }
-
                         # 添加边
-                        edge_key = (parent_service, service_name)
+                        edge_key = (parent_node_id, node_id)
                         edges[edge_key]["call_count"] += 1
                         edges[edge_key]["total_duration"] += span["duration_ms"]
+                        edges[edge_key]["source_service"] = parent_service
+                        edges[edge_key]["target_service"] = service_name
+                        edges[edge_key]["source_namespace"] = parent_namespace
+                        edges[edge_key]["target_namespace"] = span_namespace
                         if _is_error_status(span["status"]):
                             edges[edge_key]["error_count"] += 1
                         edges[edge_key]["durations"].append(span["duration_ms"])
@@ -992,8 +1136,9 @@ class HybridTopologyBuilder:
                 root_spans = [s for s in spans if not s.get("parent_span_id")]
                 for root_span in root_spans:
                     service_name = root_span["service_name"]
-                    if service_name in nodes:
-                        nodes[service_name]["metrics"]["trace_count"] += 1
+                    span_namespace = root_span.get("namespace") or ""
+                    node_id = _ensure_trace_node(nodes, service_name, span_namespace)
+                    nodes[node_id]["metrics"]["trace_count"] += 1
 
             # 计算平均持续时间
             for node in nodes.values():
@@ -1023,11 +1168,19 @@ class HybridTopologyBuilder:
                 endpoint_pattern = normalize_endpoint_pattern(operation_name)
                 last_seen = data.get("last_seen")
                 last_seen_value = last_seen.isoformat() if isinstance(last_seen, datetime) else None
+                source_service = str(data.get("source_service") or "").strip()
+                target_service = str(data.get("target_service") or "").strip()
+                source_namespace = str(data.get("source_namespace") or "").strip()
+                target_namespace = str(data.get("target_namespace") or "").strip()
 
                 edge_list.append({
                     "id": f"{source}-{target}",
                     "source": source,
                     "target": target,
+                    "source_service": source_service,
+                    "target_service": target_service,
+                    "source_namespace": source_namespace,
+                    "target_namespace": target_namespace,
                     "label": "calls",
                     "type": "calls",
                     "metrics": {
@@ -1045,6 +1198,10 @@ class HybridTopologyBuilder:
                         "protocol": protocol,
                         "endpoint_pattern": endpoint_pattern,
                         "last_seen": last_seen_value,
+                        "source_service": source_service,
+                        "target_service": target_service,
+                        "source_namespace": source_namespace,
+                        "target_namespace": target_namespace,
                         "data_source": "traces",
                         "data_sources": ["traces"],
                         "confidence": 1.0  # traces 数据最可靠
@@ -1093,14 +1250,14 @@ class HybridTopologyBuilder:
             query = f"""
             SELECT
                 service_name,
+                namespace,
                 COUNT(*) as log_count,
                 COUNT(DISTINCT pod_name) as pod_count,
-                topK(1)(namespace) as namespace_top,
                 SUM(CASE WHEN lower(level) IN ('error', 'fatal') THEN 1 ELSE 0 END) as error_count,
                 MAX(timestamp) as last_seen
             FROM logs.logs
             {prewhere_clause}
-            GROUP BY service_name
+            GROUP BY service_name, namespace
             ORDER BY log_count DESC
             LIMIT {int(self.LOGS_SCAN_LIMIT)}
             """
@@ -1111,24 +1268,20 @@ class HybridTopologyBuilder:
 
             # 构建节点
             nodes = []
+            service_node_candidates: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for row in result:
                 service_name = row.get("service_name")
                 log_count = row.get("log_count", 0)
                 pod_count = row.get("pod_count", 0)
-                namespace_top = row.get("namespace_top")
                 error_count = row.get("error_count", 0)
                 last_seen = row.get("last_seen")
-                resolved_namespace = ""
-                if isinstance(namespace_top, list) and namespace_top:
-                    resolved_namespace = str(namespace_top[0] or "").strip()
-                elif isinstance(namespace_top, str):
-                    resolved_namespace = namespace_top.strip()
+                resolved_namespace = str(row.get("namespace") or "").strip()
                 if not resolved_namespace and namespace:
                     resolved_namespace = str(namespace).strip()
-                
+
                 if service_name:
                     logger.debug(f"Processing service: {service_name}, last_seen type: {type(last_seen)}, value: {last_seen}")
-                    
+
                     # 处理 last_seen 时区问题 - 始终使用 ISO 格式
                     if last_seen:
                         if hasattr(last_seen, 'tzinfo'):
@@ -1142,8 +1295,13 @@ class HybridTopologyBuilder:
                     else:
                         last_seen_str = None
 
-                    nodes.append({
-                        "id": service_name,
+                    node_id = self._build_node_id(
+                        service_name=str(service_name).strip(),
+                        namespace_value=resolved_namespace,
+                        namespace_filter=namespace,
+                    )
+                    node_payload = {
+                        "id": node_id,
                         "label": service_name,
                         "type": "service",
                         "name": service_name,
@@ -1156,19 +1314,29 @@ class HybridTopologyBuilder:
                             "rps": round((float(log_count) / window_seconds), 4) if window_seconds > 0 else 0.0,
                             "namespace": resolved_namespace or "",
                             "service_namespace": resolved_namespace or "",
+                            "namespace_count": 1 if resolved_namespace else 0,
+                            "namespace_ambiguous": False,
                             "last_seen": last_seen_str,
                             "data_source": "logs",
                             "data_sources": ["logs"],
                             "confidence": 0.5  # logs 数据中等可靠
                         }
-                    })
+                    }
+                    nodes.append(node_payload)
+                    service_node_candidates[str(service_name).strip()].append(node_payload)
+
+            def _resolve_single_service_node(service_name_value: str) -> Optional[Dict[str, Any]]:
+                candidates = service_node_candidates.get(str(service_name_value or "").strip()) or []
+                if len(candidates) == 1:
+                    return candidates[0]
+                return None
 
             # 使用启发式规则构建边
             edges = []
-            service_names = [node["id"] for node in nodes]
+            service_names = sorted(service_node_candidates.keys())
             service_log_counts = {
-                node["id"]: int(node.get("metrics", {}).get("log_count") or 0)
-                for node in nodes
+                service_name_value: sum(int(node.get("metrics", {}).get("log_count") or 0) for node in candidates)
+                for service_name_value, candidates in service_node_candidates.items()
             }
 
             # M2: 无埋点证据推断（request_id 优先 + 时间窗回退）
@@ -1188,8 +1356,8 @@ class HybridTopologyBuilder:
                 method = str(metrics.get("inference_method") or "").strip()
                 if method not in {"request_id", "trace_id", "message_target"}:
                     continue
-                source = inferred_edge.get("source")
-                target = inferred_edge.get("target")
+                source = inferred_edge.get("source_service") or inferred_edge.get("metrics", {}).get("source_service")
+                target = inferred_edge.get("target_service") or inferred_edge.get("metrics", {}).get("target_service")
                 if not source or not target:
                     continue
                 # 强证据按无向对抑制弱启发式，避免出现相反方向噪声边。
@@ -1229,10 +1397,19 @@ class HybridTopologyBuilder:
                                 continue
                             registry_heuristic_edges += 1
 
+                        caller_node = _resolve_single_service_node(caller)
+                        callee_node = _resolve_single_service_node(callee)
+                        if not caller_node or not callee_node:
+                            continue
+
                         edges.append({
-                            "id": f"{caller}-{callee}",
-                            "source": caller,
-                            "target": callee,
+                            "id": f"{caller_node['id']}-{callee_node['id']}",
+                            "source": caller_node["id"],
+                            "target": callee_node["id"],
+                            "source_service": caller,
+                            "target_service": callee,
+                            "source_namespace": caller_node.get("namespace") or caller_node.get("metrics", {}).get("service_namespace") or "",
+                            "target_namespace": callee_node.get("namespace") or callee_node.get("metrics", {}).get("service_namespace") or "",
                             "label": "potential-calls",
                             "type": "calls",
                             "metrics": {
@@ -1249,6 +1426,10 @@ class HybridTopologyBuilder:
                                 "data_source": "logs_heuristic",
                                 "data_sources": ["logs_heuristic"],
                                 "reason": reason,
+                                "source_service": caller,
+                                "target_service": callee,
+                                "source_namespace": caller_node.get("namespace") or caller_node.get("metrics", {}).get("service_namespace") or "",
+                                "target_namespace": callee_node.get("namespace") or callee_node.get("metrics", {}).get("service_namespace") or "",
                             }
                         })
 
@@ -1310,9 +1491,9 @@ class HybridTopologyBuilder:
             query = f"""
             SELECT
                 service_name,
+                topK(1)({namespace_expr}) as namespace_top,
                 COUNT(*) as metric_count,
-                COUNT(DISTINCT metric_name) as unique_metrics,
-                topK(1)({namespace_expr}) as namespace_top
+                COUNT(DISTINCT metric_name) as unique_metrics
             FROM logs.metrics
             {prewhere_clause}
             {where_clause}
@@ -1330,17 +1511,20 @@ class HybridTopologyBuilder:
                 metric_count = row.get("metric_count", 0)
                 unique_metrics = row.get("unique_metrics", 0)
                 namespace_top = row.get("namespace_top")
-                resolved_namespace = ""
-                if isinstance(namespace_top, list) and namespace_top:
+                if isinstance(namespace_top, (list, tuple)) and namespace_top:
                     resolved_namespace = str(namespace_top[0] or "").strip()
-                elif isinstance(namespace_top, str):
-                    resolved_namespace = namespace_top.strip()
+                else:
+                    resolved_namespace = str(row.get("service_namespace") or "").strip()
                 if not resolved_namespace and namespace:
                     resolved_namespace = str(namespace).strip()
-                
+
                 if service_name:
                     nodes.append({
-                        "id": service_name,
+                        "id": self._build_node_id(
+                            service_name=str(service_name).strip(),
+                            namespace_value=resolved_namespace,
+                            namespace_filter=namespace,
+                        ),
                         "label": service_name,
                         "type": "service",
                         "name": service_name,
@@ -1350,6 +1534,8 @@ class HybridTopologyBuilder:
                             "unique_metrics": unique_metrics,
                             "namespace": resolved_namespace or "",
                             "service_namespace": resolved_namespace or "",
+                            "namespace_count": 1 if resolved_namespace else 0,
+                            "namespace_ambiguous": False,
                             "data_source": "metrics",
                             "data_sources": ["metrics"],
                             "confidence": 0.4
@@ -1433,7 +1619,10 @@ class HybridTopologyBuilder:
             infer_sample_limit = min(infer_sample_limit, int(self.MAX_INFER_SAMPLE_SHORT_WINDOW))
         elif window_minutes <= 24 * 60:
             infer_sample_limit = min(infer_sample_limit, int(self.MAX_INFER_SAMPLE_MEDIUM_WINDOW))
-        prewhere_conditions = [f"timestamp > now() - INTERVAL {safe_time_window}"]
+        prewhere_conditions = [
+            f"timestamp > now() - INTERVAL {safe_time_window}",
+            "notEmpty(service_name)",
+        ]
         if namespace:
             prewhere_conditions.append(f"namespace = '{self._escape_sql_literal(namespace)}'")
         prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
@@ -1451,10 +1640,49 @@ class HybridTopologyBuilder:
         {prewhere_clause}
         ORDER BY timestamp DESC
         LIMIT {infer_sample_limit}
-        SETTINGS optimize_use_projections = 1
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1
         """
 
         rows = self.storage.execute_query(query)
+        if not rows:
+            # 当窗口内有日志但主查询返回空时，尝试轻量回退（不读取 attributes_json）。
+            count_query = f"""
+            SELECT count() AS cnt
+            FROM logs.logs
+            {prewhere_clause}
+            SETTINGS optimize_use_projections = 1
+            """
+            count_rows = self.storage.execute_query(count_query)
+            total_candidates = 0
+            if count_rows:
+                try:
+                    total_candidates = int((count_rows[0] or {}).get("cnt") or 0)
+                except (TypeError, ValueError):
+                    total_candidates = 0
+
+            if total_candidates > 0:
+                fallback_limit = max(500, min(infer_sample_limit, 2000))
+                fallback_query = f"""
+                SELECT
+                    id,
+                    timestamp,
+                    service_name,
+                    namespace,
+                    message,
+                    trace_id
+                FROM logs.logs
+                {prewhere_clause}
+                ORDER BY timestamp DESC
+                LIMIT {fallback_limit}
+                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1
+                """
+                rows = self.storage.execute_query(fallback_query)
+                if rows:
+                    logger.warning(
+                        "Inference logs query fallback activated: primary empty with %s candidates, fallback_limit=%s",
+                        total_candidates,
+                        fallback_limit,
+                    )
         if rows:
             # Query newest N rows for speed, then restore chronological order for inference logic.
             rows = list(reversed(rows))
@@ -1468,44 +1696,93 @@ class HybridTopologyBuilder:
                 message_target_max_per_log=effective_max_per_log,
             )
 
+        def _resolve_record_namespace(
+            row_data: Dict[str, Any],
+            attrs_data: Dict[str, Any],
+            service_name_value: str,
+            namespace_hint: str = "",
+        ) -> str:
+            service_token = str(service_name_value or "").strip().lower()
+            k8s_obj = attrs_data.get("k8s") if isinstance(attrs_data.get("k8s"), dict) else {}
+            kubernetes_obj = attrs_data.get("kubernetes") if isinstance(attrs_data.get("kubernetes"), dict) else {}
+            candidates = (
+                row_data.get("namespace"),
+                namespace_hint,
+                attrs_data.get("k8s.namespace.name"),
+                attrs_data.get("service_namespace"),
+                attrs_data.get("kubernetes.namespace_name"),
+                k8s_obj.get("namespace_name"),
+                k8s_obj.get("namespace"),
+                k8s_obj.get("namespaceName"),
+                kubernetes_obj.get("namespace_name"),
+                kubernetes_obj.get("namespace"),
+                kubernetes_obj.get("namespaceName"),
+                attrs_data.get("namespace"),
+                namespace,
+            )
+
+            for idx, candidate in enumerate(candidates):
+                token = str(candidate or "").strip()
+                if not token:
+                    continue
+                lowered = token.lower()
+                if lowered in {"unknown", "none", "null", "-", "n/a"}:
+                    continue
+                # attrs.namespace 兜底项（idx=10）需要避开与 service_name 同值的误标。
+                if idx == 10 and service_token and lowered == service_token:
+                    continue
+                return token
+            return "unknown"
+
         prepared = []
         for row in rows:
-            service_name = row.get("service_name") or "unknown"
-            if service_name == "unknown":
+            service_name, namespace_hint = self._decode_service_identity(row.get("service_name"))
+            if not service_name:
                 continue
 
-            attrs = {}
+            message_text = row.get("message") or ""
+            attrs: Dict[str, Any] = {}
+            request_id = self._extract_request_id({}, message=message_text)
+            namespace_token = str(row.get("namespace") or "").strip().lower()
+            needs_namespace_fallback = (
+                namespace_token in {"", "unknown", "none", "null", "-", "n/a"}
+                and not self._normalize_namespace_token(namespace_hint)
+            )
+            should_parse_attrs = needs_namespace_fallback or not request_id
             raw_attrs = row.get("attributes_json")
-            if isinstance(raw_attrs, str) and raw_attrs:
-                try:
-                    attrs = json.loads(raw_attrs)
-                except Exception:
-                    attrs = {}
-            elif isinstance(raw_attrs, dict):
-                attrs = raw_attrs
+            if should_parse_attrs:
+                if isinstance(raw_attrs, str) and raw_attrs:
+                    try:
+                        attrs = json.loads(raw_attrs)
+                    except Exception:
+                        attrs = {}
+                elif isinstance(raw_attrs, dict):
+                    attrs = raw_attrs
+                if not request_id:
+                    request_id = self._extract_request_id(attrs, message=message_text)
 
             prepared.append({
                 "id": row.get("id"),
                 "ts": self._timestamp_to_datetime(row.get("timestamp")),
                 "service_name": service_name,
-                "namespace": (
-                    row.get("namespace")
-                    or attrs.get("namespace")
-                    or attrs.get("k8s.namespace.name")
-                    or attrs.get("kubernetes.namespace_name")
-                    or namespace
-                    or "unknown"
+                "namespace": _resolve_record_namespace(
+                    row,
+                    attrs,
+                    service_name,
+                    namespace_hint=namespace_hint,
                 ),
-                "message": row.get("message") or "",
+                "message": message_text,
                 "trace_id": row.get("trace_id") or "",
                 "attrs": attrs,
-                "request_id": self._extract_request_id(attrs, row.get("message") or ""),
+                "request_id": request_id,
             })
 
         partitioned = hybrid_utils.partition_prepared_inference_records(prepared)
         request_groups = partitioned["request_groups"]
         trace_groups = partitioned["trace_groups"]
         fallback_records = partitioned["fallback_records"]
+        if len(fallback_records) > self.MAX_TIME_WINDOW_FALLBACK_RECORDS:
+            fallback_records = fallback_records[-self.MAX_TIME_WINDOW_FALLBACK_RECORDS:]
 
         edge_acc: Dict[Tuple[str, str], Dict[str, Any]] = {}
         base_known_services = {
@@ -1520,6 +1797,8 @@ class HybridTopologyBuilder:
         def add_inferred(
             source: str,
             target: str,
+            source_namespace: str,
+            target_namespace: str,
             evidence: Dict[str, Any],
             method: str,
             event_ts: datetime,
@@ -1534,7 +1813,9 @@ class HybridTopologyBuilder:
             ):
                 # 基础设施服务在时间窗回退场景中噪声很高，默认跳过。
                 return False
-            key = (source, target)
+            normalized_source_namespace = str(source_namespace or "").strip()
+            normalized_target_namespace = str(target_namespace or "").strip()
+            key = (source, target, normalized_source_namespace, normalized_target_namespace)
             if key not in edge_acc:
                 edge_acc[key] = {
                     "count": 0,
@@ -1545,6 +1826,8 @@ class HybridTopologyBuilder:
                     "namespace_match_total": 0,
                     "namespace_match_hits": 0,
                     "temporal_gaps": [],
+                    "source_namespace": normalized_source_namespace,
+                    "target_namespace": normalized_target_namespace,
                 }
             edge_acc[key]["count"] += 1
             edge_acc[key]["method_counts"][method] += 1
@@ -1563,6 +1846,8 @@ class HybridTopologyBuilder:
                 edge_acc[key]["last_seen"] = event_ts
             if len(edge_acc[key]["evidence_chain"]) < 8:
                 payload = dict(evidence or {})
+                payload.setdefault("source_namespace", normalized_source_namespace)
+                payload.setdefault("target_namespace", normalized_target_namespace)
                 payload["method"] = method
                 payload["weight"] = round(max(0.05, float(weight or 0.0)), 3)
                 edge_acc[key]["evidence_chain"].append(payload)
@@ -1642,7 +1927,7 @@ class HybridTopologyBuilder:
         method_base_confidence = method_policies["base_confidence"]
         method_reason = method_policies["reason"]
         evidence_sufficiency_scores: List[float] = []
-        for (source, target), item in edge_acc.items():
+        for (source, target, source_namespace, target_namespace), item in edge_acc.items():
             if (source, target) in dropped_bidirectional:
                 continue
 
@@ -1665,7 +1950,16 @@ class HybridTopologyBuilder:
                 continue
 
             evidence_sufficiency_scores.append(evaluated["evidence_sufficiency_score"])
-            inferred_edges.append(evaluated["payload"])
+            payload = evaluated["payload"]
+            payload["source"] = source
+            payload["target"] = target
+            payload["id"] = f"{payload['source']}->{payload['target']}-inferred"
+            metrics = payload.setdefault("metrics", {})
+            metrics["source_service"] = source
+            metrics["target_service"] = target
+            metrics["source_namespace"] = source_namespace
+            metrics["target_namespace"] = target_namespace
+            inferred_edges.append(payload)
 
         stats = hybrid_utils.build_inference_stats(
             total_candidates=len(prepared),
@@ -1740,6 +2034,26 @@ class HybridTopologyBuilder:
         当存储层不可用或查询失败时静默降级，保持原有边数据。
         """
         if not merged_edges or not hasattr(self.storage, "get_edge_red_metrics"):
+            return
+
+        has_trace_edge = False
+        for edge in merged_edges:
+            metrics = edge.get("metrics") if isinstance(edge, dict) else None
+            if not isinstance(metrics, dict):
+                continue
+            primary_source = str(metrics.get("data_source") or "").strip().lower()
+            if primary_source == "traces":
+                has_trace_edge = True
+                break
+            for source_item in metrics.get("data_sources") or []:
+                if str(source_item or "").strip().lower() == "traces":
+                    has_trace_edge = True
+                    break
+            if has_trace_edge:
+                break
+
+        # edge RED 指标来自 traces 父子 span 关系，当前拓扑没有 traces 边时直接跳过查询。
+        if not has_trace_edge:
             return
 
         try:

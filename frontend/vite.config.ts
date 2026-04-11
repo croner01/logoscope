@@ -19,6 +19,7 @@ export default defineConfig(({ mode }) => {
   const QUERY_SERVICE_TARGET = env.VITE_QUERY_SERVICE_TARGET || 'http://localhost:8081';
   const TOPOLOGY_SERVICE_TARGET = env.VITE_TOPOLOGY_SERVICE_TARGET || 'http://localhost:8082';
   const SEMANTIC_ENGINE_TARGET = env.VITE_SEMANTIC_ENGINE_TARGET || 'http://localhost:8080';
+  const AI_SERVICE_TARGET = env.VITE_AI_SERVICE_TARGET || 'http://localhost:8090';
 
   return {
     plugins: [react()],
@@ -50,7 +51,11 @@ export default defineConfig(({ mode }) => {
         '/api/v1/labels': buildProxy(SEMANTIC_ENGINE_TARGET),
         '/api/v1/cache': buildProxy(SEMANTIC_ENGINE_TARGET),
         '/api/v1/deduplication': buildProxy(SEMANTIC_ENGINE_TARGET),
+        '/api/v1/exec': buildProxy(SEMANTIC_ENGINE_TARGET),
         '/health': buildProxy(SEMANTIC_ENGINE_TARGET),
+
+        // AI Service Runtime V2
+        '/api/v2': buildProxy(AI_SERVICE_TARGET),
       },
     },
     build: {

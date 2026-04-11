@@ -153,7 +153,7 @@ def apply_node_contract(node: Dict[str, Any]) -> Dict[str, Any]:
         metrics.get("namespace")
         or node.get("namespace")
         or metrics.get("service_namespace"),
-        "default",
+        "unknown",
     )
     env = infer_env(namespace, metrics.get("env") or node.get("env"))
     node_key = build_node_key(namespace, service_name, env)
@@ -205,12 +205,37 @@ def apply_edge_contract(
     """将边转换为统一契约字段（保留兼容字段）。"""
     metrics = edge.setdefault("metrics", {})
 
+    source_service = _as_text(
+        edge.get("source_service")
+        or (edge.get("metrics") or {}).get("source_service")
+        or (source_node or {}).get("service", {}).get("name")
+        or edge.get("source")
+    )
+    target_service = _as_text(
+        edge.get("target_service")
+        or (edge.get("metrics") or {}).get("target_service")
+        or (target_node or {}).get("service", {}).get("name")
+        or edge.get("target")
+    )
+    source_namespace = _as_text(
+        edge.get("source_namespace")
+        or (edge.get("metrics") or {}).get("source_namespace")
+        or (source_node or {}).get("service", {}).get("namespace")
+        or "default"
+    )
+    target_namespace = _as_text(
+        edge.get("target_namespace")
+        or (edge.get("metrics") or {}).get("target_namespace")
+        or (target_node or {}).get("service", {}).get("namespace")
+        or "default"
+    )
+
     source_key = (source_node or {}).get("node_key")
     target_key = (target_node or {}).get("node_key")
     if not source_key:
-        source_key = build_node_key("default", _as_text(edge.get("source")), "prod")
+        source_key = build_node_key(source_namespace, source_service, "prod")
     if not target_key:
-        target_key = build_node_key("default", _as_text(edge.get("target")), "prod")
+        target_key = build_node_key(target_namespace, target_service, "prod")
 
     operation_name = metrics.get("operation_name") or edge.get("label")
     protocol = _as_text(edge.get("protocol") or metrics.get("protocol"), "")
@@ -256,6 +281,12 @@ def apply_edge_contract(
     edge["p95"] = round(p95, 2)
     edge["p99"] = round(p99, 2)
     edge["timeout_rate"] = round(timeout_rate, 4)
+    edge["source_service"] = source_service
+    edge["target_service"] = target_service
+    edge["source_namespace"] = source_namespace
+    edge["target_namespace"] = target_namespace
+    edge["source_node_key"] = source_key
+    edge["target_node_key"] = target_key
 
     metrics["edge_key"] = edge_key
     metrics["protocol"] = protocol
@@ -266,6 +297,11 @@ def apply_edge_contract(
     metrics["p95"] = round(p95, 2)
     metrics["p99"] = round(p99, 2)
     metrics["timeout_rate"] = round(timeout_rate, 4)
+    metrics["source_service"] = source_service
+    metrics["target_service"] = target_service
+    metrics["source_namespace"] = source_namespace
+    metrics["target_namespace"] = target_namespace
+    metrics["source_node_key"] = source_key
+    metrics["target_node_key"] = target_key
     metrics["data_sources"] = list(dict.fromkeys(data_sources))
     return edge
-

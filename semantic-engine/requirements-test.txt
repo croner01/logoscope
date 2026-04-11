@@ -1,3 +1,5 @@
+-r requirements-runtime.txt
+
 # 测试依赖包
 pytest>=7.4.0
 pytest-cov>=4.1.0

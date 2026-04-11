@@ -6,6 +6,7 @@ Semantic Engine Normalize 模块
 import base64
 import binascii
 import hashlib
+import json
 import os
 import re
 import uuid
@@ -94,7 +95,9 @@ def _extract_level_from_message_prefix(value: Any) -> str:
         # WARNING ...
         r'^\[?(trace|debug|info|warn(?:ing)?|error|fatal|critical)\]?(?:\s+|:|-)',
         # 2026-03-03 09:35:08.583 WARNING ...
+        # 2026-03-03 09:35:08.583 1711 WARNING ...
         r'^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s+'
+        r'(?:\d+\s+)?'
         r'(trace|debug|info|warn(?:ing)?|error|fatal|critical)\b',
     )
     lower_text = text.lower()
@@ -104,6 +107,57 @@ def _extract_level_from_message_prefix(value: Any) -> str:
             continue
         token = (match.group(1) or "").lower()
         return aliases.get(token, token)
+    return ""
+
+
+def _extract_level_from_structured_fragment(value: Any) -> str:
+    """
+    从结构化键值片段中提取级别（如 `time=... level=error msg=...`）。
+
+    仅匹配明确的 level/severity 键，且要求键前为起始/空白/常见结构分隔符，
+    避免把 URL 查询参数 `?level=ERROR` 误判为日志级别。
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    pattern = re.compile(
+        r'(?i)(?:^|[\s,{])'
+        r'"?(?:level|log_level|severity|severity_text)"?\s*[:=]\s*"?'
+        r'(trace|debug|info|warn(?:ing)?|error|fatal|critical)\b'
+    )
+    match = pattern.search(text)
+    if not match:
+        return ""
+    return _normalize_level_value(match.group(1))
+
+
+def _extract_nested_log_text(value: Any) -> str:
+    """
+    尝试从包裹 JSON 中提取嵌套日志正文（log/message/msg）。
+    典型场景：`{"log":"2026-... WARNING ..."}`
+    """
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text or not text.startswith("{"):
+        return ""
+
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return ""
+
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in ("log", "message", "msg"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
     return ""
 
 
@@ -167,6 +221,8 @@ def normalize_log(log_data: Dict[str, Any]) -> Dict[str, Any]:
             "host": extract_host(log_data),
             "k8s": extract_k8s_context(log_data)
         },
+        # 关系字段保持为稳定结构，供下游无分支读取
+        "relations": [],
         # ⭐ P0/P1优化：传递OTLP字段和原始attributes
         "severity_number": severity_number,
         "flags": flags,
@@ -341,26 +397,35 @@ def extract_service_name(log_data: Dict[str, Any]) -> str:
     Returns:
         str: 服务名称，如果无法提取则返回 "unknown"
     """
-    # 尝试从不同字段提取服务名（按优先级排序）
-    service_name = (
-        log_data.get("service.name") or  # OTel 标准字段
-        log_data.get("resource", {}).get("service.name") or  # Resource 属性
-        log_data.get("kubernetes", {}).get("labels", {}).get("app") or  # K8s 标签
-        log_data.get("app") or  # 通用字段
-        "unknown"
+    kubernetes = log_data.get("kubernetes", {})
+    if not isinstance(kubernetes, dict):
+        kubernetes = {}
+
+    pod_field = kubernetes.get("pod")
+    pod_name = (
+        kubernetes.get("pod_name")
+        or (pod_field if isinstance(pod_field, str) else None)
+        or (pod_field.get("name") if isinstance(pod_field, dict) else None)
     )
 
-    # 调试：打印提取的信息
-    if service_name == "unknown":
-        # 只在第一次遇到时打印
-        import sys
-        if not hasattr(extract_service_name, 'warned'):
-            extract_service_name.warned = True
-            print(f"[DEBUG] Service name not found. Available keys: {list(log_data.keys())}")
-            if 'resource' in log_data:
-                print(f"[DEBUG] Resource keys: {list(log_data['resource'].keys())}")
+    resource = log_data.get("resource", {})
+    if not isinstance(resource, dict):
+        resource = {}
 
-    return service_name
+    labels = kubernetes.get("labels", {})
+    if not isinstance(labels, dict):
+        labels = {}
+
+    # 优先级：k8s.pod_name > service.name > resource.service.name > k8s.labels.app > app
+    service_name = (
+        _candidate_text(pod_name)
+        or _candidate_text(log_data.get("service.name"))
+        or _candidate_text(resource.get("service.name"))
+        or _candidate_text(labels.get("app"))
+        or _candidate_text(log_data.get("app"))
+    )
+
+    return service_name or "unknown"
 
 
 def extract_instance_id(log_data: Dict[str, Any]) -> str:
@@ -427,6 +492,33 @@ def extract_log_level(log_data: Dict[str, Any]) -> str:
     log_prefix_level = _extract_level_from_message_prefix(log_data.get("log"))
     if log_prefix_level:
         return log_prefix_level
+
+    # 兼容结构化键值片段：time=... level=error msg=...
+    message_structured_level = _extract_level_from_structured_fragment(log_data.get("message"))
+    if message_structured_level:
+        return message_structured_level
+    log_structured_level = _extract_level_from_structured_fragment(log_data.get("log"))
+    if log_structured_level:
+        return log_structured_level
+
+    # 兼容包裹 JSON：{"log":"2026-... WARNING ..."} / {"message":"... level=error ..."}
+    nested_message_text = _extract_nested_log_text(log_data.get("message"))
+    if nested_message_text:
+        nested_prefix_level = _extract_level_from_message_prefix(nested_message_text)
+        if nested_prefix_level:
+            return nested_prefix_level
+        nested_structured_level = _extract_level_from_structured_fragment(nested_message_text)
+        if nested_structured_level:
+            return nested_structured_level
+
+    nested_log_text = _extract_nested_log_text(log_data.get("log"))
+    if nested_log_text:
+        nested_prefix_level = _extract_level_from_message_prefix(nested_log_text)
+        if nested_prefix_level:
+            return nested_prefix_level
+        nested_structured_level = _extract_level_from_structured_fragment(nested_log_text)
+        if nested_structured_level:
+            return nested_structured_level
 
     # 兼容部分旧格式：仅当 log 字段本身就是 level 表达时才接受。
     legacy_log_level = _normalize_level_value(log_data.get("log"))

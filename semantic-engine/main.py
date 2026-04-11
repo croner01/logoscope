@@ -7,9 +7,10 @@ import os
 import sys
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import requests
 
@@ -45,10 +46,16 @@ setup_logging(
 )
 logger = get_logger(__name__)
 
+
+def _utc_now_iso() -> str:
+    """Return timezone-aware UTC timestamp string."""
+    return datetime.now(timezone.utc).isoformat()
+
 # 全局 storage 实例
 storage = None
 alert_evaluation_task: Optional[asyncio.Task] = None
 AI_SERVICE_BASE_URL = os.getenv("AI_SERVICE_BASE_URL", "http://ai-service:8090").rstrip("/")
+EXEC_SERVICE_BASE_URL = os.getenv("EXEC_SERVICE_BASE_URL", "http://exec-service:8095").rstrip("/")
 
 
 def _alert_evaluation_interval_seconds() -> int:
@@ -213,7 +220,7 @@ async def health_check():
             "service": "semantic-engine",
             "version": config.app_version,
             "opentelemetry": "enabled" if os.getenv("OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED") == "true" else "disabled",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": _utc_now_iso()
     }
 
 
@@ -250,6 +257,48 @@ async def proxy_ai_api(request: Request, subpath: str = ""):
     }
     body = await request.body()
 
+    if subpath.endswith("/stream"):
+        try:
+            upstream = await asyncio.to_thread(
+                requests.request,
+                method=request.method,
+                url=target,
+                headers=outbound_headers,
+                data=body if body else None,
+                timeout=(5, 300),
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            logger.warning("AI stream proxy upstream request failed target=%s error=%s", target, exc)
+            raise HTTPException(status_code=503, detail="ai-service unavailable")
+        response_headers = _filtered_proxy_headers(dict(upstream.headers))
+        media_type = upstream.headers.get("content-type", "text/event-stream")
+        if int(upstream.status_code) >= 400:
+            try:
+                payload = upstream.json()
+            except ValueError:
+                payload = {"detail": upstream.text}
+            return JSONResponse(
+                status_code=upstream.status_code,
+                content=payload,
+                headers=response_headers,
+            )
+
+        def _iter_stream():
+            try:
+                for chunk in upstream.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                upstream.close()
+
+        return StreamingResponse(
+            _iter_stream(),
+            status_code=upstream.status_code,
+            media_type=media_type,
+            headers=response_headers,
+        )
+
     try:
         upstream = await asyncio.to_thread(
             requests.request,
@@ -269,6 +318,79 @@ async def proxy_ai_api(request: Request, subpath: str = ""):
     except ValueError:
         payload = {"detail": upstream.text}
 
+    return JSONResponse(
+        status_code=upstream.status_code,
+        content=payload,
+        headers=response_headers,
+    )
+
+
+@app.api_route("/api/v1/exec", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@app.api_route("/api/v1/exec/{subpath:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def proxy_exec_api(request: Request, subpath: str = ""):
+    """兼容路径：转发命令执行请求到 exec-service。"""
+    target = f"{EXEC_SERVICE_BASE_URL}/api/v1/exec"
+    if subpath:
+        target = f"{target}/{subpath}"
+    query = request.url.query
+    if query:
+        target = f"{target}?{query}"
+
+    outbound_headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in {"host", "content-length"}
+    }
+    body = await request.body()
+    is_stream = subpath.endswith("/stream")
+
+    try:
+        upstream = await asyncio.to_thread(
+            requests.request,
+            method=request.method,
+            url=target,
+            headers=outbound_headers,
+            data=body if body else None,
+            timeout=(5, 300 if is_stream else 90),
+            stream=is_stream,
+        )
+    except requests.RequestException as exc:
+        logger.warning("Exec proxy upstream request failed target=%s error=%s", target, exc)
+        raise HTTPException(status_code=503, detail="exec-service unavailable")
+
+    response_headers = _filtered_proxy_headers(dict(upstream.headers))
+    if is_stream:
+        media_type = upstream.headers.get("content-type", "text/event-stream")
+        if int(upstream.status_code) >= 400:
+            try:
+                payload = upstream.json()
+            except ValueError:
+                payload = {"detail": upstream.text}
+            return JSONResponse(
+                status_code=upstream.status_code,
+                content=payload,
+                headers=response_headers,
+            )
+
+        def _iter_stream():
+            try:
+                for chunk in upstream.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                upstream.close()
+
+        return StreamingResponse(
+            _iter_stream(),
+            status_code=upstream.status_code,
+            media_type=media_type,
+            headers=response_headers,
+        )
+
+    try:
+        payload = upstream.json()
+    except ValueError:
+        payload = {"detail": upstream.text}
     return JSONResponse(
         status_code=upstream.status_code,
         content=payload,
@@ -420,7 +542,11 @@ async def get_alert_events_api(
     severity: str = None,
     cursor: str = None,
     service_name: str = None,
+    source_service: str = None,
+    target_service: str = None,
+    namespace: str = None,
     search: str = None,
+    scope: str = None,
 ):
     """获取告警事件列表"""
     return await get_alert_events(
@@ -429,7 +555,11 @@ async def get_alert_events_api(
         severity=severity,
         cursor=cursor,
         service_name=service_name,
+        source_service=source_service,
+        target_service=target_service,
+        namespace=namespace,
         search=search,
+        scope=scope,
     )
 
 

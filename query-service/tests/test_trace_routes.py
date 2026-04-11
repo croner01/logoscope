@@ -1,6 +1,7 @@
 """
 Query Service trace 路由单元测试
 """
+import math
 import os
 import sys
 from typing import Any, Dict, List, Optional
@@ -36,8 +37,21 @@ class FakeStorageAdapter:
         if "FROM system.columns" in condensed:
             return [{"name": name} for name in self.columns]
 
+        if (
+            "FROM logs.traces" in condensed
+            and "toUInt64(uniqCombined64(trace_id)) AS total" in condensed
+            and "span_count" not in condensed
+            and "AS total_traces" not in condensed
+            and "uniqCombined64If(trace_id" not in condensed
+        ):
+            total = self.trace_stats.get("total_traces", len(self.traces_rows))
+            return [{"total": total}]
+
         if "FROM logs.traces" in condensed and "GROUP BY t.trace_id" in condensed and "argMin(t.operation_name" in condensed:
-            return self.traces_rows
+            rows = list(self.traces_rows)
+            limit = int((params or {}).get("limit", len(rows)))
+            offset = int((params or {}).get("offset", 0))
+            return rows[offset: offset + limit]
 
         if "FROM logs.traces" in condensed and "ORDER BY" in condensed and "LIMIT {limit:Int32}" in query:
             return self.spans_rows
@@ -220,6 +234,9 @@ async def test_query_traces_aggregates_and_normalizes_status():
     )
 
     assert response["count"] == 1
+    assert response["total"] == 1
+    assert response["offset"] == 0
+    assert response["has_more"] is False
     assert response["data"][0]["trace_id"] == "trace-2"
     assert response["data"][0]["status"] == "STATUS_CODE_ERROR"
 
@@ -230,6 +247,57 @@ async def test_query_traces_aggregates_and_normalizes_status():
     assert trace_query_call["params"]["trace_id"] == "trace-2"
     assert "start_time" in trace_query_call["params"]
     assert "end_time" in trace_query_call["params"]
+    assert "SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1" in trace_query_call["query"]
+
+
+@pytest.mark.asyncio
+async def test_query_traces_supports_offset_pagination_fields():
+    """/traces 应支持 offset 分页并返回 has_more/next_offset。"""
+    storage = FakeStorageAdapter(
+        columns=["timestamp", "trace_id", "status", "attributes_json"],
+        traces_rows=[
+            {
+                "trace_id": "trace-a",
+                "service_name": "order",
+                "operation_name": "POST /orders",
+                "start_time_str": "2026-02-26 02:00:00.000",
+                "duration_ms": 120,
+                "status": "1",
+            },
+            {
+                "trace_id": "trace-b",
+                "service_name": "payment",
+                "operation_name": "POST /pay",
+                "start_time_str": "2026-02-26 02:01:00.000",
+                "duration_ms": 260,
+                "status": "2",
+            },
+        ],
+        trace_stats={"total_traces": 2},
+    )
+    query_routes.set_storage_adapter(storage)
+
+    response = await query_routes.query_traces(
+        limit=1,
+        offset=1,
+        service_name=None,
+        trace_id=None,
+        start_time=None,
+        end_time=None,
+        time_window="24 HOUR",
+    )
+
+    assert response["count"] == 1
+    assert response["total"] == 2
+    assert response["offset"] == 1
+    assert response["has_more"] is False
+    assert response["next_offset"] is None
+    assert response["data"][0]["trace_id"] == "trace-b"
+
+    trace_query_call = next(
+        call for call in storage.calls if "argMin(t.operation_name" in call["query"]
+    )
+    assert trace_query_call["params"]["offset"] == 1
 
 
 @pytest.mark.asyncio
@@ -258,3 +326,25 @@ async def test_query_traces_stats_returns_datadog_like_summary_fields():
     assert stats["error_rate"] == 0.2
     assert stats["byService"]["checkout"] == 3
     assert stats["byOperation"]["GET /checkout"] == 4
+
+
+@pytest.mark.asyncio
+async def test_query_traces_stats_sanitizes_non_finite_duration_values():
+    """/traces/stats 应将 nan/inf 时长指标清洗为 0，避免 JSON 序列化失败。"""
+    storage = FakeStorageAdapter(
+        columns=["timestamp", "trace_id", "duration_ms", "status", "attributes_json"],
+        trace_stats={
+            "total_traces": 3,
+            "span_count": 9,
+            "avg_duration": math.nan,
+            "p99_duration": math.inf,
+            "error_traces": 1,
+        },
+    )
+    query_routes.set_storage_adapter(storage)
+
+    stats = await query_routes.query_traces_stats()
+
+    assert stats["avg_duration"] == 0.0
+    assert stats["p99_duration"] == 0.0
+    assert stats["error_rate"] == round(1 / 3, 4)

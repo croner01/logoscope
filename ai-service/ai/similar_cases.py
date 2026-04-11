@@ -13,8 +13,9 @@ Date: 2026-02-22
 import os
 import json
 import logging
+import time
 from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 import re
@@ -325,9 +326,17 @@ class CaseStore:
             or "logs"
         )
         self.clickhouse_table = os.getenv("AI_CASE_STORE_CH_TABLE", f"{default_database}.ai_cases")
+        self.clickhouse_latest_view = os.getenv(
+            "AI_CASE_STORE_LATEST_VIEW",
+            f"{default_database}.v_ai_cases_latest",
+        )
         self.case_change_history_table = os.getenv(
             "AI_CASE_CHANGE_HISTORY_CH_TABLE",
             f"{default_database}.ai_case_change_history",
+        )
+        self._read_source_cache_ttl_seconds = max(
+            5,
+            int(os.getenv("AI_CASE_READ_SOURCE_CACHE_TTL_SECONDS", "30")),
         )
         env_enabled = os.getenv("AI_CASE_STORE_PERSIST", "true").strip().lower() == "true"
         self.persistence_enabled = env_enabled if persistence_enabled is None else persistence_enabled
@@ -337,6 +346,8 @@ class CaseStore:
             or "/tmp/logoscope-ai-cases.json"
         )
         self._case_change_history: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._case_read_source_cache: Optional[Tuple[str, bool]] = None
+        self._case_read_source_cache_checked_at = 0.0
         if self._is_clickhouse_available():
             self._ensure_clickhouse_table()
             self._ensure_case_change_history_table()
@@ -345,6 +356,8 @@ class CaseStore:
     def attach_storage(self, storage_adapter) -> None:
         """挂载 storage adapter 并启用 ClickHouse 案例库。"""
         self.storage = storage_adapter
+        self._case_read_source_cache = None
+        self._case_read_source_cache_checked_at = 0.0
         if self._is_clickhouse_available():
             self._ensure_clickhouse_table()
             self._ensure_case_change_history_table()
@@ -355,9 +368,51 @@ class CaseStore:
         return bool(self.storage and getattr(self.storage, "ch_client", None))
 
     @staticmethod
+    def _split_table_name(table_name: str) -> Tuple[str, str]:
+        normalized = str(table_name or "").strip()
+        if "." in normalized:
+            db_name, tbl_name = normalized.split(".", 1)
+            return db_name, tbl_name
+        return "default", normalized
+
+    def _table_exists(self, table_name: str) -> bool:
+        if not self._is_clickhouse_available():
+            return False
+        db_name, tbl_name = self._split_table_name(table_name)
+        try:
+            rows = self.storage.ch_client.execute(
+                """
+                SELECT count()
+                FROM system.tables
+                WHERE database = %(database)s
+                  AND name = %(name)s
+                """,
+                {"database": db_name, "name": tbl_name},
+            )
+            return bool(rows and rows[0] and int(rows[0][0]) > 0)
+        except Exception:
+            return False
+
+    def _get_case_read_source(self) -> Tuple[str, bool]:
+        """
+        案例读取优先使用 latest 视图；如果不存在则回退 FINAL 表查询。
+        """
+        now_ts = time.time()
+        cached = self._case_read_source_cache
+        if cached is not None and (now_ts - self._case_read_source_cache_checked_at) < self._read_source_cache_ttl_seconds:
+            return cached
+
+        if self._table_exists(self.clickhouse_latest_view):
+            self._case_read_source_cache = (self.clickhouse_latest_view, False)
+        else:
+            self._case_read_source_cache = (self.clickhouse_table, True)
+        self._case_read_source_cache_checked_at = now_ts
+        return self._case_read_source_cache
+
+    @staticmethod
     def _now_iso() -> str:
         """返回当前 UTC ISO 时间。"""
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime:
@@ -366,13 +421,13 @@ class CaseStore:
             return value
         text = str(value or "").strip()
         if not text:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc).replace(tzinfo=None)
         normalized = text.replace("Z", "+00:00")
         try:
             parsed = datetime.fromisoformat(normalized)
             return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
         except ValueError:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     def _to_iso(value: Any) -> str:
@@ -859,14 +914,16 @@ class CaseStore:
         if not self._is_clickhouse_available():
             return
         query_limit = max(1, int(limit))
+        source_table, use_final = self._get_case_read_source()
+        final_clause = "FINAL" if use_final else ""
         select_sql = f"""
         SELECT
             case_id, problem_type, severity, summary, log_content, service_name,
             root_causes_json, solutions_json, context_json, tags_json, similarity_features_json,
             resolved, resolution, created_at, updated_at, resolved_at,
             llm_provider, llm_model, llm_metadata_json, source, is_deleted
-        FROM {self.clickhouse_table}
-        FINAL
+        FROM {source_table}
+        {final_clause}
         ORDER BY updated_at DESC
         LIMIT {query_limit}
         """

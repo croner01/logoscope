@@ -24,54 +24,79 @@ data:
 
     processors:
       batch:
-        timeout: 5s
-        send_batch_size: 1000
+        timeout: 2s
+        send_batch_size: 2000
+        send_batch_max_size: 4000
       memory_limiter:
         limit_mib: 1500
         spike_limit_mib: 512
         check_interval: 2s
 
     exporters:
-      logging:
-        loglevel: info
-
       otlphttp/otel-gateway-logs:
         endpoint: http://otel-gateway.islap.svc.cluster.local:4318
         tls:
           insecure: true
-        compression: none
+        compression: gzip
         timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
 
       otlphttp/otel-gateway-metrics:
         endpoint: http://otel-gateway.islap.svc.cluster.local:4318
         tls:
           insecure: true
-        compression: none
+        compression: gzip
         timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
 
       otlphttp/otel-gateway-traces:
         endpoint: http://otel-gateway.islap.svc.cluster.local:4318
         tls:
           insecure: true
-        compression: none
+        compression: gzip
         timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
 
     service:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [batch, memory_limiter]
-          exporters: [logging, otlphttp/otel-gateway-traces]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/otel-gateway-traces]
 
         metrics:
           receivers: [otlp]
-          processors: [batch, memory_limiter]
-          exporters: [logging, otlphttp/otel-gateway-metrics]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/otel-gateway-metrics]
 
         logs:
           receivers: [otlp]
-          processors: [batch, memory_limiter]
-          exporters: [logging, otlphttp/otel-gateway-logs]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/otel-gateway-logs]
 ---
 apiVersion: apps/v1
 kind: DaemonSet

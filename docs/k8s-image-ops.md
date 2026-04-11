@@ -229,6 +229,26 @@ scripts/coverage-threshold-weekly-check.sh
 - 报告目录：`reports/coverage-threshold-weekly/`（`latest.json` 为最新软链）。
 - 当 `FAIL_ON_RAISE_GAP=true` 且存在可提阈空间时，脚本返回非 0，可驱动 CI 创建后续提阈任务。
 
+## 4.5 ClickHouse Release 3（性能优化）
+
+当发布包含 ClickHouse 结构/SQL 优化（如 `release-3-performance.sql`）时，建议在应用 rollout 成功后按以下顺序执行：
+
+```bash
+# 1) 执行 ClickHouse 变更包
+kubectl -n islap exec -i <clickhouse-pod> -- clickhouse-client --multiquery \
+  < /root/logoscope/deploy/sql/release-3-performance.sql
+
+# 2) 手动跑一次 trace edge 滚动聚合验证
+MODE=kubectl NAMESPACE=islap CLICKHOUSE_POD=<clickhouse-pod> \
+  /root/logoscope/scripts/trace-edges-rollup.sh
+```
+
+发布记录建议归档到：
+
+- `docs/operations/clickhouse-release3-performance-2026-03-05.md`
+
+若需持续滚动聚合，请将 `scripts/trace-edges-rollup.sh` 以分钟级 Cron 方式接入运维调度。
+
 ## 5. Trace E2E 回归脚本
 
 脚本路径：`scripts/trace-e2e-smoke.sh`

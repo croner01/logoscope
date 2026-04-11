@@ -111,6 +111,12 @@ def extract_service_name_enhanced(log_data: Dict[str, Any]) -> str:
         if match:
             return match.group(1)
 
+    # 4.4 DaemonSet 短后缀格式（name-abc12）
+    if pod_name:
+        match = re.match(r'^(.+)-[a-z0-9]{5}$', pod_name)
+        if match:
+            return match.group(1)
+
     # ========== 第五优先级：已知服务前缀映射 ==========
     # 常见的服务前缀，推断实际服务名
     if pod_name:

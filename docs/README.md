@@ -1,7 +1,12 @@
 # Logoscope 项目文档
 
-> 版本: v3.21.0
-> 更新时间: 2026-02-11
+> 版本: v3.25.0
+> 更新时间: 2026-04-01
+
+> 注意: 该导航页存在历史漂移。涉及当前日志运行时链路与排障时，请优先查看
+> [单条日志接入到前端查询的运行时全链路](./architecture/log-ingest-query-runtime-path.zh-CN.md)
+> 和
+> [单条日志查不到时的故障排查地图](./operations/log-not-found-troubleshooting-map.zh-CN.md)。
 
 ## 📚 文档导航
 
@@ -20,6 +25,8 @@
 ### 🎯 快速链接
 
 - **项目 README**: [../README.md](../README.md) - 项目总览和快速开始
+- **当前日志运行时链路**: [./architecture/log-ingest-query-runtime-path.zh-CN.md](./architecture/log-ingest-query-runtime-path.zh-CN.md)
+- **日志排障地图**: [./operations/log-not-found-troubleshooting-map.zh-CN.md](./operations/log-not-found-troubleshooting-map.zh-CN.md)
 - **变更日志**: [../CHANGELOG.md](../CHANGELOG.md) - 版本更新记录
 - **会话上下文**: [../SESSION_CONTEXT.md](../SESSION_CONTEXT.md) - 开发历史和决策记录
 
@@ -34,6 +41,7 @@
 | 文档 | 说明 |
 |------|------|
 | [数据流架构](./architecture/data-flow.md) | Fluent Bit → OTel → Semantic Engine → ClickHouse/Neo4j |
+| [日志运行时全链路](./architecture/log-ingest-query-runtime-path.zh-CN.md) | 单条日志从 ingest 到 query-service/front-end 的当前真实路径 |
 | [服务拓扑架构](./architecture/service-topology.md) | 多模态数据融合、时间关联、手动调整 |
 | [部署架构](./architecture/deployment.md) | Kubernetes 部署方案 |
 | [存储架构](./architecture/storage.md) | ClickHouse + Neo4j + Redis Stream |
@@ -78,6 +86,7 @@ API 接口文档和参考：
 
 | 文档 | 说明 |
 |------|------|
+| [日志查不到排障地图](./operations/log-not-found-troubleshooting-map.zh-CN.md) | 按 topic / 表 / 接口 / 字段逐层定位 |
 | [监控告警](./operations/monitoring.md) | 监控指标和告警配置 |
 | [故障排查](./operations/troubleshooting.md) | 常见问题和解决方案 |
 | [性能优化](./operations/performance.md) | 性能调优和扩展性 |
