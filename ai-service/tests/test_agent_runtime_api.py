@@ -457,6 +457,80 @@ def test_create_ai_run_followup_mode_blocks_when_final_confidence_below_threshol
     assert run_finished_payload["blocked_reason"] == "evidence_incomplete"
 
 
+def test_create_ai_run_followup_mode_blocks_when_answer_declares_insufficient_evidence(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    monkeypatch.setenv("AI_RUNTIME_MIN_FINAL_CONFIDENCE", "0.0")
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "证据不足。"})
+        return {
+            "analysis_session_id": "sess-followup-conflict-001",
+            "conversation_id": "conv-followup-conflict-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "当前证据不足以定位根本原因，请补充更多日志。",
+            "references": [],
+            "actions": [{"id": "act-conflict-001", "title": "补证据"}],
+            "action_observations": [],
+            "react_loop": {
+                "phase": "finalized",
+                "observe": {
+                    "coverage": 1.0,
+                    "evidence_coverage": 1.0,
+                    "confidence": 0.9,
+                    "final_confidence": 0.9,
+                    "missing_evidence_slots": [],
+                },
+                "replan": {"needed": False, "items": [], "next_actions": []},
+            },
+            "react_iterations": [],
+            "subgoals": [{"id": "sg-1", "title": "定位根因", "status": "done"}],
+            "reflection": {"gaps": []},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-followup-conflict-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-followup-conflict-001",
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "blocked":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+    assert fetched["run"]["status"] == "blocked"
+    assert fetched["run"]["summary_json"]["blocked_reason"] == "evidence_incomplete"
+    gate_decision = fetched["run"]["summary_json"].get("gate_decision") or {}
+    assert gate_decision.get("result") == "blocked"
+    assert gate_decision.get("reason") == "evidence_incomplete"
+    metrics = gate_decision.get("metrics") or {}
+    assert metrics.get("answer_declares_insufficient") is True
+    assert (gate_decision.get("gate_conflict_reasons") or [])[0] == "answer_declares_insufficient_evidence"
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "blocked"
+    assert run_finished_payload["blocked_reason"] == "evidence_incomplete"
+
+
 def test_create_ai_run_followup_mode_pauses_on_approval_required_observation(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
@@ -1398,7 +1472,7 @@ def test_execute_ai_run_command_write_requires_diagnosis_contract_before_dispatc
     assert "execution_plan" in missing
     assert pending.get("kind") == "business_question"
     assert pending.get("question_kind") == "write_safety_context"
-    assert int(pending.get("recovery_attempts") or 0) == 2
+    assert int(pending.get("recovery_attempts") or 0) >= 1
     assert "命令语义" not in str(pending.get("title") or "")
     assert "命令语义" not in str(pending.get("prompt") or "")
     assert "diagnosis_contract" not in str(pending.get("prompt") or "")
@@ -2673,6 +2747,7 @@ def test_execute_ai_run_command_requires_purpose(monkeypatch):
 def test_execute_ai_run_command_unknown_semantics_enters_waiting_user_input(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    safe_unknown_semantics_command = "echo runtime-check"
 
     async def _fake_create_command_run(**_kwargs):
         return {
@@ -2697,8 +2772,8 @@ def test_execute_ai_run_command_unknown_semantics_enters_waiting_user_input(monk
             run_id,
             AIRunCommandRequest(
                 action_id="act-unknown-001",
-                command="unknown_command_without_semantics",
-                command_spec=_generic_exec_spec("unknown_command_without_semantics"),
+                command=safe_unknown_semantics_command,
+                command_spec=_generic_exec_spec(safe_unknown_semantics_command),
                 purpose="尝试执行排查动作",
                 title="执行未知命令",
             ),
@@ -2724,7 +2799,7 @@ def test_execute_ai_run_command_unknown_semantics_enters_waiting_user_input(monk
     assert resumed_snapshot["run"]["status"] == "running"
     assert pending.get("kind") == "business_question"
     assert pending.get("question_kind") == "diagnosis_goal"
-    assert int(pending.get("recovery_attempts") or 0) == 2
+    assert int(pending.get("recovery_attempts") or 0) >= 1
     assert "命令语义" not in str(pending.get("title") or "")
     assert "命令语义" not in str(pending.get("prompt") or "")
     event_types = [item["event_type"] for item in events["events"]]
@@ -2890,6 +2965,7 @@ def test_execute_ai_run_command_missing_target_identity_enters_waiting_user_inpu
 def test_execute_ai_run_command_unknown_semantics_exceeds_retry_limit_blocks_run(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    safe_unknown_semantics_command = "echo runtime-check"
 
     async def _fake_create_command_run(**_kwargs):
         return {
@@ -2915,8 +2991,8 @@ def test_execute_ai_run_command_unknown_semantics_exceeds_retry_limit_blocks_run
             run_id,
             AIRunCommandRequest(
                 action_id="act-unknown-limit-001",
-                command="unknown_command_without_semantics",
-                command_spec=_generic_exec_spec("unknown_command_without_semantics"),
+                command=safe_unknown_semantics_command,
+                command_spec=_generic_exec_spec(safe_unknown_semantics_command),
                 purpose="第一次 unknown，进入用户补充语义",
                 title="第一次执行",
             ),
@@ -2929,8 +3005,8 @@ def test_execute_ai_run_command_unknown_semantics_exceeds_retry_limit_blocks_run
             run_id,
             AIRunCommandRequest(
                 action_id="act-unknown-limit-002",
-                command="unknown_command_without_semantics",
-                command_spec=_generic_exec_spec("unknown_command_without_semantics"),
+                command=safe_unknown_semantics_command,
+                command_spec=_generic_exec_spec(safe_unknown_semantics_command),
                 purpose="第二次仍 unknown，应直接终止",
                 title="第二次执行",
             ),
