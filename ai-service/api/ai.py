@@ -229,7 +229,6 @@ _RUNTIME_EVENT_DEFAULT_HIDDEN_TYPES = {
     "action_execution_retrying",
     "action_recovery_succeeded",
     "action_spec_validated",
-    "action_timeout_recovery_scheduled",
 }
 
 
@@ -712,6 +711,25 @@ def _as_runtime_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+_EVIDENCE_INSUFFICIENT_HINTS = [
+    "证据不足",
+    "无法定位",
+    "无法确认",
+    "仍缺失证据",
+    "待补证据",
+    "insufficient evidence",
+    "cannot determine",
+    "cannot confirm",
+]
+
+
+def _answer_declares_evidence_insufficient(text: Any) -> bool:
+    safe_text = _as_str(text).strip().lower()
+    if not safe_text:
+        return False
+    return any(token in safe_text for token in _EVIDENCE_INSUFFICIENT_HINTS)
 
 
 def _resolve_ai_run_runtime_mode(
@@ -1628,6 +1646,17 @@ async def _run_followup_runtime_task(
             if isinstance(react_loop_payload.get("observe"), dict)
             else {}
         )
+        evidence_slot_map = (
+            observe_payload.get("evidence_slot_map")
+            if isinstance(observe_payload.get("evidence_slot_map"), dict)
+            else {}
+        )
+        evidence_slot_missing_or_partial = [
+            _as_str(slot_id).strip()
+            for slot_id, slot_payload in evidence_slot_map.items()
+            if _as_str(slot_id).strip()
+            and _as_str((slot_payload or {}).get("status")).strip().lower() in {"missing", "partial"}
+        ]
         legacy_coverage_value = _as_float(observe_payload.get("coverage"), -1.0)
         evidence_coverage_value = _as_float(observe_payload.get("evidence_coverage"), legacy_coverage_value)
         min_coverage = max(0.0, min(1.0, _as_float(os.getenv("AI_RUNTIME_MIN_EVIDENCE_COVERAGE"), 0.6)))
@@ -1641,13 +1670,30 @@ async def _run_followup_runtime_task(
             and final_confidence_value >= 0
             and final_confidence_value < min_final_confidence
         )
-        evidence_incomplete = has_needs_data_subgoal or coverage_insufficient or confidence_insufficient
-        final_status = "blocked" if (react_replan_needed or evidence_incomplete) else "completed"
+        answer_text = _as_str(result.get("answer"))
+        fault_summary_text = _as_str(result.get("fault_summary"))
+        answer_declares_insufficient = (
+            _answer_declares_evidence_insufficient(answer_text)
+            or _answer_declares_evidence_insufficient(fault_summary_text)
+        )
         missing_evidence_slots = [
             _as_str(item).strip()
             for item in _as_list(observe_payload.get("missing_evidence_slots"))
             if _as_str(item).strip()
         ]
+        for slot_id in evidence_slot_missing_or_partial:
+            if slot_id and slot_id not in missing_evidence_slots:
+                missing_evidence_slots.append(slot_id)
+        evidence_slots_missing = len(missing_evidence_slots) > 0
+        coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        evidence_incomplete = (
+            has_needs_data_subgoal
+            or coverage_insufficient
+            or confidence_insufficient
+            or answer_declares_insufficient
+            or evidence_slots_missing
+        )
+        final_status = "blocked" if (react_replan_needed or evidence_incomplete) else "completed"
         next_best_commands = [
             item
             for item in _as_list((react_replan_payload or {}).get("next_best_commands"))
@@ -1667,6 +1713,12 @@ async def _run_followup_runtime_task(
                 diagnosis_status = "confirmed"
             elif final_confidence_value >= 0:
                 diagnosis_status = "probable"
+        gate_conflict_reasons: List[str] = []
+        if answer_declares_insufficient and not (
+            has_needs_data_subgoal or coverage_insufficient or confidence_insufficient
+        ):
+            gate_conflict_reasons.append("answer_declares_insufficient_evidence")
+        gate_conflict = bool(gate_conflict_reasons)
         gate_decision = {
             "result": final_status,
             "reason": (
@@ -1681,12 +1733,18 @@ async def _run_followup_runtime_task(
                 "evidence_coverage": evidence_coverage_value,
                 "final_confidence": final_confidence_value,
                 "needs_data_subgoal": has_needs_data_subgoal,
+                "evidence_slots_missing": evidence_slots_missing,
+                "coverage_insufficient": coverage_insufficient,
+                "confidence_insufficient": confidence_insufficient,
+                "answer_declares_insufficient": answer_declares_insufficient,
             },
             "thresholds": {
                 "min_evidence_coverage": min_coverage,
                 "min_final_confidence": min_final_confidence,
             },
             "missing_evidence_slots": missing_evidence_slots,
+            "gate_conflict": gate_conflict,
+            "gate_conflict_reasons": gate_conflict_reasons,
         }
         fault_summary = _as_str(result.get("fault_summary")).strip()
         if not fault_summary:
