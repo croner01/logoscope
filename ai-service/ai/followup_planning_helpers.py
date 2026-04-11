@@ -6,6 +6,7 @@ Extracted from `api/ai.py` to keep route file focused on orchestration.
 
 import re
 import shlex
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ai.followup_command import (
@@ -140,6 +141,100 @@ def _extract_command_from_hint_line(text: str) -> str:
     return re.sub(r"(?i)\bclickhouse\s+-client\b", "clickhouse-client", normalized)
 
 
+def _parse_optional_iso_datetime(value: Any) -> Optional[datetime]:
+    text = _as_str(value).strip()
+    if not text:
+        return None
+    candidate = text.replace(" ", "T")
+    if candidate.endswith("Z"):
+        candidate = f"{candidate[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_utc_iso_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_followup_evidence_window(
+    analysis_context: Optional[Dict[str, Any]],
+    *,
+    default_minutes: int = 15,
+) -> Dict[str, str]:
+    context_payload = analysis_context if isinstance(analysis_context, dict) else {}
+    explicit_start = _parse_optional_iso_datetime(context_payload.get("request_flow_window_start"))
+    explicit_end = _parse_optional_iso_datetime(context_payload.get("request_flow_window_end"))
+    if explicit_start and explicit_end and explicit_start <= explicit_end:
+        return {
+            "start_iso": _to_utc_iso_text(explicit_start),
+            "end_iso": _to_utc_iso_text(explicit_end),
+        }
+
+    anchor_candidates = [
+        context_payload.get("source_log_timestamp"),
+        context_payload.get("related_log_anchor_timestamp"),
+        context_payload.get("timestamp"),
+    ]
+    anchor_dt: Optional[datetime] = None
+    for candidate in anchor_candidates:
+        parsed = _parse_optional_iso_datetime(candidate)
+        if parsed is not None:
+            anchor_dt = parsed
+            break
+    if anchor_dt is None:
+        return {}
+
+    raw_minutes = int(_as_float(context_payload.get("request_flow_window_minutes"), default_minutes))
+    window_minutes = max(1, min(120, raw_minutes))
+    start_dt = anchor_dt - timedelta(minutes=window_minutes)
+    end_dt = anchor_dt + timedelta(minutes=window_minutes)
+    return {
+        "start_iso": _to_utc_iso_text(start_dt),
+        "end_iso": _to_utc_iso_text(end_dt),
+    }
+
+
+def _build_k8s_logs_evidence_command(
+    *,
+    namespace: str,
+    service_name: str,
+    window_start_iso: str = "",
+) -> str:
+    target_service = _as_str(service_name).strip() or "query-service"
+    if window_start_iso:
+        return f"kubectl -n {namespace} logs -l app={target_service} --since-time={window_start_iso} --tail=200"
+    return f"kubectl -n {namespace} logs -l app={target_service} --since=15m --tail=200"
+
+
+def _build_clickhouse_query_log_evidence_command(
+    *,
+    namespace: str,
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> str:
+    if window_start_iso and window_end_iso:
+        return (
+            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "\"SELECT event_time,query_id,exception_code,exception,query "
+            "FROM system.query_log "
+            f"WHERE event_time >= toDateTime64('{window_start_iso}', 9, 'UTC') "
+            f"AND event_time <= toDateTime64('{window_end_iso}', 9, 'UTC') "
+            "ORDER BY event_time DESC LIMIT 20\""
+        )
+    return (
+        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "\"SELECT event_time,query_id,exception_code,exception,query "
+        "FROM system.query_log "
+        "WHERE event_time >= now() - INTERVAL 15 MINUTE "
+        "ORDER BY event_time DESC LIMIT 20\""
+    )
+
+
 def _build_non_executable_query_command_hints(
     actions: List[Dict[str, Any]],
     *,
@@ -154,16 +249,27 @@ def _build_non_executable_query_command_hints(
     namespace = _as_str(context_payload.get("namespace"), "islap") or "islap"
     service_name = _as_str(context_payload.get("service_name")).strip()
     trace_id = _as_str(context_payload.get("trace_id")).strip()
+    evidence_window = _resolve_followup_evidence_window(context_payload)
+    window_start_iso = _as_str(evidence_window.get("start_iso")).strip()
+    window_end_iso = _as_str(evidence_window.get("end_iso")).strip()
 
     def _append_context_aware_defaults(reason: str) -> None:
         if service_name:
             _append_hint(
-                f"kubectl -n {namespace} logs -l app={service_name} --since=15m --tail=200",
+                _build_k8s_logs_evidence_command(
+                    namespace=namespace,
+                    service_name=service_name,
+                    window_start_iso=window_start_iso,
+                ),
                 reason or "回收当前服务在故障时间窗口的原始日志证据",
             )
         if trace_id:
             _append_hint(
-                f"kubectl -n {namespace} logs -l app={service_name or 'query-service'} --since=15m --tail=200",
+                _build_k8s_logs_evidence_command(
+                    namespace=namespace,
+                    service_name=service_name or "query-service",
+                    window_start_iso=window_start_iso,
+                ),
                 f"围绕 trace_id={trace_id[:16]} 回看当前服务日志上下文",
             )
 
@@ -202,12 +308,10 @@ def _build_non_executable_query_command_hints(
             continue
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append_hint(
-                (
-                    f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
-                    "\"SELECT event_time,query_id,exception_code,exception,query "
-                    "FROM system.query_log "
-                    "WHERE event_time >= now() - INTERVAL 15 MINUTE "
-                    "ORDER BY event_time DESC LIMIT 20\""
+                _build_clickhouse_query_log_evidence_command(
+                    namespace=namespace,
+                    window_start_iso=window_start_iso,
+                    window_end_iso=window_end_iso,
                 ),
                 "补齐 ClickHouse 查询失败证据，确认异常码与原始 SQL",
             )
@@ -793,7 +897,7 @@ def _build_followup_react_loop(
     }
     obs_by_command: Dict[str, Dict[str, Any]] = {}
     for item in safe_observations:
-        command_key = _as_str(item.get("command"))
+        command_key = _normalize_followup_command_match_key(_as_str(item.get("command")))
         if not command_key:
             continue
         if command_key not in obs_by_command:
@@ -804,7 +908,7 @@ def _build_followup_react_loop(
         safe_command = _as_str(action_payload.get("command")).strip()
         observation = obs_by_action_id.get(safe_action_id)
         if observation is None and safe_command:
-            observation = obs_by_command.get(safe_command)
+            observation = obs_by_command.get(_normalize_followup_command_match_key(safe_command))
         return observation
 
     def _resolve_evidence_slot_id(
@@ -822,6 +926,67 @@ def _build_followup_react_loop(
         if command_match_key:
             return f"command:{command_match_key}"
         return f"slot:{fallback_index}"
+
+    def _resolve_expected_signal(action_payload: Dict[str, Any]) -> str:
+        return (
+            _as_str(action_payload.get("expected_signal")).strip()
+            or _as_str(action_payload.get("purpose")).strip()
+        )
+
+    def _match_expected_signal(
+        expected_signal: str,
+        observation_payload: Dict[str, Any],
+    ) -> tuple[bool, str]:
+        safe_expected = _as_str(expected_signal).strip().lower()
+        if not safe_expected:
+            return True, "expected_signal_missing"
+        expected_tokens = [
+            token
+            for token in re.findall(r"[a-z0-9_./:-]{4,}|[\u4e00-\u9fff]{2,}", safe_expected, flags=re.IGNORECASE)
+            if token not in {"证据", "命令", "日志", "查询", "输出", "current", "error", "warn"}
+        ][:8]
+        if not expected_tokens:
+            return True, "expected_signal_tokens_empty"
+        evidence_text = " ".join(
+            [
+                _as_str(observation_payload.get("stdout")),
+                _as_str(observation_payload.get("stderr")),
+                _as_str(observation_payload.get("message")),
+                _as_str(observation_payload.get("detail")),
+                _as_str(observation_payload.get("text")),
+            ]
+        ).lower()
+        if not evidence_text.strip():
+            return False, "observation_output_empty"
+        matched_tokens = [token for token in expected_tokens if token in evidence_text]
+        min_required = 1 if len(expected_tokens) <= 2 else 2
+        if len(matched_tokens) >= min_required:
+            return True, f"matched_tokens={','.join(matched_tokens[:4])}"
+        return False, f"matched_tokens={','.join(matched_tokens[:4]) or 'none'}"
+
+    def _resolve_evidence_quality(observation_payload: Dict[str, Any]) -> str:
+        status = _as_str(observation_payload.get("status")).strip().lower()
+        if status != "executed":
+            return "none"
+        exit_code = int(_as_float(observation_payload.get("exit_code"), 0))
+        if exit_code != 0:
+            return "none"
+        if bool(observation_payload.get("output_truncated")):
+            return "partial"
+        return "full"
+
+    full_evidence_by_command: Dict[str, Dict[str, Any]] = {}
+    full_evidence_by_run_id: Dict[str, Dict[str, Any]] = {}
+    for obs in safe_observations:
+        obs_dict = obs if isinstance(obs, dict) else {}
+        if _resolve_evidence_quality(obs_dict) != "full":
+            continue
+        command_key = _normalize_followup_command_match_key(_as_str(obs_dict.get("command")))
+        if command_key and command_key not in full_evidence_by_command:
+            full_evidence_by_command[command_key] = obs_dict
+        command_run_id = _as_str(obs_dict.get("command_run_id")).strip()
+        if command_run_id and command_run_id not in full_evidence_by_run_id:
+            full_evidence_by_run_id[command_run_id] = obs_dict
 
     plan_total = len(safe_actions)
     query_total = sum(1 for item in safe_actions if _as_str(item.get("command_type")) == "query")
@@ -926,6 +1091,32 @@ def _build_followup_react_loop(
         if status == "executed":
             exit_code = int(_as_float(obs.get("exit_code"), 0))
             if exit_code == 0:
+                if bool(obs.get("output_truncated")):
+                    unresolved.append(
+                        {
+                            "action_id": action_id,
+                            "reason": "partial_evidence",
+                            "title": _as_str(action.get("title")),
+                            "command": command,
+                            "message": "命令输出被截断，证据不完整。",
+                            "command_type": _as_str(action.get("command_type")),
+                        }
+                    )
+                    continue
+                expected_signal = _resolve_expected_signal(action if isinstance(action, dict) else {})
+                signal_match, signal_reason = _match_expected_signal(expected_signal, obs if isinstance(obs, dict) else {})
+                if not signal_match:
+                    unresolved.append(
+                        {
+                            "action_id": action_id,
+                            "reason": "signal_not_matched",
+                            "title": _as_str(action.get("title")),
+                            "command": command,
+                            "message": f"命令执行成功但未命中预期证据信号：{signal_reason}",
+                            "command_type": _as_str(action.get("command_type")),
+                        }
+                    )
+                    continue
                 continue
             unresolved.append(
                 {
@@ -982,6 +1173,12 @@ def _build_followup_react_loop(
             else:
                 next_line = f"复核并重试命令：{command}"
             execution_disposition = "failed"
+        elif reason == "partial_evidence":
+            next_line = f"补采完整输出后再评估：{command}"
+            execution_disposition = "partial_evidence"
+        elif reason == "signal_not_matched":
+            next_line = f"命令输出未命中预期信号，需改用更贴近故障信号的命令：{command}"
+            execution_disposition = "signal_not_matched"
         elif reason == "semantic_incomplete":
             next_line = f"补全命令参数后继续执行：{command}"
             execution_disposition = "semantic_completion_required"
@@ -1105,6 +1302,7 @@ def _build_followup_react_loop(
     evidence_filled_slots = 0
     evidence_reused_slots = 0
     evidence_missing_slots = 0
+    evidence_partial_slots = 0
     slot_index = 0
     for action in safe_actions:
         action_payload = action if isinstance(action, dict) else {}
@@ -1121,19 +1319,49 @@ def _build_followup_react_loop(
         outcome = "missing"
         reused = False
         reason_code = ""
+        evidence_quality = "none"
         evidence_ids: List[str] = []
+        expected_signal = _resolve_expected_signal(action_payload)
+        signal_match = False
+        signal_match_reason = "observation_missing"
         if obs is not None:
             observed_executable_actions += 1
             status = _as_str(obs.get("status")).strip().lower()
             reason_code = _as_str(obs.get("reason_code")).strip().lower()
             command_run_id = _as_str(obs.get("command_run_id")).strip()
+            observation_payload = obs if isinstance(obs, dict) else {}
+            evidence_quality = _resolve_evidence_quality(observation_payload)
+            signal_match, signal_match_reason = _match_expected_signal(expected_signal, observation_payload)
             if status == "executed" and int(_as_float(obs.get("exit_code"), 0)) == 0:
-                outcome = "filled"
+                if evidence_quality == "full" and signal_match:
+                    outcome = "filled"
+                elif evidence_quality == "partial":
+                    outcome = "partial"
+                    reason_code = reason_code or "output_truncated"
+                else:
+                    outcome = "missing"
                 if command_run_id:
                     evidence_ids.append(command_run_id)
             elif status == "skipped" and reason_code == "duplicate_skipped":
-                outcome = "reused"
-                reused = True
+                supporting_obs: Optional[Dict[str, Any]] = None
+                command_key = _normalize_followup_command_match_key(command)
+                if command_run_id and command_run_id in full_evidence_by_run_id:
+                    supporting_obs = full_evidence_by_run_id.get(command_run_id)
+                elif command_key and command_key in full_evidence_by_command:
+                    supporting_obs = full_evidence_by_command.get(command_key)
+                if isinstance(supporting_obs, dict):
+                    signal_match, signal_match_reason = _match_expected_signal(expected_signal, supporting_obs)
+                    evidence_quality = "reused"
+                    if signal_match:
+                        outcome = "reused"
+                        reused = True
+                    else:
+                        outcome = "missing"
+                        reason_code = "duplicate_reuse_signal_mismatch"
+                else:
+                    outcome = "missing"
+                    reason_code = "duplicate_reuse_without_valid_source"
+                    evidence_quality = "none"
                 if command_run_id:
                     evidence_ids.append(command_run_id)
 
@@ -1144,6 +1372,8 @@ def _build_followup_react_loop(
         else:
             evidence_missing_slots += 1
             missing_evidence_slots.append(slot_id)
+            if outcome == "partial":
+                evidence_partial_slots += 1
 
         evidence_slot_map[slot_id] = {
             "slot_id": slot_id,
@@ -1155,6 +1385,10 @@ def _build_followup_react_loop(
             "reason_code": reason_code,
             "evidence_reuse": reused,
             "evidence_ids": evidence_ids,
+            "expected_signal": expected_signal,
+            "evidence_quality": evidence_quality,
+            "signal_match": signal_match,
+            "signal_match_reason": signal_match_reason,
         }
 
     next_best_commands: List[Dict[str, Any]] = []
@@ -1223,12 +1457,28 @@ def _build_followup_react_loop(
         or skipped_backend_unready_total > 0
         or unknown_total > 0
         or no_executable_query_candidates
+        or evidence_missing_slots > 0
     )
+    if (
+        evidence_missing_slots > 0
+        and skipped_by_policy_total <= 0
+        and len(next_actions) < max(1, int(max_next_actions or 4))
+    ):
+        for slot_id in missing_evidence_slots:
+            slot_payload = evidence_slot_map.get(slot_id) if isinstance(evidence_slot_map.get(slot_id), dict) else {}
+            command = _as_str(slot_payload.get("command")).strip()
+            if not command:
+                continue
+            line = f"补齐证据槽位 {slot_id}：{command}"
+            if line not in next_actions:
+                next_actions.append(line)
+            if len(next_actions) >= max(1, int(max_next_actions or 4)):
+                break
     summary = (
         f"plan={plan_total}, observed={len(obs_by_action_id)}, "
         f"success={executed_success}, failed={executed_failed}, "
         f"skipped_policy={skipped_by_policy_total}, skipped_duplicate={skipped_duplicate_total}, "
-        f"exec_coverage={exec_coverage}, evidence_coverage={evidence_coverage}, "
+        f"exec_coverage={exec_coverage}, evidence_coverage={evidence_coverage}, partial_evidence={evidence_partial_slots}, "
         f"replan={str(replan_needed).lower()}"
     )
 
@@ -1275,6 +1525,7 @@ def _build_followup_react_loop(
             "evidence_filled_slots": evidence_filled_slots,
             "evidence_reused_slots": evidence_reused_slots,
             "evidence_missing_slots": evidence_missing_slots,
+            "evidence_partial_slots": evidence_partial_slots,
             "evidence_slot_map": evidence_slot_map,
         },
         "replan": {

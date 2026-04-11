@@ -141,21 +141,39 @@ def test_build_followup_react_loop_duplicate_skipped_does_not_require_replan():
             "command": "curl -G https://example.com/health",
             "command_type": "query",
             "executable": True,
+        },
+        {
+            "id": "a2",
+            "title": "query health duplicated",
+            "command": "curl -G https://example.com/health",
+            "command_type": "query",
+            "executable": True,
         }
     ]
     observations = [
         {
             "action_id": "a1",
+            "status": "executed",
+            "exit_code": 0,
+            "command": "curl -G https://example.com/health",
+            "stdout": "ok",
+            "command_run_id": "cmdrun-health-001",
+            "output_truncated": False,
+        },
+        {
+            "action_id": "a2",
             "status": "skipped",
             "command": "curl -G https://example.com/health",
             "message": "同一 run 已执行过该命令，跳过重复执行。",
             "reason_code": "duplicate_skipped",
+            "command_run_id": "cmdrun-health-001",
         }
     ]
     loop = _build_followup_react_loop(actions=actions, action_observations=observations)
     assert loop["phase"] == "finalized"
     assert loop["replan"]["needed"] is False
     assert loop["replan"]["skipped_duplicate"] == 1
+    assert loop["replan"]["items"][0]["action_id"] == "a2"
     assert loop["replan"]["items"][0]["execution_disposition"] == "skipped_duplicate"
     assert "无需重试" in loop["replan"]["items"][0]["summary"]
 
@@ -196,12 +214,13 @@ def test_build_followup_react_loop_reports_exec_and_evidence_coverages_with_manu
     assert observe["final_confidence"] >= observe["model_confidence"]
 
 
-def test_build_followup_react_loop_marks_duplicate_skipped_as_reused_evidence():
+def test_build_followup_react_loop_duplicate_skipped_without_valid_source_is_missing():
     actions = [
         {
             "id": "a1",
             "title": "查询健康状态",
             "command": "curl -G https://example.com/health",
+            "expected_signal": "health check 返回 ok",
             "command_type": "query",
             "executable": True,
         }
@@ -217,12 +236,91 @@ def test_build_followup_react_loop_marks_duplicate_skipped_as_reused_evidence():
     ]
     loop = _build_followup_react_loop(actions=actions, action_observations=observations)
     observe = loop["observe"]
+    assert observe["evidence_coverage"] == 0.0
+    assert observe["evidence_reused_slots"] == 0
+    assert observe["evidence_missing_slots"] == 1
+    slot_map = observe["evidence_slot_map"]
+    assert slot_map["action:a1"]["status"] == "missing"
+    assert slot_map["action:a1"]["evidence_reuse"] is False
+    assert slot_map["action:a1"]["reason_code"] == "duplicate_reuse_without_valid_source"
+    assert slot_map["action:a1"]["evidence_ids"] == ["cmdrun-dup-001"]
+
+
+def test_build_followup_react_loop_duplicate_skipped_reuses_full_signal_matched_source():
+    actions = [
+        {
+            "id": "a1",
+            "title": "查询健康状态",
+            "command": "curl -G https://example.com/health",
+            "expected_signal": "health check 返回 ok",
+            "command_type": "query",
+            "executable": True,
+        },
+        {
+            "id": "a2",
+            "title": "查询健康状态（重复）",
+            "command": "curl -G https://example.com/health",
+            "expected_signal": "health check 返回 ok",
+            "command_type": "query",
+            "executable": True,
+        },
+    ]
+    observations = [
+        {
+            "action_id": "a1",
+            "status": "executed",
+            "exit_code": 0,
+            "command": "curl -G https://example.com/health",
+            "stdout": "health check 返回 ok",
+            "command_run_id": "cmdrun-ok-001",
+            "output_truncated": False,
+        },
+        {
+            "action_id": "a2",
+            "status": "skipped",
+            "reason_code": "duplicate_skipped",
+            "command": "curl -G https://example.com/health",
+            "command_run_id": "cmdrun-ok-001",
+        },
+    ]
+    loop = _build_followup_react_loop(actions=actions, action_observations=observations)
+    observe = loop["observe"]
     assert observe["evidence_coverage"] == 1.0
     assert observe["evidence_reused_slots"] == 1
     slot_map = observe["evidence_slot_map"]
-    assert slot_map["action:a1"]["status"] == "reused"
-    assert slot_map["action:a1"]["evidence_reuse"] is True
-    assert slot_map["action:a1"]["evidence_ids"] == ["cmdrun-dup-001"]
+    assert slot_map["action:a2"]["status"] == "reused"
+    assert slot_map["action:a2"]["evidence_reuse"] is True
+    assert slot_map["action:a2"]["signal_match"] is True
+
+
+def test_build_followup_react_loop_output_truncated_is_partial_evidence():
+    actions = [
+        {
+            "id": "a1",
+            "title": "查询日志",
+            "command": "kubectl -n islap logs -l app=query-service --tail=200",
+            "expected_signal": "ERROR stacktrace",
+            "command_type": "query",
+            "executable": True,
+        }
+    ]
+    observations = [
+        {
+            "action_id": "a1",
+            "status": "executed",
+            "exit_code": 0,
+            "command": "kubectl -n islap logs -l app=query-service --tail=200",
+            "stdout": "line1\\nline2",
+            "output_truncated": True,
+        }
+    ]
+    loop = _build_followup_react_loop(actions=actions, action_observations=observations)
+    observe = loop["observe"]
+    assert observe["evidence_coverage"] == 0.0
+    assert observe["evidence_partial_slots"] == 1
+    assert observe["evidence_missing_slots"] == 1
+    assert loop["replan"]["needed"] is True
+    assert any("补采完整输出" in str(item) for item in loop["replan"]["next_actions"])
 
 
 def test_prioritize_followup_actions_with_react_memory_reorders_existing_actions():
