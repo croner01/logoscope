@@ -235,6 +235,23 @@ def _build_clickhouse_query_log_evidence_command(
     )
 
 
+def _build_clickhouse_processes_evidence_command(*, namespace: str) -> str:
+    return (
+        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "\"SELECT now() AS ts, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
+        "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
+    )
+
+
+def _build_clickhouse_metrics_evidence_command(*, namespace: str) -> str:
+    return (
+        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "\"SELECT metric, value FROM system.metrics "
+        "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
+        "ORDER BY metric\""
+    )
+
+
 def _build_non_executable_query_command_hints(
     actions: List[Dict[str, Any]],
     *,
@@ -305,6 +322,18 @@ def _build_non_executable_query_command_hints(
                     continue
         if any(token in text_blob for token in ["temporal", "日志", "trace", "error", "cancel"]):
             _append_context_aware_defaults("补齐当前服务错误上下文与调用链线索")
+            continue
+        if any(token in text_blob for token in ["进程", "process", "running query", "长时间运行"]):
+            _append_hint(
+                _build_clickhouse_processes_evidence_command(namespace=namespace),
+                "补齐 ClickHouse 当前进程证据，识别长耗时/高内存查询",
+            )
+            continue
+        if any(token in text_blob for token in ["指标", "metric", "merge", "mutation", "后台任务"]):
+            _append_hint(
+                _build_clickhouse_metrics_evidence_command(namespace=namespace),
+                "补齐 ClickHouse 指标证据，识别后台任务与并发压力",
+            )
             continue
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append_hint(
@@ -1546,6 +1575,7 @@ def _append_followup_react_summary(
     *,
     answer: str,
     react_loop: Dict[str, Any],
+    actions: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """在回答末尾附加闭环结果，便于前端与用户快速确认执行状态。"""
     base = _as_str(answer).strip()
@@ -1583,6 +1613,30 @@ def _append_followup_react_summary(
     ]
     if observed <= 0 and executable_actions <= 0:
         lines.append("- 当前没有生成通过校验的结构化命令，以上结论仍属于待验证诊断草稿。")
+    safe_actions = [item for item in _as_list(actions) if isinstance(item, dict)]
+    runnable_actions: List[Dict[str, Any]] = []
+    pending_manual_actions: List[Dict[str, Any]] = []
+    for item in safe_actions:
+        command = _as_str(item.get("command")).strip()
+        command_spec = normalize_followup_command_spec(item.get("command_spec"))
+        if bool(item.get("executable")) and command and command_spec:
+            runnable_actions.append(item)
+            continue
+        if _as_str(item.get("source")).strip().lower() in {"langchain", "reflection"}:
+            pending_manual_actions.append(item)
+    if runnable_actions:
+        lines.append("- 执行步骤（结构化）:")
+        for item in runnable_actions[:4]:
+            lines.append(f"  - {_as_str(item.get('command')).strip()}")
+    if pending_manual_actions:
+        lines.append("- 待补全动作（未自动执行）:")
+        for item in pending_manual_actions[:4]:
+            pending_title = _as_str(item.get("title")).strip()
+            pending_reason = _as_str(item.get("reason")).strip() or "缺少可执行 command_spec"
+            if pending_title:
+                lines.append(f"  - {pending_title}（{pending_reason[:80]}）")
+            else:
+                lines.append(f"  - {pending_reason[:120]}")
     next_actions = _as_list(replan.get("next_actions"))
     if replan_needed and next_actions:
         lines.append("- 下一步:")

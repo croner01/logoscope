@@ -89,6 +89,56 @@ def test_append_followup_react_summary_reports_policy_skip_without_manual_copy()
     assert "人工执行并观察" not in merged
 
 
+def test_append_followup_react_summary_separates_runnable_and_manual_actions():
+    answer = "结论：先补证据。"
+    loop = {
+        "execute": {"observed_actions": 1, "executed_success": 1, "executed_failed": 0},
+        "observe": {"coverage": 0.6, "confidence": 0.5},
+        "replan": {"needed": False, "next_actions": []},
+    }
+    actions = [
+        {
+            "id": "tmpl-aa11",
+            "title": "补日志",
+            "source": "template_command",
+            "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+            "command_type": "query",
+            "executable": True,
+            "command_spec": {
+                "tool": "generic_exec",
+                "args": {
+                    "command_argv": [
+                        "kubectl",
+                        "-n",
+                        "islap",
+                        "logs",
+                        "-l",
+                        "app=query-service",
+                        "--since=15m",
+                        "--tail=200",
+                    ],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 30,
+                },
+            },
+        },
+        {
+            "id": "lc-1",
+            "title": "检查 clickhouse 进程",
+            "source": "langchain",
+            "command": "",
+            "command_type": "unknown",
+            "executable": False,
+            "reason": "missing_structured_spec",
+        },
+    ]
+    merged = _append_followup_react_summary(answer=answer, react_loop=loop, actions=actions)
+    assert "执行步骤（结构化）" in merged
+    assert "待补全动作（未自动执行）" in merged
+    assert "检查 clickhouse 进程" in merged
+
+
 def test_build_followup_react_loop_unknown_actions_trigger_replan():
     actions = [
         {
