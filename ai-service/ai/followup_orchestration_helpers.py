@@ -5,6 +5,7 @@ Follow-up orchestration helpers for timeout profile, SSE events and readonly aut
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import time
@@ -21,6 +22,7 @@ from ai.agent_runtime.exec_client import (
 from ai.followup_command import (
     _FOLLOWUP_COMMAND_DEFAULT_TIMEOUT,
     _is_truthy_env,
+    _normalize_followup_command_match_key,
     _normalize_followup_command_line,
     _resolve_followup_command_meta,
 )
@@ -163,8 +165,29 @@ def _build_clickhouse_query_log_evidence_command(
     )
 
 
+def _build_clickhouse_processes_evidence_command(*, namespace: str) -> str:
+    return (
+        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "\"SELECT now() AS ts, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
+        "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
+    )
+
+
+def _build_clickhouse_metrics_evidence_command(*, namespace: str) -> str:
+    return (
+        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "\"SELECT metric, value FROM system.metrics "
+        "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
+        "ORDER BY metric\""
+    )
+
+
 def _derive_template_expected_signal(command: str) -> str:
     safe_command = _normalize_followup_command_line(command).strip().lower()
+    if "from system.processes" in safe_command:
+        return "命中故障时间窗内的长耗时查询、读行量或内存占用异常。"
+    if "from system.metrics" in safe_command:
+        return "命中与慢查询相关的后台任务或并发指标异常。"
     if "system.query_log" in safe_command:
         return "命中故障时间窗内的 query_id、exception_code、exception 或慢查询样本。"
     if "kubectl" in safe_command and " logs " in f" {safe_command} ":
@@ -374,6 +397,12 @@ def _build_non_executable_command_templates(
         if any(token in text_blob for token in ["temporal", "日志", "trace", "error", "cancel"]):
             _append_context_defaults()
             continue
+        if any(token in text_blob for token in ["进程", "process", "running query", "长时间运行"]):
+            _append(_build_clickhouse_processes_evidence_command(namespace=namespace))
+            continue
+        if any(token in text_blob for token in ["指标", "metric", "merge", "mutation", "后台任务"]):
+            _append(_build_clickhouse_metrics_evidence_command(namespace=namespace))
+            continue
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append(
                 _build_clickhouse_query_log_evidence_command(
@@ -403,6 +432,14 @@ def _is_low_signal_template_command(command: str) -> bool:
     if re.match(r"^kubectl\s+-n\s+[a-z0-9-]+\s+get\s+pods\s+--show-labels$", safe_command):
         return True
     return False
+
+
+def _build_template_action_id(command: str) -> str:
+    normalized = _normalize_followup_command_line(command).strip()
+    if not normalized:
+        return "tmpl-unknown"
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    return f"tmpl-{digest}"
 
 
 def _build_structured_template_actions(
@@ -437,6 +474,16 @@ def _build_structured_template_actions(
         for item in _as_list(actions)
         if _as_str((item if isinstance(item, dict) else {}).get("id")).strip()
     }
+    existing_id_to_command: Dict[str, str] = {}
+    existing_command_to_id: Dict[str, str] = {}
+    for item in _as_list(actions):
+        item_dict = item if isinstance(item, dict) else {}
+        existing_action_id = _as_str(item_dict.get("id")).strip()
+        existing_command = _normalize_non_executable_template_command(item_dict.get("command"))
+        if existing_action_id:
+            existing_id_to_command[existing_action_id] = existing_command
+        if existing_command:
+            existing_command_to_id[existing_command] = existing_action_id
     max_priority = 0
     for item in _as_list(actions):
         if not isinstance(item, dict):
@@ -473,12 +520,20 @@ def _build_structured_template_actions(
         compiled_command = _normalize_followup_command_line(_as_str(compiled.get("command")))
         if not command_spec or not compiled_command:
             continue
-        action_id_index = len(existing_ids) + len(built) + 1
-        action_id = f"tmpl-{action_id_index}"
-        while action_id in existing_ids:
-            action_id_index += 1
-            action_id = f"tmpl-{action_id_index}"
+        if compiled_command in existing_command_to_id:
+            # Avoid recreating the same template action across replan iterations.
+            continue
+        action_id = _build_template_action_id(compiled_command)
+        if action_id in existing_ids and existing_id_to_command.get(action_id) != compiled_command:
+            suffix = 2
+            candidate_action_id = f"{action_id}-{suffix}"
+            while candidate_action_id in existing_ids and existing_id_to_command.get(candidate_action_id) != compiled_command:
+                suffix += 1
+                candidate_action_id = f"{action_id}-{suffix}"
+            action_id = candidate_action_id
         existing_ids.add(action_id)
+        existing_id_to_command[action_id] = compiled_command
+        existing_command_to_id[compiled_command] = action_id
         seen_commands.add(compiled_command)
         built.append(
             {
@@ -647,6 +702,8 @@ def _build_followup_auto_exec_skip_observation(
     command: str,
     reason: str,
     reason_code: str = "",
+    reused_command_run_id: str = "",
+    reused_evidence_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     safe_reason_code = _as_str(reason_code).strip().lower()
     if not safe_reason_code:
@@ -661,6 +718,14 @@ def _build_followup_auto_exec_skip_observation(
             safe_reason_code = "policy_blocked"
         else:
             safe_reason_code = "skipped_unknown"
+    safe_reused_command_run_id = _as_str(reused_command_run_id).strip()
+    safe_reused_evidence_ids = [
+        _as_str(item).strip()
+        for item in _as_list(reused_evidence_ids)
+        if _as_str(item).strip()
+    ]
+    if safe_reused_command_run_id and safe_reused_command_run_id not in safe_reused_evidence_ids:
+        safe_reused_evidence_ids.append(safe_reused_command_run_id)
     return {
         "status": "skipped",
         "session_id": session_id,
@@ -670,7 +735,32 @@ def _build_followup_auto_exec_skip_observation(
         "message": reason,
         "reason_code": safe_reason_code,
         "auto_executed": False,
+        "command_run_id": safe_reused_command_run_id,
+        "reused_command_run_id": safe_reused_command_run_id,
+        "reused_evidence_ids": safe_reused_evidence_ids,
+        "evidence_reuse": bool(safe_reused_evidence_ids),
     }
+
+
+def _resolve_latest_success_observation(
+    *,
+    command: str,
+    observations: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    command_key = _normalize_followup_command_match_key(command)
+    if not command_key:
+        return None
+    latest: Optional[Dict[str, Any]] = None
+    for item in _as_list(observations):
+        obs = item if isinstance(item, dict) else {}
+        if _normalize_followup_command_match_key(_as_str(obs.get("command"))) != command_key:
+            continue
+        status = _as_str(obs.get("status")).strip().lower()
+        exit_code = int(_as_float(obs.get("exit_code"), 0))
+        if status != "executed" or exit_code != 0:
+            continue
+        latest = obs
+    return latest
 
 
 def _build_followup_auto_exec_failed_observation(
@@ -976,6 +1066,7 @@ async def _run_followup_readonly_auto_exec(
     run_blocking: Any,
     allow_auto_exec_readonly: bool = True,
     executed_commands: Optional[set[str]] = None,
+    prior_observations: Optional[List[Dict[str, Any]]] = None,
     event_callback: Optional[Any] = None,
     logger: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
@@ -995,6 +1086,7 @@ async def _run_followup_readonly_auto_exec(
     observations: List[Dict[str, Any]] = []
     seen_commands: set = set()
     executed_set = executed_commands if isinstance(executed_commands, set) else set()
+    safe_prior_observations = [item for item in _as_list(prior_observations) if isinstance(item, dict)]
 
     for action in actions:
         if len(observations) >= max_actions:
@@ -1122,6 +1214,11 @@ async def _run_followup_readonly_auto_exec(
         if not normalized_command:
             normalized_command = raw_command
         if normalized_command in executed_set:
+            reused_observation = _resolve_latest_success_observation(
+                command=normalized_command,
+                observations=safe_prior_observations + observations,
+            )
+            reused_command_run_id = _as_str((reused_observation or {}).get("command_run_id")).strip()
             observation = _build_followup_auto_exec_skip_observation(
                 session_id=session_id,
                 message_id=message_id,
@@ -1129,6 +1226,8 @@ async def _run_followup_readonly_auto_exec(
                 command=normalized_command,
                 reason="同一 run 已执行过该命令，跳过重复执行。",
                 reason_code="duplicate_skipped",
+                reused_command_run_id=reused_command_run_id,
+                reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
             )
             observations.append(observation)
             await _emit_followup_event(event_callback, "observation", observation, logger=logger)
@@ -1392,7 +1491,7 @@ def _latest_observation_maps(action_observations: List[Dict[str, Any]]) -> tuple
         if not isinstance(item, dict):
             continue
         action_id = _as_str(item.get("action_id"))
-        command = _as_str(item.get("command"))
+        command = _normalize_followup_command_line(_as_str(item.get("command")))
         if action_id:
             by_action_id[action_id] = item
         if command:
@@ -1405,13 +1504,13 @@ def _count_command_failures(action_observations: List[Dict[str, Any]]) -> Dict[s
     for item in _as_list(action_observations):
         if not isinstance(item, dict):
             continue
-        command = _as_str(item.get("command"))
+        command = _normalize_followup_command_line(_as_str(item.get("command")))
         if not command:
             continue
         status = _as_str(item.get("status")).lower()
         if status == "executed":
             exit_code = int(_as_float(item.get("exit_code"), 0))
-            if exit_code == 0:
+            if exit_code == 0 and not bool(item.get("output_truncated")):
                 continue
             counts[command] = counts.get(command, 0) + 1
             continue
@@ -1439,6 +1538,12 @@ def _select_followup_react_iteration_actions(
     selected: List[Dict[str, Any]] = []
     seen_commands: set[str] = set()
 
+    def _latest_success_for_command(command_text: str) -> Optional[Dict[str, Any]]:
+        return _resolve_latest_success_observation(
+            command=command_text,
+            observations=action_observations,
+        )
+
     for action in _as_list(actions):
         if len(selected) >= safe_max_items:
             break
@@ -1447,7 +1552,7 @@ def _select_followup_react_iteration_actions(
             continue
         if _as_str(action_dict.get("command_type")).lower() != "query":
             continue
-        command = _as_str(action_dict.get("command"))
+        command = _normalize_followup_command_line(_as_str(action_dict.get("command")))
         if not command or command in seen_commands:
             continue
         action_id = _as_str(action_dict.get("id"))
@@ -1459,12 +1564,20 @@ def _select_followup_react_iteration_actions(
             status = _as_str(observation.get("status")).lower()
             if status == "executed":
                 exit_code = int(_as_float(observation.get("exit_code"), 0))
-                should_retry = exit_code != 0
+                should_retry = exit_code != 0 or bool(observation.get("output_truncated"))
             elif status == "failed":
                 should_retry = True
             elif status == "skipped":
                 reason_code = _as_str(observation.get("reason_code")).strip().lower()
-                should_retry = reason_code in {"backend_unready"}
+                if reason_code in {"backend_unready"}:
+                    should_retry = True
+                elif reason_code == "duplicate_skipped":
+                    source_observation = _latest_success_for_command(command)
+                    if source_observation is None:
+                        # Duplicate-skipped but no reusable source evidence; retry to collect source.
+                        should_retry = True
+                    else:
+                        should_retry = bool(source_observation.get("output_truncated"))
         if not should_retry:
             continue
         if command_failures.get(command, 0) > max(0, int(retry_per_command)):
@@ -1485,6 +1598,7 @@ async def _run_followup_auto_exec_react_loop(
     build_react_loop_fn: Any,
     allow_auto_exec_readonly: bool = True,
     executed_commands: Optional[set[str]] = None,
+    initial_action_observations: Optional[List[Dict[str, Any]]] = None,
     initial_evidence_gaps: Optional[List[str]] = None,
     initial_summary: str = "",
     emit_iteration_thoughts: bool = True,
@@ -1502,7 +1616,9 @@ async def _run_followup_auto_exec_react_loop(
     working_actions: List[Dict[str, Any]] = [item for item in _as_list(actions) if isinstance(item, dict)]
     max_iterations = _resolve_followup_react_max_iterations()
     retry_per_command = _resolve_followup_react_retry_per_command()
-    all_observations: List[Dict[str, Any]] = []
+    all_observations: List[Dict[str, Any]] = [
+        item for item in _as_list(initial_action_observations) if isinstance(item, dict)
+    ]
     react_iterations: List[Dict[str, Any]] = []
     final_react_loop: Dict[str, Any] = {}
     active_evidence_gaps = [
@@ -1641,6 +1757,7 @@ async def _run_followup_auto_exec_react_loop(
             actions=iteration_actions,
             allow_auto_exec_readonly=allow_auto_exec_readonly,
             executed_commands=executed_commands,
+            prior_observations=all_observations,
             run_blocking=run_blocking,
             event_callback=event_callback,
             logger=logger,
