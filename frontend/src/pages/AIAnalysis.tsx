@@ -3129,20 +3129,30 @@ const AIAnalysis: React.FC = () => {
     }
     if (!queryTasks.length) {
       const fallbackService = String(serviceName || sourceService || '').trim();
-      if (!fallbackService) {
-        throw new Error('未提取到 request_id/trace_id/服务名，无法拉取横向日志');
+      if (fallbackService) {
+        queryTasks.push({
+          label: `service_name=${fallbackService}`,
+          task: api.getEvents({
+            service_name: fallbackService,
+            level: 'ERROR',
+            start_time,
+            end_time,
+            limit: 120,
+            exclude_health_check: true,
+          }),
+        });
+      } else {
+        queryTasks.push({
+          label: 'window_error_scan',
+          task: api.getEvents({
+            level: 'ERROR',
+            start_time,
+            end_time,
+            limit: 120,
+            exclude_health_check: true,
+          }),
+        });
       }
-      queryTasks.push({
-        label: `service_name=${fallbackService}`,
-        task: api.getEvents({
-          service_name: fallbackService,
-          level: 'ERROR',
-          start_time,
-          end_time,
-          limit: 120,
-          exclude_health_check: true,
-        }),
-      });
     }
 
     const settled = await Promise.allSettled(queryTasks.map((item) => item.task));
