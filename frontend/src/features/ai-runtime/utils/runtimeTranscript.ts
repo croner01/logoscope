@@ -161,6 +161,7 @@ const buildDefaultAnswer = (params: {
   status: string;
   phaseText: string;
   hasPendingApprovals: boolean;
+  blockedReason?: string;
 }): string => {
   if (params.hasPendingApprovals) {
     return '等待审批后继续执行。';
@@ -171,6 +172,22 @@ const buildDefaultAnswer = (params: {
     return '我还需要一个关键信息后继续排查。';
   }
   if (normalizedStatus === 'blocked') {
+    const blockedReason = asText(params.blockedReason).trim().toLowerCase();
+    if (blockedReason === 'planning_incomplete') {
+      return '当前命令计划大多不可执行，需先修复结构化命令后再继续闭环。';
+    }
+    if (blockedReason === 'react_replan_needed') {
+      return '关键证据仍未补齐，当前已暂停自动闭环，请继续执行建议命令。';
+    }
+    if (blockedReason === 'evidence_incomplete') {
+      return '关键证据未采集完成，当前结论仍待验证。';
+    }
+    if (blockedReason === 'approval_timeout') {
+      return '等待审批超时，当前运行已阻塞。';
+    }
+    if (blockedReason === 'diagnosis_contract_incomplete') {
+      return '诊断信息仍不完整，补充关键信息后才能继续执行。';
+    }
     return '命令审批被拒绝，当前运行已阻塞。';
   }
   if (normalizedStatus === 'failed') {
@@ -225,7 +242,7 @@ const resolveActionPurpose = (
   || undefined
 );
 
-const buildStatusSummary = (status: string): string => {
+const buildStatusSummary = (status: string, blockedReason?: string): string => {
   const normalized = asText(status).trim().toLowerCase();
   if (normalized === 'waiting_approval') {
     return '等待人工审批后继续执行。';
@@ -234,6 +251,22 @@ const buildStatusSummary = (status: string): string => {
     return '等待用户补充关键信息后继续排查。';
   }
   if (normalized === 'blocked') {
+    const normalizedReason = asText(blockedReason).trim().toLowerCase();
+    if (normalizedReason === 'planning_incomplete') {
+      return '当前命令计划大多不可执行，需先修复结构化命令后再继续。';
+    }
+    if (normalizedReason === 'react_replan_needed') {
+      return '关键证据仍不足，当前已暂停自动闭环，需继续执行建议命令。';
+    }
+    if (normalizedReason === 'evidence_incomplete') {
+      return '关键证据未采集完成，当前结论仍待验证。';
+    }
+    if (normalizedReason === 'approval_timeout') {
+      return '等待审批超时，当前运行已阻塞。';
+    }
+    if (normalizedReason === 'diagnosis_contract_incomplete') {
+      return '诊断信息不完整，当前运行已暂停。';
+    }
     return '运行被阻断，已停止继续执行。';
   }
   if (normalized === 'failed') {
@@ -387,6 +420,7 @@ export const buildRuntimeTranscriptMessage = (params: {
   const purposeLookup = buildActionPurposeLookup(assistantMetadata);
   const runStatus = asText(params.state.runMeta?.status).trim().toLowerCase();
   const runSummary = asObject(params.state.runMeta?.summaryJson);
+  const blockedReason = asOptionalText(runSummary.blocked_reason);
   const reactLoopFromSummary = asObject(runSummary.react_loop);
   const observeFromSummary = asObject(reactLoopFromSummary.observe);
   const allowManualActionBlocks = runStatus === 'waiting_user_input' || runStatus === 'blocked';
@@ -951,7 +985,7 @@ export const buildRuntimeTranscriptMessage = (params: {
         type: 'status',
         status,
         phase: asOptionalText(payload.current_phase),
-        summary: buildStatusSummary(status),
+        summary: buildStatusSummary(status, blockedReason),
         timestamp,
       });
       return;
@@ -964,7 +998,7 @@ export const buildRuntimeTranscriptMessage = (params: {
         type: 'status',
         status,
         phase: asOptionalText(payload.current_phase),
-        summary: buildStatusSummary(status),
+        summary: buildStatusSummary(status, blockedReason),
         streamError: asOptionalText(payload.error || payload.detail),
         timestamp,
       });
@@ -988,6 +1022,7 @@ export const buildRuntimeTranscriptMessage = (params: {
 
   const diagnosisStatus = asOptionalText(runSummary.diagnosis_status);
   const faultSummary = asOptionalText(runSummary.fault_summary);
+  const planQuality = asObject(runSummary.plan_quality);
   const planCoverage = asOptionalNumber(runSummary.plan_coverage ?? observeFromSummary.plan_coverage ?? observeFromSummary.coverage);
   const execCoverage = asOptionalNumber(runSummary.exec_coverage ?? observeFromSummary.exec_coverage);
   const evidenceCoverage = asOptionalNumber(runSummary.evidence_coverage ?? observeFromSummary.evidence_coverage);
@@ -997,12 +1032,28 @@ export const buildRuntimeTranscriptMessage = (params: {
       .map((item) => asText(item).trim())
       .filter(Boolean)
     : [];
+  const actionsForWindow = Array.isArray(assistantMetadata.actions) ? assistantMetadata.actions : [];
+  let evidenceWindowStart = '';
+  let evidenceWindowEnd = '';
+  actionsForWindow.forEach((item) => {
+    const entry = asObject(item);
+    if (!evidenceWindowStart) {
+      evidenceWindowStart = asText(entry.evidence_window_start || entry.evidenceWindowStart).trim();
+    }
+    if (!evidenceWindowEnd) {
+      evidenceWindowEnd = asText(entry.evidence_window_end || entry.evidenceWindowEnd).trim();
+    }
+  });
   const diagnosisSummaryLines: string[] = [];
   if (faultSummary) {
     diagnosisSummaryLines.push(`故障总结：${faultSummary}`);
   }
   if (diagnosisStatus) {
     diagnosisSummaryLines.push(`诊断状态：${diagnosisStatus}`);
+  }
+  const planningBlockedReason = asOptionalText(planQuality.planning_blocked_reason || planQuality.planningBlockedReason);
+  if (planningBlockedReason) {
+    diagnosisSummaryLines.push(`计划质量：${planningBlockedReason}`);
   }
   const metricChunks: string[] = [];
   if (typeof planCoverage === 'number') {
@@ -1019,6 +1070,9 @@ export const buildRuntimeTranscriptMessage = (params: {
   }
   if (typeof finalConfidence === 'number') {
     diagnosisSummaryLines.push(`最终置信度：${finalConfidence}`);
+  }
+  if (evidenceWindowStart && evidenceWindowEnd) {
+    diagnosisSummaryLines.push(`证据时间窗：${evidenceWindowStart} ~ ${evidenceWindowEnd}`);
   }
   if (missingEvidenceSlots.length > 0) {
     diagnosisSummaryLines.push(`待补证据槽位：${missingEvidenceSlots.slice(0, 4).join(', ')}`);
@@ -1073,6 +1127,7 @@ export const buildRuntimeTranscriptMessage = (params: {
     status: normalizedStatus,
     phaseText,
     hasPendingApprovals: pendingApprovals.length > 0,
+    blockedReason,
   });
 
   if (params.state.streamError) {

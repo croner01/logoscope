@@ -297,7 +297,7 @@ test('runtime view treats blocked as terminal status', () => {
 });
 
 test('buildRuntimeTranscriptMessage shows blocked fallback answer when no assistant final text exists', () => {
-  const state = agentRunReducer(createInitialAgentRunState(), {
+  let state = agentRunReducer(createInitialAgentRunState(), {
     type: 'hydrate_snapshot',
     payload: {
       run: {
@@ -324,6 +324,82 @@ test('buildRuntimeTranscriptMessage shows blocked fallback answer when no assist
 
   assert.equal(answerBlock?.type, 'answer');
   assert.equal(answerBlock?.content, '命令审批被拒绝，当前运行已阻塞。');
+});
+
+test('buildRuntimeTranscriptMessage shows evidence-gap blocked messaging for react replan', () => {
+  let state = agentRunReducer(createInitialAgentRunState(), {
+    type: 'hydrate_snapshot',
+    payload: {
+      run: {
+        run_id: 'run-blocked-react-replan',
+        session_id: 'sess-blocked-react-replan',
+        analysis_type: 'log',
+        engine: 'agent-runtime-v1',
+        runtime_version: 'v1',
+        user_message_id: 'msg-u-blocked-react-replan',
+        assistant_message_id: 'msg-a-blocked-react-replan',
+        status: 'blocked',
+        question: '继续排查慢查询',
+        summary_json: { current_phase: 'blocked', blocked_reason: 'react_replan_needed' },
+      },
+    },
+  });
+  state = agentRunReducer(state, {
+    type: 'append_event',
+    payload: {
+      event: {
+        event_id: 'evt-blocked-react-replan',
+        run_id: 'run-blocked-react-replan',
+        seq: 1,
+        event_type: 'run_status_changed',
+        created_at: '2026-04-12T08:07:19.739527Z',
+        payload: { status: 'blocked' },
+      },
+    },
+  });
+
+  const transcript = buildRuntimeTranscriptMessage({
+    runId: 'run-blocked-react-replan',
+    title: '继续排查慢查询',
+    state,
+  });
+  const answerBlock = transcript.blocks.find((block) => block.type === 'answer');
+  const statusBlock = transcript.blocks.find((block) => block.type === 'status' && block.id === 'status-evt-blocked-react-replan');
+
+  assert.equal(answerBlock?.type, 'answer');
+  assert.equal(answerBlock?.content, '关键证据仍未补齐，当前已暂停自动闭环，请继续执行建议命令。');
+  assert.equal(statusBlock?.type, 'status');
+  assert.equal(statusBlock?.summary, '关键证据仍不足，当前已暂停自动闭环，需继续执行建议命令。');
+});
+
+test('buildRuntimeTranscriptMessage shows planning-incomplete blocked messaging', () => {
+  let state = agentRunReducer(createInitialAgentRunState(), {
+    type: 'hydrate_snapshot',
+    payload: {
+      run: {
+        run_id: 'run-blocked-planning-incomplete',
+        session_id: 'sess-blocked-planning-incomplete',
+        analysis_type: 'log',
+        engine: 'agent-runtime-v1',
+        runtime_version: 'v1',
+        user_message_id: 'msg-u-blocked-planning-incomplete',
+        assistant_message_id: 'msg-a-blocked-planning-incomplete',
+        status: 'blocked',
+        question: '继续排查慢查询',
+        summary_json: { current_phase: 'blocked', blocked_reason: 'planning_incomplete' },
+      },
+    },
+  });
+
+  const transcript = buildRuntimeTranscriptMessage({
+    runId: 'run-blocked-planning-incomplete',
+    title: '继续排查慢查询',
+    state,
+  });
+  const answerBlock = transcript.blocks.find((block) => block.type === 'answer');
+
+  assert.equal(answerBlock?.type, 'answer');
+  assert.equal(answerBlock?.content, '当前命令计划大多不可执行，需先修复结构化命令后再继续闭环。');
 });
 
 test('buildRuntimeTranscriptMessage prefers approval waiting answer over running fallback', () => {
@@ -755,7 +831,7 @@ test('buildRuntimePresentation keeps template hint blocks in conversation', () =
 });
 
 test('buildRuntimeTranscriptMessage renders diagnosis summary and next best commands from run summary', () => {
-  const state = agentRunReducer(createInitialAgentRunState(), {
+  let state = agentRunReducer(createInitialAgentRunState(), {
     type: 'hydrate_snapshot',
     payload: {
       run: {
@@ -772,6 +848,9 @@ test('buildRuntimeTranscriptMessage renders diagnosis summary and next best comm
           current_phase: 'blocked',
           diagnosis_status: 'blocked',
           fault_summary: 'query-service 查询 system.tables 出现慢查询',
+          plan_quality: {
+            planning_blocked_reason: '当前命令计划中有 3/4 条动作仍不可执行，应先修复结构化命令再继续闭环。',
+          },
           plan_coverage: 0.5,
           exec_coverage: 1.0,
           evidence_coverage: 0.5,
@@ -795,6 +874,31 @@ test('buildRuntimeTranscriptMessage renders diagnosis summary and next best comm
       },
     },
   });
+  state = agentRunReducer(state, {
+    type: 'append_event',
+    payload: {
+      event: {
+        event_id: 'evt-diagnosis-summary-assistant',
+        run_id: 'run-diagnosis-summary',
+        seq: 1,
+        event_type: 'assistant_message_finalized',
+        created_at: '2026-04-12T08:07:19.673140Z',
+        payload: {
+          assistant_message_id: 'msg-a-diagnosis-summary',
+          content: '继续排查中。',
+          metadata: {
+            actions: [
+              {
+                id: 'tmpl-window-001',
+                evidence_window_start: '2026-04-11T12:58:33Z',
+                evidence_window_end: '2026-04-11T13:08:33Z',
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
 
   const transcript = buildRuntimeTranscriptMessage({
     runId: 'run-diagnosis-summary',
@@ -808,7 +912,9 @@ test('buildRuntimeTranscriptMessage renders diagnosis summary and next best comm
 
   assert.equal(diagnosisBlock?.type, 'status');
   assert.match(diagnosisBlock?.summary || '', /故障总结/);
+  assert.match(diagnosisBlock?.summary || '', /计划质量/);
   assert.match(diagnosisBlock?.summary || '', /evidence=0.5/);
+  assert.match(diagnosisBlock?.summary || '', /证据时间窗：2026-04-11T12:58:33Z ~ 2026-04-11T13:08:33Z/);
   assert.equal(recommendedCommands.length, 2);
   assert.match(recommendedCommands[0]?.command || '', /clickhouse-client/);
 
