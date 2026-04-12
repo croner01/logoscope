@@ -19,3 +19,7 @@ class InnerGraphState:
     observations: List[Dict[str, Any]] = field(default_factory=list)
     reflection: Dict[str, Any] = field(default_factory=dict)
     done: bool = False
+    # Skill-related fields (ai-runtime-lab)
+    skill_context: Dict[str, Any] = field(default_factory=dict)
+    selected_skills: List[str] = field(default_factory=list)
+    evidence: List[Dict[str, Any]] = field(default_factory=list)

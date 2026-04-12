@@ -30,6 +30,13 @@ RUN_FAILED: Final[str] = "run_failed"
 RUN_CANCELLED: Final[str] = "run_cancelled"
 RUN_INTERRUPTED: Final[str] = "run_interrupted"
 
+# Skill events (ai-runtime-lab)
+SKILL_MATCHED: Final[str] = "skill_matched"
+SKILL_STEP_PLANNED: Final[str] = "skill_step_planned"
+SKILL_STEP_EXECUTING: Final[str] = "skill_step_executing"
+SKILL_STEP_COMPLETED: Final[str] = "skill_step_completed"
+SKILL_CHAIN_COMPLETED: Final[str] = "skill_chain_completed"
+
 EVENT_TYPES: Set[str] = {
     RUN_STARTED,
     RUN_STATUS_CHANGED,
@@ -55,4 +62,10 @@ EVENT_TYPES: Set[str] = {
     RUN_FAILED,
     RUN_CANCELLED,
     RUN_INTERRUPTED,
+    # Skill events
+    SKILL_MATCHED,
+    SKILL_STEP_PLANNED,
+    SKILL_STEP_EXECUTING,
+    SKILL_STEP_COMPLETED,
+    SKILL_CHAIN_COMPLETED,
 }

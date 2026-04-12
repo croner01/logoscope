@@ -231,6 +231,38 @@ export interface RuntimeTranscriptAnswerBlock {
   timestamp?: string;
 }
 
+export interface RuntimeTranscriptSkillBlock {
+  id: string;
+  type: 'skill_step';
+  skillName: string;
+  skillDisplayName: string;
+  stepId: string;
+  stepTitle: string;
+  stepPurpose?: string;
+  status: string;
+  iteration?: number;
+  seq?: number;
+  command?: string;
+  commandSpec?: Record<string, unknown>;
+  stdout?: string;
+  evidence?: string[];
+  timestamp?: string;
+  collapsed?: boolean;
+}
+
+export interface RuntimeTranscriptSkillMatchedBlock {
+  id: string;
+  type: 'skill_matched';
+  selectedSkills: Array<{
+    name: string;
+    displayName: string;
+    description: string;
+    riskLevel: string;
+  }>;
+  summary: string;
+  timestamp?: string;
+}
+
 export type RuntimeTranscriptBlock =
   | RuntimeTranscriptStatusBlock
   | RuntimeTranscriptThinkingBlock
@@ -239,7 +271,9 @@ export type RuntimeTranscriptBlock =
   | RuntimeTranscriptManualActionBlock
   | RuntimeTranscriptUserInputBlock
   | RuntimeTranscriptTemplateHintBlock
-  | RuntimeTranscriptAnswerBlock;
+  | RuntimeTranscriptAnswerBlock
+  | RuntimeTranscriptSkillBlock
+  | RuntimeTranscriptSkillMatchedBlock;
 
 export interface RuntimeTranscriptMessage {
   runId: string;

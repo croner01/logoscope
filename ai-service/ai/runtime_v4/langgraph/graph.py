@@ -68,6 +68,10 @@ def _state_to_payload(state: InnerGraphState) -> Dict[str, Any]:
         "observations": list(state.observations),
         "reflection": dict(state.reflection),
         "done": bool(state.done),
+        # Skill fields (ai-runtime-lab)
+        "skill_context": dict(state.skill_context),
+        "selected_skills": list(state.selected_skills),
+        "evidence": list(state.evidence),
     }
 
 
@@ -83,16 +87,31 @@ def _payload_to_state(payload: Dict[str, Any]) -> InnerGraphState:
         observations=safe_payload.get("observations") if isinstance(safe_payload.get("observations"), list) else [],
         reflection=safe_payload.get("reflection") if isinstance(safe_payload.get("reflection"), dict) else {},
         done=bool(safe_payload.get("done")),
+        # Skill fields
+        skill_context=safe_payload.get("skill_context") if isinstance(safe_payload.get("skill_context"), dict) else {},
+        selected_skills=safe_payload.get("selected_skills") if isinstance(safe_payload.get("selected_skills"), list) else [],
+        evidence=safe_payload.get("evidence") if isinstance(safe_payload.get("evidence"), list) else [],
     )
 
 
 def _run_local_pipeline(state: InnerGraphState) -> InnerGraphState:
-    state = run_planning(state)
-    if state.done:
-        return state
-    state = run_acting(state)
-    state = run_observing(state)
-    state = run_replan(state)
+    """
+    Run planning → acting → observing → replan until done or max_iterations.
+
+    Each iteration dispatches one skill step. In the synchronous path (tests /
+    bridge) the full loop executes here. In the streaming (agent_runtime) path
+    the outer loop advances one step at a time and re-enters after each command.
+    """
+    max_guard = state.max_iterations + 2  # guard against infinite loops
+    guard = 0
+    while not state.done and guard < max_guard:
+        guard += 1
+        state = run_planning(state)
+        if state.done:
+            break
+        state = run_acting(state)
+        state = run_observing(state)
+        state = run_replan(state)
     return state
 
 

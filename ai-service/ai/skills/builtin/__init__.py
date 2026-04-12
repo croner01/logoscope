@@ -1,0 +1,6 @@
+"""Auto-import all built-in skills to trigger @register_skill decoration."""
+
+from ai.skills.builtin import k8s_pod  # noqa: F401
+from ai.skills.builtin import clickhouse_log  # noqa: F401
+from ai.skills.builtin import network_check  # noqa: F401
+from ai.skills.builtin import resource_usage  # noqa: F401

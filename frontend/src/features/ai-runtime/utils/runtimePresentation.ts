@@ -24,6 +24,8 @@ const isConversationBlock = (block: RuntimeTranscriptBlock): boolean => (
   || block.type === 'approval'
   || block.type === 'user_input'
   || block.type === 'template_hint'
+  || block.type === 'skill_step'
+  || block.type === 'skill_matched'
   || isDiagnosisStatusBlock(block)
   || isRecommendedCommandBlock(block)
   || isPreCommandPlanThinkingBlock(block)
