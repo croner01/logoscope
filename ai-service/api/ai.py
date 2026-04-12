@@ -732,6 +732,54 @@ def _answer_declares_evidence_insufficient(text: Any) -> bool:
     return any(token in safe_text for token in _EVIDENCE_INSUFFICIENT_HINTS)
 
 
+def _soften_low_evidence_diagnosis_text(
+    *,
+    answer: Any,
+    fault_summary: Any,
+    react_loop: Optional[Dict[str, Any]],
+) -> Tuple[str, str]:
+    """Downgrade overconfident diagnosis wording when execution evidence is still weak."""
+    loop = react_loop if isinstance(react_loop, dict) else {}
+    observe = loop.get("observe") if isinstance(loop.get("observe"), dict) else {}
+    execute = loop.get("execute") if isinstance(loop.get("execute"), dict) else {}
+    plan_quality = loop.get("plan_quality") if isinstance(loop.get("plan_quality"), dict) else {}
+    observed_actions = int(_as_float(execute.get("observed_actions"), 0))
+    evidence_coverage = _as_float(observe.get("evidence_coverage"), _as_float(observe.get("coverage"), -1.0))
+    final_confidence = _as_float(observe.get("final_confidence"), _as_float(observe.get("confidence"), -1.0))
+    planning_blocked = bool(plan_quality.get("planning_blocked"))
+    low_evidence = (
+        planning_blocked
+        or observed_actions <= 0
+        or (evidence_coverage >= 0 and evidence_coverage < 0.2)
+        or (final_confidence >= 0 and final_confidence < 0.4)
+    )
+    safe_answer = _as_str(answer).strip()
+    safe_fault_summary = _as_str(fault_summary).strip()
+    if not low_evidence:
+        return safe_answer, safe_fault_summary
+
+    disclaimer = "当前仅为待验证判断，尚未采集到足够执行证据。"
+
+    def _soften_text(text: str, *, compact: bool = False) -> str:
+        safe_text = _as_str(text).strip()
+        if not safe_text:
+            return disclaimer if compact else f"{disclaimer}\n\n"
+        softened = safe_text
+        softened = re.sub(r"(^|\n)结论：", r"\1初步判断（待验证）：", softened)
+        softened = re.sub(r"(^|\n)根因分析：", r"\1待验证假设：", softened)
+        softened = softened.replace("根因是", "当前更倾向于")
+        softened = softened.replace("已确认", "初步怀疑")
+        softened = softened.replace("可以确认", "当前更倾向于")
+        softened = softened.replace("而非偶发事件", "但是否为持续性问题仍需继续验证")
+        if _answer_declares_evidence_insufficient(softened):
+            return softened
+        if compact:
+            return f"{disclaimer} {softened}"
+        return f"{disclaimer}\n\n{softened}"
+
+    return _soften_text(safe_answer), _soften_text(safe_fault_summary, compact=True)
+
+
 def _resolve_ai_run_runtime_mode(
     analysis_context: Optional[Dict[str, Any]],
     runtime_options: Optional[Dict[str, Any]],
@@ -1630,6 +1678,14 @@ async def _run_followup_runtime_task(
             "context_pills": result.get("context_pills") if isinstance(result.get("context_pills"), list) else [],
             "approval_required": runtime_state.get("approval_required", []),
         }
+        softened_answer, softened_fault_summary = _soften_low_evidence_diagnosis_text(
+            answer=result.get("answer"),
+            fault_summary=result.get("fault_summary"),
+            react_loop=assistant_metadata.get("react_loop"),
+        )
+        result["answer"] = softened_answer
+        if softened_fault_summary:
+            result["fault_summary"] = softened_fault_summary
         runtime_service.finalize_assistant_message(
             run_id,
             assistant_message_id=latest_run.assistant_message_id,
@@ -1664,6 +1720,12 @@ async def _run_followup_runtime_task(
             if isinstance(react_loop_payload.get("observe"), dict)
             else {}
         )
+        plan_quality_payload = (
+            react_loop_payload.get("plan_quality")
+            if isinstance(react_loop_payload.get("plan_quality"), dict)
+            else {}
+        )
+        planning_blocked = bool(plan_quality_payload.get("planning_blocked"))
         evidence_slot_map = (
             observe_payload.get("evidence_slot_map")
             if isinstance(observe_payload.get("evidence_slot_map"), dict)
@@ -1711,7 +1773,7 @@ async def _run_followup_runtime_task(
             or answer_declares_insufficient
             or evidence_slots_missing
         )
-        final_status = "blocked" if (react_replan_needed or evidence_incomplete) else "completed"
+        final_status = "blocked" if (planning_blocked or react_replan_needed or evidence_incomplete) else "completed"
         next_best_commands = [
             item
             for item in _as_list((react_replan_payload or {}).get("next_best_commands"))
@@ -1740,7 +1802,9 @@ async def _run_followup_runtime_task(
         gate_decision = {
             "result": final_status,
             "reason": (
-                "react_replan_needed"
+                "planning_incomplete"
+                if planning_blocked
+                else "react_replan_needed"
                 if react_replan_needed
                 else "evidence_incomplete"
                 if evidence_incomplete
@@ -1755,6 +1819,7 @@ async def _run_followup_runtime_task(
                 "coverage_insufficient": coverage_insufficient,
                 "confidence_insufficient": confidence_insufficient,
                 "answer_declares_insufficient": answer_declares_insufficient,
+                "planning_blocked": planning_blocked,
             },
             "thresholds": {
                 "min_evidence_coverage": min_coverage,
@@ -1786,6 +1851,7 @@ async def _run_followup_runtime_task(
             "exec_coverage": _as_float(observe_payload.get("exec_coverage"), -1.0),
             "evidence_coverage": evidence_coverage_value,
             "final_confidence": final_confidence_value,
+            "plan_quality": plan_quality_payload,
         }
         finish_payload = {
             "status": final_status,
@@ -1797,7 +1863,10 @@ async def _run_followup_runtime_task(
             "fault_summary": fault_summary,
             "gate_decision": gate_decision,
         }
-        if react_replan_needed:
+        if planning_blocked:
+            finish_summary_updates["blocked_reason"] = "planning_incomplete"
+            finish_payload["blocked_reason"] = "planning_incomplete"
+        elif react_replan_needed:
             finish_summary_updates["blocked_reason"] = "react_replan_needed"
             finish_payload["blocked_reason"] = "react_replan_needed"
         elif evidence_incomplete:

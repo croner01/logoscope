@@ -201,3 +201,15 @@ class TestMatchSkills:
         results = match_skills(ctx, min_score=0.0)
         scores = [score for _, score in results]
         assert scores == sorted(scores, reverse=True)
+
+    def test_runtime_diagnosis_orchestrator_matches_clickhouse_gaps(self):
+        # Use the built-in registry snapshot (includes builtin skills).
+        ctx = _make_context(
+            component_type="clickhouse",
+            service_name="query-service",
+            log_content="ClickHouse slow query detected; 证据不足，需要继续排查",
+            question="继续排查 clickhouse 慢查询，当前证据不足，阻断在重规划",
+        )
+        results = match_skills(ctx, min_score=0.1, max_skills=6)
+        names = [s.name for s, _ in results]
+        assert "runtime_diagnosis_orchestrator" in names

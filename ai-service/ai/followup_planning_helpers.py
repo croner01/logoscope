@@ -235,18 +235,47 @@ def _build_clickhouse_query_log_evidence_command(
     )
 
 
-def _build_clickhouse_processes_evidence_command(*, namespace: str) -> str:
+def _build_clickhouse_processes_evidence_command(
+    *,
+    namespace: str,
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> str:
+    if window_start_iso and window_end_iso:
+        return (
+            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "\"SELECT "
+            f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
+            f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
+            "now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
+            "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
+        )
     return (
         f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
-        "\"SELECT now() AS ts, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
+        "\"SELECT now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
         "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
     )
 
 
-def _build_clickhouse_metrics_evidence_command(*, namespace: str) -> str:
+def _build_clickhouse_metrics_evidence_command(
+    *,
+    namespace: str,
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> str:
+    if window_start_iso and window_end_iso:
+        return (
+            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "\"SELECT "
+            f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
+            f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
+            "now() AS collected_at, metric, value FROM system.metrics "
+            "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
+            "ORDER BY metric\""
+        )
     return (
         f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
-        "\"SELECT metric, value FROM system.metrics "
+        "\"SELECT now() AS collected_at, metric, value FROM system.metrics "
         "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
         "ORDER BY metric\""
     )
@@ -325,13 +354,21 @@ def _build_non_executable_query_command_hints(
             continue
         if any(token in text_blob for token in ["进程", "process", "running query", "长时间运行"]):
             _append_hint(
-                _build_clickhouse_processes_evidence_command(namespace=namespace),
+                _build_clickhouse_processes_evidence_command(
+                    namespace=namespace,
+                    window_start_iso=window_start_iso,
+                    window_end_iso=window_end_iso,
+                ),
                 "补齐 ClickHouse 当前进程证据，识别长耗时/高内存查询",
             )
             continue
         if any(token in text_blob for token in ["指标", "metric", "merge", "mutation", "后台任务"]):
             _append_hint(
-                _build_clickhouse_metrics_evidence_command(namespace=namespace),
+                _build_clickhouse_metrics_evidence_command(
+                    namespace=namespace,
+                    window_start_iso=window_start_iso,
+                    window_end_iso=window_end_iso,
+                ),
                 "补齐 ClickHouse 指标证据，识别后台任务与并发压力",
             )
             continue
@@ -1420,6 +1457,34 @@ def _build_followup_react_loop(
             "signal_match_reason": signal_match_reason,
         }
 
+    spec_blocked_ratio = round(spec_blocked_total / max(plan_total, 1), 2) if plan_total > 0 else 0.0
+    planning_blocked = (
+        plan_total > 0
+        and spec_blocked_total > 0
+        and spec_blocked_ratio >= 0.5
+        and observed_executable_actions <= 0
+    )
+    planning_blocked_reason = ""
+    if planning_blocked:
+        planning_blocked_reason = (
+            f"当前命令计划中有 {spec_blocked_total}/{plan_total} 条动作仍不可执行，"
+            "应先修复结构化命令再继续闭环。"
+        )
+        if planning_blocked_reason not in next_actions and len(next_actions) < max(1, int(max_next_actions or 4)):
+            next_actions.insert(0, planning_blocked_reason)
+        replan_items.insert(
+            0,
+            {
+                "action_id": "",
+                "reason": "planning_incomplete",
+                "command": "",
+                "message": planning_blocked_reason,
+                "title": "当前命令计划大多不可执行",
+                "summary": planning_blocked_reason,
+                "execution_disposition": "planning_incomplete",
+            },
+        )
+
     next_best_commands: List[Dict[str, Any]] = []
     next_best_seen: set[str] = set()
     for item in replan_items:
@@ -1480,7 +1545,8 @@ def _build_followup_react_loop(
     final_confidence = round(max(0.1, min(0.98, (model_confidence * 0.35) + (evidence_confidence * 0.65))), 2)
 
     replan_needed = (
-        replan_candidate_count > 0
+        planning_blocked
+        or replan_candidate_count > 0
         or executed_failed > 0
         or skipped_by_policy_total > 0
         or skipped_backend_unready_total > 0
@@ -1521,6 +1587,11 @@ def _build_followup_react_loop(
             "executable_actions": executable_total,
             "non_executable_query_like_actions": non_executable_query_like_total,
             "spec_blocked_actions": spec_blocked_total,
+        },
+        "plan_quality": {
+            "planning_blocked": planning_blocked,
+            "planning_blocked_reason": planning_blocked_reason,
+            "spec_blocked_ratio": spec_blocked_ratio,
         },
         "policy": {
             "permission_required": permission_required,
@@ -1585,6 +1656,7 @@ def _append_followup_react_summary(
     execute = loop.get("execute") if isinstance(loop.get("execute"), dict) else {}
     observe = loop.get("observe") if isinstance(loop.get("observe"), dict) else {}
     plan = loop.get("plan") if isinstance(loop.get("plan"), dict) else {}
+    plan_quality = loop.get("plan_quality") if isinstance(loop.get("plan_quality"), dict) else {}
     replan = loop.get("replan") if isinstance(loop.get("replan"), dict) else {}
     observed = int(_as_float(execute.get("observed_actions"), 0))
     executable_actions = int(_as_float(plan.get("executable_actions"), 0))
@@ -1611,19 +1683,30 @@ def _append_followup_react_summary(
             f"final={observe.get('final_confidence', observe.get('confidence'))}"
         ),
     ]
+    planning_blocked_reason = _as_str(plan_quality.get("planning_blocked_reason")).strip()
+    if planning_blocked_reason:
+        lines.append(f"- 计划质量: {planning_blocked_reason}")
     if observed <= 0 and executable_actions <= 0:
         lines.append("- 当前没有生成通过校验的结构化命令，以上结论仍属于待验证诊断草稿。")
     safe_actions = [item for item in _as_list(actions) if isinstance(item, dict)]
     runnable_actions: List[Dict[str, Any]] = []
     pending_manual_actions: List[Dict[str, Any]] = []
+    window_start_iso = ""
+    window_end_iso = ""
     for item in safe_actions:
         command = _as_str(item.get("command")).strip()
         command_spec = normalize_followup_command_spec(item.get("command_spec"))
+        if not window_start_iso:
+            window_start_iso = _as_str(item.get("evidence_window_start")).strip()
+        if not window_end_iso:
+            window_end_iso = _as_str(item.get("evidence_window_end")).strip()
         if bool(item.get("executable")) and command and command_spec:
             runnable_actions.append(item)
             continue
         if _as_str(item.get("source")).strip().lower() in {"langchain", "reflection"}:
             pending_manual_actions.append(item)
+    if window_start_iso and window_end_iso:
+        lines.append(f"- 证据时间窗: {window_start_iso} ~ {window_end_iso}")
     if runnable_actions:
         lines.append("- 执行步骤（结构化）:")
         for item in runnable_actions[:4]:

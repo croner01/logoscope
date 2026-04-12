@@ -139,6 +139,48 @@ def test_append_followup_react_summary_separates_runnable_and_manual_actions():
     assert "检查 clickhouse 进程" in merged
 
 
+def test_append_followup_react_summary_includes_evidence_window_when_available():
+    answer = "结论：先补证据。"
+    loop = {
+        "execute": {"observed_actions": 1, "executed_success": 1, "executed_failed": 0},
+        "observe": {"coverage": 0.6, "confidence": 0.5},
+        "replan": {"needed": False, "next_actions": []},
+    }
+    actions = [
+        {
+            "id": "tmpl-window-001",
+            "title": "补日志",
+            "source": "template_command",
+            "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-11T12:58:33Z --tail=200",
+            "command_type": "query",
+            "executable": True,
+            "evidence_window_start": "2026-04-11T12:58:33Z",
+            "evidence_window_end": "2026-04-11T13:08:33Z",
+            "command_spec": {
+                "tool": "generic_exec",
+                "args": {
+                    "command_argv": [
+                        "kubectl",
+                        "-n",
+                        "islap",
+                        "logs",
+                        "-l",
+                        "app=query-service",
+                        "--since-time=2026-04-11T12:58:33Z",
+                        "--tail=200",
+                    ],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 30,
+                },
+            },
+        }
+    ]
+    merged = _append_followup_react_summary(answer=answer, react_loop=loop, actions=actions)
+    assert "证据时间窗" in merged
+    assert "2026-04-11T12:58:33Z ~ 2026-04-11T13:08:33Z" in merged
+
+
 def test_build_followup_react_loop_unknown_actions_trigger_replan():
     actions = [
         {
@@ -767,6 +809,72 @@ def test_build_followup_react_loop_suggests_templates_for_non_executable_manual_
     assert any("kubectl -n islap logs -l app=query-service" in item for item in next_actions)
     assert all("deploy/temporal" not in item for item in next_actions)
     assert all("deploy/postgresql" not in item for item in next_actions)
+
+
+def test_build_followup_react_loop_marks_planning_incomplete_when_most_actions_blocked():
+    actions = [
+        {
+            "id": "a1",
+            "title": "查询ClickHouse慢查询详情",
+            "command": "",
+            "command_type": "unknown",
+            "executable": False,
+            "reason": "glued_sql_tokens",
+        },
+        {
+            "id": "a2",
+            "title": "检查ClickHouse节点状态",
+            "command": "",
+            "command_type": "unknown",
+            "executable": False,
+            "reason": "unsupported_command_head",
+        },
+        {
+            "id": "a3",
+            "title": "输出修复建议",
+            "command": "",
+            "command_type": "unknown",
+            "executable": False,
+            "reason": "missing_structured_spec",
+        },
+        {
+            "id": "a4",
+            "title": "查询 query-service 错误日志",
+            "command": "kubectl -n islap logs deploy/query-service --since=15m --tail=200",
+            "command_type": "query",
+            "executable": True,
+            "command_spec": {
+                "tool": "generic_exec",
+                "args": {
+                    "command_argv": [
+                        "kubectl",
+                        "-n",
+                        "islap",
+                        "logs",
+                        "deploy/query-service",
+                        "--since=15m",
+                        "--tail=200",
+                    ],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 30,
+                },
+            },
+        },
+    ]
+
+    loop = _build_followup_react_loop(
+        actions=actions,
+        action_observations=[],
+        analysis_context={"namespace": "islap", "service_name": "query-service"},
+    )
+
+    assert loop["replan"]["needed"] is True
+    assert loop["plan_quality"]["planning_blocked"] is True
+    assert "先修复结构化命令" in str(loop["plan_quality"]["planning_blocked_reason"])
+    next_actions = [str(item) for item in loop["replan"]["next_actions"]]
+    assert next_actions
+    assert "先修复结构化命令" in next_actions[0]
 
 
 def test_build_followup_react_loop_does_not_invent_temporal_or_postgres_without_context():
