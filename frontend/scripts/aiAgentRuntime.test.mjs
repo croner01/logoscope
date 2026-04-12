@@ -297,7 +297,10 @@ test('buildRuntimeAnalysisContext clears dirty trace_id after downgrade', () => 
     analysisType: 'trace',
     traceId: '   ',
     serviceName: 'query-service',
-    baseContext: { agent_mode: 'followup_analysis_runtime' },
+    baseContext: {
+      agent_mode: 'followup_analysis_runtime',
+      trace_id: 'trace-stale-123',
+    },
   });
 
   assert.deepEqual(context, {
@@ -324,10 +327,12 @@ test('buildRuntimeFollowUpContext carries explicit evidence window and anchor al
     sourceLogTimestamp: '2026-04-12T13:31:14Z',
     sourceTraceId: '',
     sourceRequestId: '',
+    followupRelatedAnchorUtc: '2026-04-12T13:31:14Z',
+    followupRelatedStartTime: '2026-04-12T13:26:14Z',
+    followupRelatedEndTime: '2026-04-12T13:36:14Z',
+    evidenceWindowStart: '2026-04-12T13:25:14Z',
+    evidenceWindowEnd: '2026-04-12T13:37:14Z',
     followupRelatedMeta: {
-      followup_related_anchor_utc: '2026-04-12T13:31:14Z',
-      followup_related_start_time: '2026-04-12T13:26:14Z',
-      followup_related_end_time: '2026-04-12T13:36:14Z',
       followup_related_request_id: 'req-123',
     },
   });
@@ -336,6 +341,8 @@ test('buildRuntimeFollowUpContext carries explicit evidence window and anchor al
   assert.equal(context.related_log_anchor_timestamp, '2026-04-12T13:31:14Z');
   assert.equal(context.request_flow_window_start, '2026-04-12T13:26:14Z');
   assert.equal(context.request_flow_window_end, '2026-04-12T13:36:14Z');
+  assert.equal(context.evidence_window_start, '2026-04-12T13:25:14Z');
+  assert.equal(context.evidence_window_end, '2026-04-12T13:37:14Z');
 });
 
 test('runtime view treats blocked as terminal status', () => {
