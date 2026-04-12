@@ -313,6 +313,38 @@ test('buildRuntimeAnalysisContext clears dirty trace_id after downgrade', () => 
   });
 });
 
+test('buildRuntimeAnalysisContext retains trace_id for trace mode when provided', () => {
+  const context = buildRuntimeAnalysisContext({
+    analysisType: 'trace',
+    traceId: ' trace-valid-001 ',
+    serviceName: 'query-service',
+    baseContext: {
+      agent_mode: 'followup_analysis_runtime',
+    },
+  });
+
+  assert.equal(context.analysis_type, 'trace');
+  assert.equal(context.trace_id, 'trace-valid-001');
+  assert.equal(context.analysis_type_downgraded, undefined);
+  assert.equal(context.agent_mode, 'followup_analysis_runtime');
+});
+
+test('buildRuntimeAnalysisContext retains trace_id for log mode when provided', () => {
+  const context = buildRuntimeAnalysisContext({
+    analysisType: 'log',
+    traceId: ' trace-valid-log-001 ',
+    serviceName: 'query-service',
+    baseContext: {
+      agent_mode: 'followup_analysis_runtime',
+    },
+  });
+
+  assert.equal(context.analysis_type, 'log');
+  assert.equal(context.trace_id, 'trace-valid-log-001');
+  assert.equal(context.analysis_type_downgraded, undefined);
+  assert.equal(context.agent_mode, 'followup_analysis_runtime');
+});
+
 test('buildRuntimeFollowUpContext carries explicit evidence window and anchor aliases', () => {
   const context = buildRuntimeFollowUpContext({
     analysisSessionId: 'sess-001',
@@ -400,6 +432,35 @@ test('buildRuntimeFollowUpContext prefers current inputs over stale metadata and
   assert.equal(context.request_flow_window_end, '2026-04-12T13:36:14Z');
   assert.equal(context.evidence_window_start, '2026-04-12T13:25:14Z');
   assert.equal(context.evidence_window_end, '2026-04-12T13:37:14Z');
+});
+
+test('buildRuntimeFollowUpContext prefers explicit result window over alias inputs', () => {
+  const context = buildRuntimeFollowUpContext({
+    analysisSessionId: 'sess-explicit',
+    analysisType: 'log',
+    serviceName: 'query-service',
+    inputText: 'explicit window check',
+    question: 'window preference',
+    result: {
+      overview: { problem: 'window-mismatch' },
+      request_flow_window_start: '2026-04-12T13:20:00Z',
+      request_flow_window_end: '2026-04-12T13:40:00Z',
+      request_id: 'req-from-result',
+    },
+    followupRelatedMeta: {
+      followup_related_start_time: '1999-01-01T00:00:00Z',
+      followup_related_end_time: '1999-01-01T00:10:00Z',
+      evidence_window_start: '1999-01-01T00:01:00Z',
+      evidence_window_end: '1999-01-01T00:02:00Z',
+      followup_related_request_id: 'req-from-meta',
+    },
+  });
+
+  assert.equal(context.request_flow_window_start, '2026-04-12T13:20:00Z');
+  assert.equal(context.request_flow_window_end, '2026-04-12T13:40:00Z');
+  assert.equal(context.evidence_window_start, '2026-04-12T13:20:00Z');
+  assert.equal(context.evidence_window_end, '2026-04-12T13:40:00Z');
+  assert.equal(context.request_id, 'req-from-result');
 });
 
 test('buildRuntimeAnalysisContext clears stale downgrade markers when trace mode later resolves cleanly', () => {

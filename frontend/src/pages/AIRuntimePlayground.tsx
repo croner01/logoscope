@@ -50,6 +50,10 @@ import {
 } from '../utils/aiAgentRuntimeReducer';
 import { buildRuntimeCommandSpec, resolveRuntimeClientDeadlineMs } from '../utils/commandSpec';
 import { formatTime } from '../utils/formatters';
+import {
+  buildRuntimeAnalysisContext,
+  resolveRuntimeAnalysisMode,
+} from '../utils/runtimeAnalysisMode';
 
 type UnknownObject = Record<string, unknown>;
 
@@ -449,6 +453,13 @@ const shouldStopOnRunStatusChanged = (status: string, stopOnApproval: boolean): 
   return false;
 };
 
+const buildRuntimeDowngradeNotice = (reason?: string): string | null => {
+  if (reason === 'trace_id_missing') {
+    return 'trace 模式未提供 Trace ID，本次运行已自动降级为 log 模式；如需按链路排查，请补充 Trace ID 后重试。';
+  }
+  return null;
+};
+
 const AIRuntimePlayground: React.FC = () => {
   const [question, setQuestion] = useState('请分析 checkout-service 最近频繁超时的原因，并在需要时继续执行只读排查命令。');
   const [serviceName, setServiceName] = useState('checkout-service');
@@ -814,14 +825,6 @@ const AIRuntimePlayground: React.FC = () => {
       setPageError('请输入要测试的问题');
       return;
     }
-    if (analysisType === 'trace' && !trimmedTraceId) {
-      setPageError('trace 分析至少需要 Trace ID，缺少链路主键时不要启动 runtime run。');
-      return;
-    }
-    if (analysisType === 'log' && (!trimmedServiceName || !trimmedTraceId)) {
-      setPageError('log 分析至少需要服务名和 Trace ID，避免在空上下文里生成不可信建议。');
-      return;
-    }
 
     setSubmitting(true);
     setPageError(null);
@@ -829,17 +832,20 @@ const AIRuntimePlayground: React.FC = () => {
     setManualActionDialog(null);
     try {
       const clientDeadlineMs = resolveRuntimeClientDeadlineMs(180000);
-      const created = await api.createAIRun({
-        session_id: trimmedSessionId || undefined,
-        question: trimmedQuestion,
-        analysis_context: {
-          analysis_type: analysisType,
-          service_name: trimmedServiceName || undefined,
-          trace_id: trimmedTraceId || undefined,
+      const analysisContext = buildRuntimeAnalysisContext({
+        analysisType,
+        traceId: trimmedTraceId,
+        serviceName: trimmedServiceName,
+        baseContext: {
           agent_mode: 'followup_analysis_runtime',
           runtime_mode: 'followup_analysis',
           runtime_profile: 'ai_runtime_lab',
         },
+      });
+      const created = await api.createAIRun({
+        session_id: trimmedSessionId || undefined,
+        question: trimmedQuestion,
+        analysis_context: analysisContext,
         runtime_options: {
           mode: 'followup_analysis',
           runtime_profile: 'ai_runtime_lab',
@@ -1439,6 +1445,17 @@ const AIRuntimePlayground: React.FC = () => {
   const latestPendingManualAction = useMemo(() => (
     buildLatestPendingManualAction(thread, runtimeProjectionByTurnId)
   ), [thread, runtimeProjectionByTurnId]);
+
+  const analysisModeResolution = useMemo(() => resolveRuntimeAnalysisMode({
+    analysisType,
+    traceId,
+  }), [analysisType, traceId]);
+  const downgradeNotice = analysisModeResolution.downgraded
+    ? buildRuntimeDowngradeNotice(analysisModeResolution.reason)
+    : null;
+  const readonlyPolicyNotice = autoExecReadonly
+    ? null
+    : '当前运行仅生成只读排查命令，不会自动执行；如需自动补证据，请开启“自动执行只读命令”。';
 
   useEffect(() => {
     if (!approvalDialog) {
@@ -2113,9 +2130,19 @@ const AIRuntimePlayground: React.FC = () => {
                     </label>
                   </div>
                   <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
-                    最小证据门槛：`trace` 模式必须提供 Trace ID；`log` 模式必须提供服务名和 Trace ID。
-                    缺少这些主键时，runtime run 会被直接拦截，避免输出脱离日志上下文的排查建议。
+                    运行入口会复用主分析页的上下文语义：`log` 模式可直接基于当前问题和已有上下文启动；
+                    `trace` 模式缺少 Trace ID 时会自动降级为 `log`，避免因为单个主键缺失而直接中断。
                   </div>
+                  {downgradeNotice && (
+                    <div className="mt-3 rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900">
+                      {downgradeNotice}
+                    </div>
+                  )}
+                  {readonlyPolicyNotice && (
+                    <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700">
+                      {readonlyPolicyNotice}
+                    </div>
+                  )}
                   <div className="mt-4 grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-700 md:grid-cols-3">
                     <label className="flex items-center gap-2">
                       <input
