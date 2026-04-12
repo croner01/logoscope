@@ -5,6 +5,7 @@ import {
   Clock3,
   Loader2,
   Terminal,
+  Zap,
 } from 'lucide-react';
 
 import type {
@@ -16,12 +17,15 @@ import type {
   RuntimeTranscriptCommandBlock,
   RuntimeTranscriptManualActionBlock,
   RuntimeTranscriptMessage,
+  RuntimeTranscriptSkillBlock,
+  RuntimeTranscriptSkillMatchedBlock,
   RuntimeTranscriptStatusBlock,
   RuntimeTranscriptTemplateHintBlock,
   RuntimeTranscriptThinkingBlock,
   RuntimeTranscriptUserInputBlock,
 } from '../types/view';
 import { buildRuntimePresentation } from '../utils/runtimePresentation';
+import SkillBadge from './SkillBadge';
 
 interface RuntimeConversationCardProps {
   message: RuntimeTranscriptMessage;
@@ -745,6 +749,79 @@ const renderTemplateHintBlock = (
   );
 };
 
+const renderSkillMatchedBlock = (block: RuntimeTranscriptSkillMatchedBlock) => (
+  <div key={block.id} className="rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3">
+    <div className="flex flex-wrap items-center gap-2 text-xs text-indigo-700">
+      <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-white/90 px-2 py-0.5">
+        <Zap className="h-3 w-3" />
+        技能选择
+      </span>
+      {block.timestamp && <span>{formatRuntimeTime(block.timestamp)}</span>}
+    </div>
+    <div className="mt-2 text-sm font-medium text-indigo-950">{block.summary}</div>
+    <div className="mt-2 flex flex-wrap gap-2">
+      {block.selectedSkills.map((skill) => (
+        <SkillBadge
+          key={skill.name}
+          skillName={skill.name}
+          displayName={skill.displayName}
+          riskLevel={skill.riskLevel}
+        />
+      ))}
+    </div>
+  </div>
+);
+
+const renderSkillStepBlock = (block: RuntimeTranscriptSkillBlock) => {
+  const stdout = String(block.stdout || '').trim();
+  const evidence = block.evidence ?? [];
+  const statusNormalized = String(block.status || '').trim().toLowerCase();
+  const isRunning = statusNormalized === 'running' || statusNormalized === 'executing';
+  const isCompleted = statusNormalized === 'completed';
+  return (
+    <div key={block.id} className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-violet-700">
+        <SkillBadge skillName={block.skillName} displayName={block.skillDisplayName} compact />
+        <span className={`rounded-full border px-2 py-0.5 ${getStatusClassName(block.status)}`}>
+          {isRunning ? '执行中' : isCompleted ? '已完成' : '已计划'}
+        </span>
+        {typeof block.seq === 'number' && <span>step {block.seq}</span>}
+        {block.timestamp && <span>{formatRuntimeTime(block.timestamp)}</span>}
+      </div>
+      <div className="mt-2 text-sm font-medium text-violet-950">{block.stepTitle}</div>
+      {block.stepPurpose && (
+        <div className="mt-1 text-xs text-violet-800">{block.stepPurpose}</div>
+      )}
+      {block.command && (
+        <div className="mt-2 flex items-start gap-2">
+          <Terminal className="mt-0.5 h-4 w-4 shrink-0 text-violet-400" />
+          <code className="break-all text-sm text-violet-900">{block.command}</code>
+        </div>
+      )}
+      {evidence.length > 0 && (
+        <div className="mt-2 rounded-xl border border-violet-200 bg-white/80 px-3 py-2">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-violet-600">提取证据</div>
+          <ul className="mt-1 space-y-0.5">
+            {evidence.map((line, i) => (
+              <li key={`evidence-${i}-${line.slice(0, 16)}`} className="text-xs text-violet-800">{line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {stdout && (
+        <details className="mt-3 rounded-xl border border-violet-200 bg-white/80 px-3 py-2">
+          <summary className="cursor-pointer list-none text-xs font-medium text-violet-700">
+            展开技能输出
+          </summary>
+          <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-950 p-3 text-[12px] leading-5 text-emerald-200">
+            {stdout}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+};
+
 const renderAnswerBlock = (block: RuntimeTranscriptAnswerBlock) => (
   <div key={block.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
     <div className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
@@ -815,6 +892,12 @@ const renderBlock = (
       disabled: params.disabled,
       onUseTemplateAsInput: params.onUseTemplateAsInput,
     });
+  }
+  if (block.type === 'skill_matched') {
+    return renderSkillMatchedBlock(block);
+  }
+  if (block.type === 'skill_step') {
+    return renderSkillStepBlock(block);
   }
   return renderAnswerBlock(block);
 };

@@ -10,6 +10,7 @@ import type {
   RuntimeTranscriptBlock,
   RuntimeTranscriptCommandBlock,
   RuntimeTranscriptMessage,
+  RuntimeTranscriptSkillBlock,
   RuntimeTranscriptTemplateHintBlock,
   RuntimeTranscriptUserInputBlock,
 } from '../types/view.js';
@@ -398,6 +399,7 @@ export const buildRuntimeTranscriptMessage = (params: {
   const emittedTemplateHintKeys = new Set<string>();
   const planningBlockIndexByKey = new Map<string, number>();
   const commandBlockIndexByKey = new Map<string, number>();
+  const skillBlockIndexByStepId = new Map<string, number>();
   const emittedUserInputQuestionKeys = new Set<string>();
   const latestPendingUserInputRef: { current: RuntimeTranscriptUserInputBlock | null } = { current: null };
   let manualActionAppended = false;
@@ -771,6 +773,82 @@ export const buildRuntimeTranscriptMessage = (params: {
         blocks[existingIndex] = nextBlock;
       } else {
         commandBlockIndexByKey.set(commandKey, blocks.length);
+        blocks.push(nextBlock);
+      }
+      return;
+    }
+
+    if (eventType === 'skill_matched') {
+      const rawSkills = Array.isArray(payload.selected_skills) ? payload.selected_skills : [];
+      const selectedSkills = rawSkills.map((s) => {
+        const skill = asObject(s);
+        return {
+          name: asText(skill.name).trim(),
+          displayName: asText(skill.display_name || skill.displayName).trim(),
+          description: asText(skill.description).trim(),
+          riskLevel: asText(skill.risk_level || skill.riskLevel).trim() || 'low',
+        };
+      }).filter((s) => Boolean(s.name));
+      if (selectedSkills.length > 0) {
+        blocks.push({
+          id: `skill-matched-${eventId}`,
+          type: 'skill_matched',
+          selectedSkills,
+          summary: asText(payload.summary).trim() || `已选择 ${selectedSkills.length} 个诊断技能`,
+          timestamp,
+        });
+      }
+      return;
+    }
+
+    if (
+      eventType === 'skill_step_planned'
+      || eventType === 'skill_step_executing'
+      || eventType === 'skill_step_completed'
+    ) {
+      const skillName = asText(payload.skill_name || payload.skillName).trim();
+      const stepId = asText(payload.step_id || payload.stepId).trim();
+      const blockKey = stepId || `${skillName}-${eventId}`;
+      const status = (
+        eventType === 'skill_step_planned' ? 'planned'
+          : eventType === 'skill_step_executing' ? 'running'
+            : 'completed'
+      );
+      const existingIndex = skillBlockIndexByStepId.get(blockKey);
+      const existingBlock = (
+        typeof existingIndex === 'number'
+        && existingIndex >= 0
+        && existingIndex < blocks.length
+        && blocks[existingIndex].type === 'skill_step'
+      )
+        ? blocks[existingIndex] as RuntimeTranscriptSkillBlock
+        : null;
+
+      const nextBlock: RuntimeTranscriptSkillBlock = {
+        id: existingBlock?.id || `skill-step-${blockKey}`,
+        type: 'skill_step',
+        skillName,
+        skillDisplayName: asText(payload.skill_display_name || payload.skillDisplayName).trim() || skillName,
+        stepId: stepId || blockKey,
+        stepTitle: asText(payload.title || payload.step_title || payload.stepTitle).trim() || skillName,
+        stepPurpose: asOptionalText(payload.purpose || payload.step_purpose),
+        status: existingBlock ? status : status,
+        iteration: asOptionalNumber(payload.iteration),
+        seq: asOptionalNumber(payload.seq),
+        command: asOptionalText(payload.command) || existingBlock?.command,
+        commandSpec: asOptionalObject(payload.command_spec || payload.commandSpec) || existingBlock?.commandSpec,
+        stdout: asOptionalText(payload.stdout) || existingBlock?.stdout,
+        evidence: Array.isArray(payload.evidence)
+          ? payload.evidence.map((e: unknown) => asText(e).trim()).filter(Boolean)
+          : existingBlock?.evidence,
+        timestamp,
+        collapsed: existingBlock?.collapsed ?? (status !== 'completed'),
+      };
+
+      if (typeof existingIndex === 'number' && existingBlock) {
+        blocks[existingIndex] = nextBlock;
+      } else {
+        skillBlockIndexByStepId.set(blockKey, blocks.length);
         blocks.push(nextBlock);
       }
       return;

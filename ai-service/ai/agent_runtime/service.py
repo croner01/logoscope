@@ -1038,7 +1038,139 @@ class AgentRuntimeService:
                 "text": "运行已创建，已完成基础上下文初始化。",
             },
         )
+
+        # ai-runtime-lab: emit skill selection events when lab profile is active
+        if _as_str(safe_context.get("runtime_profile")) == _AI_RUNTIME_LAB_PROFILE:
+            self._emit_skill_selection_events(run, safe_context)
+
         return run
+
+    def _emit_skill_selection_events(
+        self,
+        run: AgentRun,
+        context: Dict[str, Any],
+    ) -> None:
+        """
+        Emit skill_matched and skill_step_planned events for the ai-runtime-lab profile.
+
+        This runs synchronously in create_run() so the client sees skill selection
+        before the first command is dispatched.
+        """
+        try:
+            from ai.skills.base import SkillContext
+            from ai.skills.matcher import (
+                build_skill_catalog_for_prompt,
+                extract_high_confidence_skills,
+                get_skill_selection_summary,
+            )
+
+            skill_ctx = SkillContext.from_dict({
+                **context,
+                "question": run.question,
+            })
+            matched_skills = extract_high_confidence_skills(skill_ctx, threshold=0.1, max_skills=3)
+
+            if not matched_skills:
+                self.append_event(
+                    run.run_id,
+                    event_protocol.REASONING_STEP,
+                    {
+                        "step_id": "skill-select-0",
+                        "phase": "planning",
+                        "title": "技能选择",
+                        "status": "info",
+                        "iteration": 0,
+                    },
+                )
+                self.append_event(
+                    run.run_id,
+                    event_protocol.REASONING_SUMMARY_DELTA,
+                    {
+                        "step_id": "skill-select-0",
+                        "phase": "planning",
+                        "text": "当前上下文未匹配到专项诊断技能，将使用通用分析流程。",
+                    },
+                )
+                return
+
+            skill_names = [s.name for s in matched_skills]
+            summary = get_skill_selection_summary(skill_ctx, skill_names)
+
+            # Emit skill_matched event
+            self.append_event(
+                run.run_id,
+                event_protocol.SKILL_MATCHED,
+                {
+                    "selected_skills": [
+                        {
+                            "name": s.name,
+                            "display_name": s.display_name,
+                            "description": s.description,
+                            "risk_level": s.risk_level,
+                        }
+                        for s in matched_skills
+                    ],
+                    "summary": summary,
+                },
+            )
+
+            # Emit reasoning step for the selection
+            self.append_event(
+                run.run_id,
+                event_protocol.REASONING_STEP,
+                {
+                    "step_id": "skill-select-0",
+                    "phase": "planning",
+                    "title": f"已选择 {len(matched_skills)} 个诊断技能",
+                    "status": "success",
+                    "iteration": 0,
+                },
+            )
+            self.append_event(
+                run.run_id,
+                event_protocol.REASONING_SUMMARY_DELTA,
+                {
+                    "step_id": "skill-select-0",
+                    "phase": "planning",
+                    "text": summary,
+                },
+            )
+
+            # Emit step planned events for each skill's steps
+            step_seq = 1
+            for skill in matched_skills:
+                try:
+                    steps = skill.plan_steps(skill_ctx)
+                except Exception:
+                    continue
+                for step in steps:
+                    self.append_event(
+                        run.run_id,
+                        event_protocol.SKILL_STEP_PLANNED,
+                        {
+                            "skill_name": skill.name,
+                            "skill_display_name": skill.display_name,
+                            "step_id": step.step_id,
+                            "title": step.title,
+                            "purpose": step.purpose,
+                            "seq": step_seq,
+                        },
+                    )
+                    step_seq += 1
+
+            # Persist selected skills in run summary
+            summary_json = dict(run.summary_json or {})
+            summary_json["selected_skills"] = skill_names
+            summary_json["skill_step_count"] = step_seq - 1
+            run.summary_json = summary_json
+            run.updated_at = utc_now_iso()
+            self.store.save_run(run)
+
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to emit skill selection events for run_id=%s", run.run_id
+            )
 
     def get_run(self, run_id: str, *, fresh: bool = False) -> Optional[AgentRun]:
         return self.store.get_run(run_id, fresh=fresh)
