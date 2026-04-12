@@ -44,6 +44,18 @@ def test_non_executable_templates_use_anchor_window_when_available():
                 "purpose": "query_log",
                 "executable": False,
             },
+            {
+                "id": "act-template-process-001",
+                "title": "检查 clickhouse 当前进程",
+                "purpose": "running process",
+                "executable": False,
+            },
+            {
+                "id": "act-template-metric-001",
+                "title": "检查 clickhouse 后台指标",
+                "purpose": "metric merge",
+                "executable": False,
+            },
         ],
         analysis_context={
             "namespace": "islap",
@@ -51,11 +63,13 @@ def test_non_executable_templates_use_anchor_window_when_available():
             "source_log_timestamp": "2026-04-11T13:03:33Z",
             "request_flow_window_minutes": 5,
         },
-        max_items=3,
+        max_items=5,
     )
     assert any("--since-time=2026-04-11T12:58:33Z" in item for item in templates)
     assert any("toDateTime64('2026-04-11T12:58:33Z', 9, 'UTC')" in item for item in templates)
     assert any("toDateTime64('2026-04-11T13:08:33Z', 9, 'UTC')" in item for item in templates)
+    assert any("FROM system.processes" in item and "evidence_window_start" in item for item in templates)
+    assert any("FROM system.metrics" in item and "evidence_window_end" in item for item in templates)
 
 
 def test_structured_template_actions_keep_stable_id_and_skip_existing_command():
@@ -1137,6 +1151,72 @@ def test_followup_react_loop_emits_explicit_no_candidate_summary_when_gaps_unmat
     ]
     assert any("且暂无可执行候选命令" in item for item in summary_titles)
     assert any("建议先补全并执行" in item for item in summary_details)
+
+
+def test_followup_react_loop_template_generation_message_reflects_manual_mode(monkeypatch):
+    monkeypatch.setenv("AI_FOLLOWUP_REACT_MAX_ITERATIONS", "1")
+
+    events = []
+
+    async def _emit(event_name: str, payload: dict):
+        events.append((event_name, payload))
+
+    async def _fake_run_followup_readonly_auto_exec(**kwargs):
+        assert kwargs.get("allow_auto_exec_readonly") is False
+        return []
+
+    monkeypatch.setattr(
+        "ai.followup_orchestration_helpers._run_followup_readonly_auto_exec",
+        _fake_run_followup_readonly_auto_exec,
+    )
+
+    async def _run():
+        return await _run_followup_auto_exec_react_loop(
+            session_id="sess-react-template-manual-001",
+            message_id="msg-react-template-manual-001",
+            actions=[
+                {
+                    "id": "rf-clickhouse-gap-001",
+                    "source": "reflection",
+                    "title": "检查 clickhouse 慢查询",
+                    "purpose": "补齐 clickhouse query_log 证据",
+                    "command": "",
+                    "command_type": "unknown",
+                    "executable": False,
+                    "reason": "missing_structured_spec",
+                }
+            ],
+            analysis_context={"namespace": "islap", "service_name": "query-service"},
+            run_blocking=None,
+            build_react_loop_fn=lambda **kwargs: {
+                "execute": {
+                    "observed_actions": len(kwargs.get("action_observations") or []),
+                    "executed_success": 0,
+                    "executed_failed": 0,
+                },
+                "observe": {"confidence": 0.0, "unresolved_actions": 1},
+                "replan": {"needed": True, "next_actions": ["手动执行模板命令"]},
+                "summary": "",
+            },
+            allow_auto_exec_readonly=False,
+            executed_commands=set(),
+            initial_evidence_gaps=["clickhouse query_log"],
+            initial_summary="",
+            emit_iteration_thoughts=True,
+            event_callback=_emit,
+            logger=None,
+        )
+
+    result = asyncio.run(_run())
+    assert result["action_observations"] == []
+    action_details = [
+        str(payload.get("detail") or "")
+        for event_name, payload in events
+        if event_name == "thought" and str(payload.get("title") or "").startswith("第 1 轮：使用结构化模板命令")
+    ]
+    assert action_details
+    assert any("当前运行已禁用只读自动执行" in detail for detail in action_details)
+    assert not any("并自动执行" in detail for detail in action_details)
 
 
 def test_followup_react_loop_summary_skips_low_trust_answer_command_template(monkeypatch):

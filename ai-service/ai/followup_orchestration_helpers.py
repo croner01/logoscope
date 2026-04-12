@@ -165,18 +165,47 @@ def _build_clickhouse_query_log_evidence_command(
     )
 
 
-def _build_clickhouse_processes_evidence_command(*, namespace: str) -> str:
+def _build_clickhouse_processes_evidence_command(
+    *,
+    namespace: str,
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> str:
+    if window_start_iso and window_end_iso:
+        return (
+            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "\"SELECT "
+            f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
+            f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
+            "now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
+            "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
+        )
     return (
         f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
-        "\"SELECT now() AS ts, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
+        "\"SELECT now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
         "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
     )
 
 
-def _build_clickhouse_metrics_evidence_command(*, namespace: str) -> str:
+def _build_clickhouse_metrics_evidence_command(
+    *,
+    namespace: str,
+    window_start_iso: str = "",
+    window_end_iso: str = "",
+) -> str:
+    if window_start_iso and window_end_iso:
+        return (
+            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "\"SELECT "
+            f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
+            f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
+            "now() AS collected_at, metric, value FROM system.metrics "
+            "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
+            "ORDER BY metric\""
+        )
     return (
         f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
-        "\"SELECT metric, value FROM system.metrics "
+        "\"SELECT now() AS collected_at, metric, value FROM system.metrics "
         "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
         "ORDER BY metric\""
     )
@@ -398,10 +427,22 @@ def _build_non_executable_command_templates(
             _append_context_defaults()
             continue
         if any(token in text_blob for token in ["进程", "process", "running query", "长时间运行"]):
-            _append(_build_clickhouse_processes_evidence_command(namespace=namespace))
+            _append(
+                _build_clickhouse_processes_evidence_command(
+                    namespace=namespace,
+                    window_start_iso=window_start_iso,
+                    window_end_iso=window_end_iso,
+                )
+            )
             continue
         if any(token in text_blob for token in ["指标", "metric", "merge", "mutation", "后台任务"]):
-            _append(_build_clickhouse_metrics_evidence_command(namespace=namespace))
+            _append(
+                _build_clickhouse_metrics_evidence_command(
+                    namespace=namespace,
+                    window_start_iso=window_start_iso,
+                    window_end_iso=window_end_iso,
+                )
+            )
             continue
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append(
@@ -649,6 +690,17 @@ def _resolve_followup_auto_exec_timeout_seconds() -> int:
             ),
         ),
     )
+
+
+def _describe_template_action_execution_mode(*, allow_auto_exec_readonly: bool) -> str:
+    """Describe how generated template actions will be handled in the current run."""
+    if not allow_auto_exec_readonly:
+        return "当前运行已禁用只读自动执行，请手动执行或开启自动执行后继续。"
+    if not _resolve_followup_auto_exec_readonly_enabled():
+        return "系统当前已关闭只读自动执行，请手动执行模板命令后继续。"
+    if not _is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
+        return "命令执行链路当前不可用，请手动执行模板命令后继续。"
+    return "已进入自动执行链路。"
 
 
 def _require_spec_for_repair_enabled() -> bool:
@@ -1701,6 +1753,9 @@ async def _run_followup_auto_exec_react_loop(
                 working_actions.extend(template_actions)
                 iteration_actions = template_actions
                 if emit_iteration_thoughts:
+                    execution_mode_detail = _describe_template_action_execution_mode(
+                        allow_auto_exec_readonly=allow_auto_exec_readonly
+                    )
                     await _emit_followup_event(
                         event_callback,
                         "thought",
@@ -1708,7 +1763,8 @@ async def _run_followup_auto_exec_react_loop(
                             "phase": "action",
                             "title": f"第 {iteration} 轮：使用结构化模板命令自动补证据",
                             "detail": (
-                                "当前计划缺少可直接执行候选，已从重规划模板生成结构化只读命令并自动执行；"
+                                "当前计划缺少可直接执行候选，已从重规划模板生成结构化只读命令；"
+                                f"{execution_mode_detail}"
                                 f"本轮模板命令 {len(template_actions)} 条。"
                             ),
                             "status": "info",

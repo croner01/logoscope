@@ -226,7 +226,7 @@ def test_create_ai_run_followup_mode_emits_final_answer_events(monkeypatch):
     assert "assistant_message_finalized" in event_types
     assert "run_finished" in event_types
     final_event = next(item for item in events["events"] if item["event_type"] == "assistant_message_finalized")
-    assert final_event["payload"]["content"] == "定位到问题根因。"
+    assert "定位到问题根因。" in final_event["payload"]["content"]
     assert final_event["payload"]["metadata"]["analysis_method"] == "langchain"
 
 
@@ -310,6 +310,151 @@ def test_create_ai_run_followup_mode_blocks_when_react_replan_needed(monkeypatch
     run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
     assert run_finished_payload["status"] == "blocked"
     assert run_finished_payload["blocked_reason"] == "react_replan_needed"
+
+
+def test_create_ai_run_followup_mode_blocks_when_planning_incomplete(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "当前命令计划大多不可执行。"})
+        return {
+            "analysis_session_id": "sess-followup-planning-001",
+            "conversation_id": "conv-followup-planning-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "已识别到证据缺口，但当前命令计划大多不可执行。",
+            "references": [],
+            "actions": [{"id": "act-plan-001", "title": "补齐结构化命令"}],
+            "action_observations": [],
+            "react_loop": {
+                "phase": "replan",
+                "plan": {
+                    "total_actions": 4,
+                    "executable_actions": 1,
+                    "spec_blocked_actions": 3,
+                },
+                "plan_quality": {
+                    "planning_blocked": True,
+                    "planning_blocked_reason": "当前命令计划中有 3/4 条动作仍不可执行，应先修复结构化命令再继续闭环。",
+                    "spec_blocked_ratio": 0.75,
+                },
+                "replan": {
+                    "needed": True,
+                    "items": [],
+                    "next_actions": ["当前命令计划中有 3/4 条动作仍不可执行，应先修复结构化命令再继续闭环。"],
+                },
+                "observe": {"coverage": 0.0, "confidence": 0.2},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-followup-planning-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-followup-planning-001",
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "blocked":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+
+    assert fetched["run"]["status"] == "blocked"
+    assert fetched["run"]["summary_json"]["blocked_reason"] == "planning_incomplete"
+    gate_decision = fetched["run"]["summary_json"]["gate_decision"]
+    assert gate_decision.get("reason") == "planning_incomplete"
+    assert gate_decision.get("metrics", {}).get("planning_blocked") is True
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "blocked"
+    assert run_finished_payload["blocked_reason"] == "planning_incomplete"
+
+
+def test_create_ai_run_followup_mode_softens_answer_when_evidence_is_weak(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "已初步定位问题。"})
+        return {
+            "analysis_session_id": "sess-followup-soften-001",
+            "conversation_id": "conv-followup-soften-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "结论：这是一个重复出现的系统性性能问题，而非偶发事件。\n根因分析：query-service 频繁触发 system.tables 元数据查询。",
+            "fault_summary": "query-service 已确认存在系统性慢查询问题",
+            "references": [],
+            "actions": [{"id": "act-soften-001", "title": "补查日志"}],
+            "action_observations": [],
+            "react_loop": {
+                "phase": "replan",
+                "execute": {"observed_actions": 0, "executed_success": 0, "executed_failed": 0},
+                "observe": {"coverage": 0.0, "evidence_coverage": 0.0, "confidence": 0.25, "final_confidence": 0.28},
+                "replan": {"needed": True, "items": [], "next_actions": ["继续补证据"]},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-followup-soften-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-followup-soften-001",
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "blocked":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+
+    final_event = next(item for item in events["events"] if item["event_type"] == "assistant_message_finalized")
+    content = final_event["payload"]["content"]
+    assert "当前仅为待验证判断" in content
+    assert "初步判断（待验证）" in content
+    assert "待验证假设：" in content
+    assert "仍需继续验证" in content
+    assert "当前仅为待验证判断" in fetched["run"]["summary_json"]["fault_summary"]
 
 
 def test_create_ai_run_followup_mode_blocks_when_evidence_incomplete(monkeypatch):
