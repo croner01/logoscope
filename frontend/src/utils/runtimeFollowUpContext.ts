@@ -60,6 +60,11 @@ export function buildRuntimeFollowUpContext(params: {
   sourceLogTimestamp?: string | null;
   sourceTraceId?: string | null;
   sourceRequestId?: string | null;
+  followupRelatedAnchorUtc?: string | null;
+  followupRelatedStartTime?: string | null;
+  followupRelatedEndTime?: string | null;
+  evidenceWindowStart?: string | null;
+  evidenceWindowEnd?: string | null;
   followupRelatedLogs?: unknown[] | null;
   followupRelatedLogCount?: number | null;
   followupRelatedMeta?: Record<string, unknown> | null;
@@ -83,17 +88,30 @@ export function buildRuntimeFollowUpContext(params: {
   );
   const relatedLogAnchorTimestamp = firstText(
     followupRelatedMeta.related_log_anchor_timestamp,
+    params.followupRelatedAnchorUtc,
     followupRelatedMeta.followup_related_anchor_utc,
     normalizedSourceLogTimestamp,
   );
   const requestFlowWindowStart = firstText(
     followupRelatedMeta.request_flow_window_start,
+    params.followupRelatedStartTime,
     followupRelatedMeta.followup_related_start_time,
+    params.evidenceWindowStart,
     followupRelatedMeta.evidence_window_start,
   );
   const requestFlowWindowEnd = firstText(
     followupRelatedMeta.request_flow_window_end,
+    params.followupRelatedEndTime,
     followupRelatedMeta.followup_related_end_time,
+    params.evidenceWindowEnd,
+    followupRelatedMeta.evidence_window_end,
+  );
+  const evidenceWindowStart = firstText(
+    params.evidenceWindowStart,
+    followupRelatedMeta.evidence_window_start,
+  );
+  const evidenceWindowEnd = firstText(
+    params.evidenceWindowEnd,
     followupRelatedMeta.evidence_window_end,
   );
 
@@ -110,6 +128,20 @@ export function buildRuntimeFollowUpContext(params: {
     source_trace_id: firstText(params.sourceTraceId) || undefined,
     source_request_id: firstText(params.sourceRequestId) || undefined,
     ...followupRelatedMeta,
+    followup_related_anchor_utc: firstText(
+      params.followupRelatedAnchorUtc,
+      followupRelatedMeta.followup_related_anchor_utc,
+    ) || undefined,
+    followup_related_start_time: firstText(
+      params.followupRelatedStartTime,
+      followupRelatedMeta.followup_related_start_time,
+    ) || undefined,
+    followup_related_end_time: firstText(
+      params.followupRelatedEndTime,
+      followupRelatedMeta.followup_related_end_time,
+    ) || undefined,
+    evidence_window_start: evidenceWindowStart || undefined,
+    evidence_window_end: evidenceWindowEnd || undefined,
     related_log_anchor_timestamp: relatedLogAnchorTimestamp || undefined,
     request_flow_window_start: requestFlowWindowStart || undefined,
     request_flow_window_end: requestFlowWindowEnd || undefined,
