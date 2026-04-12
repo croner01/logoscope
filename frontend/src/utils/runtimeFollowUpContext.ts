@@ -75,6 +75,7 @@ export function buildRuntimeFollowUpContext(params: {
   followupRelatedMeta?: Record<string, unknown> | null;
 }): Record<string, unknown> {
   const followupRelatedMeta = compactRecord(asRecord(params.followupRelatedMeta));
+  const resultRecord = compactRecord(asRecord(params.result));
   const normalizedSourceLogTimestamp = firstText(
     params.sourceLogTimestamp,
     followupRelatedMeta.source_log_timestamp,
@@ -88,6 +89,7 @@ export function buildRuntimeFollowUpContext(params: {
   const canonicalRequestId = firstText(
     params.detectedRequestId,
     params.sourceRequestId,
+    resultRecord.request_id,
     followupRelatedMeta.request_id,
     followupRelatedMeta.followup_related_request_id,
   );
@@ -103,6 +105,7 @@ export function buildRuntimeFollowUpContext(params: {
     params.followupRelatedStartTime,
     params.evidence_window_start,
     params.evidenceWindowStart,
+    resultRecord.request_flow_window_start,
     followupRelatedMeta.request_flow_window_start,
     followupRelatedMeta.followup_related_start_time,
     followupRelatedMeta.evidence_window_start,
@@ -112,6 +115,7 @@ export function buildRuntimeFollowUpContext(params: {
     params.followupRelatedEndTime,
     params.evidence_window_end,
     params.evidenceWindowEnd,
+    resultRecord.request_flow_window_end,
     followupRelatedMeta.request_flow_window_end,
     followupRelatedMeta.followup_related_end_time,
     followupRelatedMeta.evidence_window_end,
@@ -119,11 +123,13 @@ export function buildRuntimeFollowUpContext(params: {
   const evidenceWindowStart = firstText(
     params.evidence_window_start,
     params.evidenceWindowStart,
+    resultRecord.request_flow_window_start,
     followupRelatedMeta.evidence_window_start,
   );
   const evidenceWindowEnd = firstText(
     params.evidence_window_end,
     params.evidenceWindowEnd,
+    resultRecord.request_flow_window_end,
     followupRelatedMeta.evidence_window_end,
   );
 
