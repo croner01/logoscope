@@ -60,6 +60,11 @@ export function buildRuntimeFollowUpContext(params: {
   sourceLogTimestamp?: string | null;
   sourceTraceId?: string | null;
   sourceRequestId?: string | null;
+  followup_related_anchor_utc?: string | null;
+  followup_related_start_time?: string | null;
+  followup_related_end_time?: string | null;
+  evidence_window_start?: string | null;
+  evidence_window_end?: string | null;
   followupRelatedAnchorUtc?: string | null;
   followupRelatedStartTime?: string | null;
   followupRelatedEndTime?: string | null;
@@ -88,29 +93,36 @@ export function buildRuntimeFollowUpContext(params: {
   );
   const relatedLogAnchorTimestamp = firstText(
     followupRelatedMeta.related_log_anchor_timestamp,
+    params.followup_related_anchor_utc,
     params.followupRelatedAnchorUtc,
     followupRelatedMeta.followup_related_anchor_utc,
     normalizedSourceLogTimestamp,
   );
   const requestFlowWindowStart = firstText(
     followupRelatedMeta.request_flow_window_start,
+    params.followup_related_start_time,
     params.followupRelatedStartTime,
     followupRelatedMeta.followup_related_start_time,
+    params.evidence_window_start,
     params.evidenceWindowStart,
     followupRelatedMeta.evidence_window_start,
   );
   const requestFlowWindowEnd = firstText(
     followupRelatedMeta.request_flow_window_end,
+    params.followup_related_end_time,
     params.followupRelatedEndTime,
     followupRelatedMeta.followup_related_end_time,
+    params.evidence_window_end,
     params.evidenceWindowEnd,
     followupRelatedMeta.evidence_window_end,
   );
   const evidenceWindowStart = firstText(
+    params.evidence_window_start,
     params.evidenceWindowStart,
     followupRelatedMeta.evidence_window_start,
   );
   const evidenceWindowEnd = firstText(
+    params.evidence_window_end,
     params.evidenceWindowEnd,
     followupRelatedMeta.evidence_window_end,
   );
@@ -129,14 +141,17 @@ export function buildRuntimeFollowUpContext(params: {
     source_request_id: firstText(params.sourceRequestId) || undefined,
     ...followupRelatedMeta,
     followup_related_anchor_utc: firstText(
+      params.followup_related_anchor_utc,
       params.followupRelatedAnchorUtc,
       followupRelatedMeta.followup_related_anchor_utc,
     ) || undefined,
     followup_related_start_time: firstText(
+      params.followup_related_start_time,
       params.followupRelatedStartTime,
       followupRelatedMeta.followup_related_start_time,
     ) || undefined,
     followup_related_end_time: firstText(
+      params.followup_related_end_time,
       params.followupRelatedEndTime,
       followupRelatedMeta.followup_related_end_time,
     ) || undefined,
