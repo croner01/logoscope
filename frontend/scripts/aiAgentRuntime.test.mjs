@@ -345,6 +345,84 @@ test('buildRuntimeFollowUpContext carries explicit evidence window and anchor al
   assert.equal(context.evidence_window_end, '2026-04-12T13:37:14Z');
 });
 
+test('buildRuntimeFollowUpContext prefers current inputs over stale metadata and preserves core normalized fields', () => {
+  const context = buildRuntimeFollowUpContext({
+    analysisSessionId: 'sess-current',
+    analysisType: 'trace',
+    serviceName: 'query-service',
+    inputText: 'CURRENT input text',
+    question: 'CURRENT question',
+    llmInfo: { method: 'llm-current' },
+    result: { overview: { problem: 'current-problem' } },
+    detectedTraceId: 'trace-current-detected',
+    detectedRequestId: 'req-current-detected',
+    sourceLogTimestamp: '2026-04-12T13:31:14Z',
+    sourceTraceId: 'trace-current-source',
+    sourceRequestId: 'req-current-source',
+    followup_related_anchor_utc: '2026-04-12T13:31:14Z',
+    followup_related_start_time: '2026-04-12T13:26:14Z',
+    followup_related_end_time: '2026-04-12T13:36:14Z',
+    evidence_window_start: '2026-04-12T13:25:14Z',
+    evidence_window_end: '2026-04-12T13:37:14Z',
+    followupRelatedMeta: {
+      agent_mode: 'stale-agent-mode',
+      session_id: 'sess-stale',
+      input_text: 'STALE input text',
+      question: 'STALE question',
+      llm_info: { method: 'llm-stale' },
+      result: { overview: { problem: 'stale-problem' } },
+      source_log_timestamp: '1999-01-01T00:00:00Z',
+      source_trace_id: 'trace-stale-source',
+      source_request_id: 'req-stale-source',
+      trace_id: 'trace-stale-meta',
+      request_id: 'req-stale-meta',
+      followup_related_anchor_utc: '1999-01-01T00:01:00Z',
+      followup_related_start_time: '1999-01-01T00:02:00Z',
+      followup_related_end_time: '1999-01-01T00:03:00Z',
+      evidence_window_start: '1999-01-01T00:04:00Z',
+      evidence_window_end: '1999-01-01T00:05:00Z',
+    },
+  });
+
+  assert.equal(context.agent_mode, 'request_flow');
+  assert.equal(context.session_id, 'sess-current');
+  assert.equal(context.input_text, 'CURRENT input text');
+  assert.equal(context.question, 'CURRENT question');
+  assert.deepEqual(context.llm_info, { method: 'llm-current' });
+  assert.deepEqual(context.result, { overview: { problem: 'current-problem' } });
+  assert.equal(context.source_log_timestamp, '2026-04-12T13:31:14Z');
+  assert.equal(context.source_trace_id, 'trace-current-source');
+  assert.equal(context.source_request_id, 'req-current-source');
+  assert.equal(context.trace_id, 'trace-current-detected');
+  assert.equal(context.request_id, 'req-current-detected');
+  assert.equal(context.related_log_anchor_timestamp, '2026-04-12T13:31:14Z');
+  assert.equal(context.request_flow_window_start, '2026-04-12T13:26:14Z');
+  assert.equal(context.request_flow_window_end, '2026-04-12T13:36:14Z');
+  assert.equal(context.evidence_window_start, '2026-04-12T13:25:14Z');
+  assert.equal(context.evidence_window_end, '2026-04-12T13:37:14Z');
+});
+
+test('buildRuntimeAnalysisContext clears stale downgrade markers when trace mode later resolves cleanly', () => {
+  const context = buildRuntimeAnalysisContext({
+    analysisType: 'trace',
+    traceId: 'trace-123',
+    serviceName: 'query-service',
+    baseContext: {
+      agent_mode: 'followup_analysis_runtime',
+      analysis_type_original: 'trace',
+      analysis_type_downgraded: true,
+      analysis_type_downgrade_reason: 'trace_id_missing',
+    },
+  });
+
+  assert.deepEqual(context, {
+    agent_mode: 'followup_analysis_runtime',
+    analysis_type: 'trace',
+    trace_id: 'trace-123',
+    service_name: 'query-service',
+  });
+});
+
 test('runtime view treats blocked as terminal status', () => {
   assert.equal(isTerminalAgentRunStatus('blocked'), true);
   assert.equal(isTerminalAgentRunStatus('completed'), true);

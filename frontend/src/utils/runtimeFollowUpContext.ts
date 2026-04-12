@@ -80,40 +80,40 @@ export function buildRuntimeFollowUpContext(params: {
     followupRelatedMeta.source_log_timestamp,
   );
   const canonicalTraceId = firstText(
-    followupRelatedMeta.trace_id,
     params.detectedTraceId,
     params.sourceTraceId,
+    followupRelatedMeta.trace_id,
     followupRelatedMeta.followup_related_trace_id,
   );
   const canonicalRequestId = firstText(
-    followupRelatedMeta.request_id,
     params.detectedRequestId,
     params.sourceRequestId,
+    followupRelatedMeta.request_id,
     followupRelatedMeta.followup_related_request_id,
   );
   const relatedLogAnchorTimestamp = firstText(
-    followupRelatedMeta.related_log_anchor_timestamp,
     params.followup_related_anchor_utc,
     params.followupRelatedAnchorUtc,
-    followupRelatedMeta.followup_related_anchor_utc,
     normalizedSourceLogTimestamp,
+    followupRelatedMeta.related_log_anchor_timestamp,
+    followupRelatedMeta.followup_related_anchor_utc,
   );
   const requestFlowWindowStart = firstText(
-    followupRelatedMeta.request_flow_window_start,
     params.followup_related_start_time,
     params.followupRelatedStartTime,
-    followupRelatedMeta.followup_related_start_time,
     params.evidence_window_start,
     params.evidenceWindowStart,
+    followupRelatedMeta.request_flow_window_start,
+    followupRelatedMeta.followup_related_start_time,
     followupRelatedMeta.evidence_window_start,
   );
   const requestFlowWindowEnd = firstText(
-    followupRelatedMeta.request_flow_window_end,
     params.followup_related_end_time,
     params.followupRelatedEndTime,
-    followupRelatedMeta.followup_related_end_time,
     params.evidence_window_end,
     params.evidenceWindowEnd,
+    followupRelatedMeta.request_flow_window_end,
+    followupRelatedMeta.followup_related_end_time,
     followupRelatedMeta.evidence_window_end,
   );
   const evidenceWindowStart = firstText(
@@ -128,6 +128,7 @@ export function buildRuntimeFollowUpContext(params: {
   );
 
   const baseContext: Record<string, unknown> = {
+    ...followupRelatedMeta,
     session_id: firstText(params.analysisSessionId) || undefined,
     input_text: String(params.inputText ?? ''),
     question: firstText(params.question) || undefined,
@@ -139,7 +140,6 @@ export function buildRuntimeFollowUpContext(params: {
     source_log_timestamp: normalizedSourceLogTimestamp || undefined,
     source_trace_id: firstText(params.sourceTraceId) || undefined,
     source_request_id: firstText(params.sourceRequestId) || undefined,
-    ...followupRelatedMeta,
     followup_related_anchor_utc: firstText(
       params.followup_related_anchor_utc,
       params.followupRelatedAnchorUtc,
