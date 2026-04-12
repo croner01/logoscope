@@ -53,7 +53,14 @@ export function buildRuntimeAnalysisContext(params: {
     baseContext.analysis_type_downgrade_reason = resolved.reason;
     delete baseContext.trace_id;
   } else if (resolved.resolvedType === 'trace' && normalizedTraceId) {
+    delete baseContext.analysis_type_original;
+    delete baseContext.analysis_type_downgraded;
+    delete baseContext.analysis_type_downgrade_reason;
     baseContext.trace_id = normalizedTraceId;
+  } else {
+    delete baseContext.analysis_type_original;
+    delete baseContext.analysis_type_downgraded;
+    delete baseContext.analysis_type_downgrade_reason;
   }
 
   if (normalizedServiceName) {
