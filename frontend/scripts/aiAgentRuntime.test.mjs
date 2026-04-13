@@ -6,6 +6,8 @@ import {
   parseAgentRuntimeEventBlock,
   takeNextSSEEventBlock,
 } from '../.tmp-tests/utils/aiAgentRuntime.js';
+import { buildRuntimeAnalysisContext } from '../.tmp-tests/utils/runtimeAnalysisMode.js';
+import { buildRuntimeFollowUpContext } from '../.tmp-tests/utils/runtimeFollowUpContext.js';
 import {
   buildHistoryTurns,
   filterRuntimeTurnsByThread,
@@ -55,6 +57,52 @@ test('takeNextSSEEventBlock splits stream buffer incrementally', () => {
   assert.equal(first.block, 'event: x\ndata: {"a":1}');
   const second = takeNextSSEEventBlock(first.rest);
   assert.equal(second.block, 'event: y\ndata: {"b":2}');
+});
+
+test('buildRuntimeAnalysisContext clears dirty trace_id after downgrade', () => {
+  const context = buildRuntimeAnalysisContext({
+    analysisType: 'trace',
+    traceId: '   ',
+    serviceName: 'query-service',
+    baseContext: { agent_mode: 'followup_analysis_runtime' },
+  });
+
+  assert.deepEqual(context, {
+    agent_mode: 'followup_analysis_runtime',
+    analysis_type: 'log',
+    analysis_type_original: 'trace',
+    analysis_type_downgraded: true,
+    analysis_type_downgrade_reason: 'trace_id_missing',
+    service_name: 'query-service',
+  });
+});
+
+test('buildRuntimeFollowUpContext carries explicit evidence window and anchor aliases', () => {
+  const context = buildRuntimeFollowUpContext({
+    analysisSessionId: 'sess-001',
+    analysisType: 'log',
+    serviceName: 'query-service',
+    inputText: 'ERROR request failed',
+    question: '为什么失败',
+    llmInfo: { method: 'llm' },
+    result: { overview: { problem: 'clickhouse_query_error' } },
+    detectedTraceId: '',
+    detectedRequestId: '',
+    sourceLogTimestamp: '2026-04-12T13:31:14Z',
+    sourceTraceId: '',
+    sourceRequestId: '',
+    followupRelatedMeta: {
+      followup_related_anchor_utc: '2026-04-12T13:31:14Z',
+      followup_related_start_time: '2026-04-12T13:26:14Z',
+      followup_related_end_time: '2026-04-12T13:36:14Z',
+      followup_related_request_id: 'req-123',
+    },
+  });
+
+  assert.equal(context.request_id, 'req-123');
+  assert.equal(context.related_log_anchor_timestamp, '2026-04-12T13:31:14Z');
+  assert.equal(context.request_flow_window_start, '2026-04-12T13:26:14Z');
+  assert.equal(context.request_flow_window_end, '2026-04-12T13:36:14Z');
 });
 
 test('normalizeAgentRunEventEnvelope rejects invalid payloads', () => {
