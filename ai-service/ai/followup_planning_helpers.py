@@ -167,8 +167,24 @@ def _resolve_followup_evidence_window(
     default_minutes: int = 15,
 ) -> Dict[str, str]:
     context_payload = analysis_context if isinstance(analysis_context, dict) else {}
-    explicit_start = _parse_optional_iso_datetime(context_payload.get("request_flow_window_start"))
-    explicit_end = _parse_optional_iso_datetime(context_payload.get("request_flow_window_end"))
+    
+    def _parse_first_valid_iso(*candidates: Any) -> Optional[datetime]:
+        for candidate in candidates:
+            parsed = _parse_optional_iso_datetime(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+
+    explicit_start = _parse_first_valid_iso(
+        context_payload.get("request_flow_window_start"),
+        context_payload.get("followup_related_start_time"),
+        context_payload.get("evidence_window_start"),
+    )
+    explicit_end = _parse_first_valid_iso(
+        context_payload.get("request_flow_window_end"),
+        context_payload.get("followup_related_end_time"),
+        context_payload.get("evidence_window_end"),
+    )
     if explicit_start and explicit_end and explicit_start <= explicit_end:
         return {
             "start_iso": _to_utc_iso_text(explicit_start),
@@ -178,6 +194,7 @@ def _resolve_followup_evidence_window(
     anchor_candidates = [
         context_payload.get("source_log_timestamp"),
         context_payload.get("related_log_anchor_timestamp"),
+        context_payload.get("followup_related_anchor_utc"),
         context_payload.get("timestamp"),
     ]
     anchor_dt: Optional[datetime] = None
@@ -1297,13 +1314,13 @@ def _build_followup_react_loop(
             or spec_blocked_total > 0
         )
     )
+    generated_ready_templates = 0
     if no_executable_query_candidates:
         hint_lines = _build_non_executable_query_command_hints(
             safe_actions,
             analysis_context=analysis_context if isinstance(analysis_context, dict) else {},
             max_items=max_next_actions,
         )
-        generated_ready_templates = 0
         for line in hint_lines:
             suggested_command = _extract_command_from_hint_line(line)
             _, suggested_command_spec = _infer_query_template_command_spec(suggested_command)
@@ -1457,12 +1474,20 @@ def _build_followup_react_loop(
             "signal_match_reason": signal_match_reason,
         }
 
+    ready_template_actions_total = sum(
+        1
+        for item in safe_actions
+        if isinstance(item, dict)
+        and bool(item.get("executable"))
+        and _as_str(item.get("source")).strip().lower() == "template_command"
+    ) + generated_ready_templates
     spec_blocked_ratio = round(spec_blocked_total / max(plan_total, 1), 2) if plan_total > 0 else 0.0
     planning_blocked = (
         plan_total > 0
         and spec_blocked_total > 0
         and spec_blocked_ratio >= 0.5
         and observed_executable_actions <= 0
+        and ready_template_actions_total <= 0
     )
     planning_blocked_reason = ""
     if planning_blocked:
@@ -1587,6 +1612,7 @@ def _build_followup_react_loop(
             "executable_actions": executable_total,
             "non_executable_query_like_actions": non_executable_query_like_total,
             "spec_blocked_actions": spec_blocked_total,
+            "ready_template_actions": ready_template_actions_total,
         },
         "plan_quality": {
             "planning_blocked": planning_blocked,

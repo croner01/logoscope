@@ -8,6 +8,7 @@ from ai.followup_planning_helpers import (
     _build_followup_react_loop,
     _build_followup_subgoals,
     _prioritize_followup_actions_with_react_memory,
+    _resolve_followup_evidence_window,
 )
 
 
@@ -901,6 +902,113 @@ def test_build_followup_react_loop_does_not_invent_temporal_or_postgres_without_
     assert all("deploy/temporal" not in item for item in next_actions)
     assert all("deploy/postgresql" not in item for item in next_actions)
     assert any("clickhouse-client --query" in item or "get pods --show-labels" in item for item in next_actions)
+
+
+def test_resolve_followup_evidence_window_supports_followup_related_aliases():
+    window = _resolve_followup_evidence_window(
+        {
+            "followup_related_anchor_utc": "2026-04-12T13:31:14Z",
+            "followup_related_start_time": "2026-04-12T13:26:14Z",
+            "followup_related_end_time": "2026-04-12T13:36:14Z",
+        }
+    )
+
+    assert window == {
+        "start_iso": "2026-04-12T13:26:14Z",
+        "end_iso": "2026-04-12T13:36:14Z",
+    }
+
+
+def test_resolve_followup_evidence_window_falls_back_to_alias_when_primary_window_is_invalid():
+    window = _resolve_followup_evidence_window(
+        {
+            "request_flow_window_start": "not-a-time",
+            "request_flow_window_end": "still-not-a-time",
+            "followup_related_start_time": "2026-04-12T13:26:14Z",
+            "followup_related_end_time": "2026-04-12T13:36:14Z",
+        }
+    )
+
+    assert window == {
+        "start_iso": "2026-04-12T13:26:14Z",
+        "end_iso": "2026-04-12T13:36:14Z",
+    }
+
+
+def test_resolve_followup_evidence_window_supports_evidence_window_aliases():
+    window = _resolve_followup_evidence_window(
+        {
+            "evidence_window_start": "2026-04-12T13:20:00Z",
+            "evidence_window_end": "2026-04-12T13:40:00Z",
+        }
+    )
+
+    assert window == {
+        "start_iso": "2026-04-12T13:20:00Z",
+        "end_iso": "2026-04-12T13:40:00Z",
+    }
+
+
+def test_build_followup_react_loop_does_not_mark_planning_incomplete_when_ready_templates_exist():
+    actions = [
+        {
+            "id": "lc-1",
+            "source": "langchain",
+            "title": "查询ClickHouse错误码241的含义",
+            "command": "",
+            "command_type": "unknown",
+            "executable": False,
+            "reason": "glued_sql_tokens",
+        },
+        {
+            "id": "tmpl-log-1",
+            "source": "template_command",
+            "title": "自动补证据命令：kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+            "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+            "command_type": "query",
+            "executable": True,
+            "reason": "structured_template_ready_for_auto_exec",
+            "evidence_window_start": "2026-04-12T13:26:14Z",
+            "evidence_window_end": "2026-04-12T13:36:14Z",
+            "command_spec": {
+                "tool": "generic_exec",
+                "args": {
+                    "command_argv": [
+                        "kubectl",
+                        "-n",
+                        "islap",
+                        "logs",
+                        "-l",
+                        "app=query-service",
+                        "--since-time=2026-04-12T13:26:14Z",
+                        "--tail=200",
+                    ],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 30,
+                },
+            },
+        },
+    ]
+
+    loop = _build_followup_react_loop(
+        actions=actions,
+        action_observations=[],
+        analysis_context={
+            "namespace": "islap",
+            "service_name": "query-service",
+            "request_flow_window_start": "2026-04-12T13:26:14Z",
+            "request_flow_window_end": "2026-04-12T13:36:14Z",
+        },
+    )
+
+    assert loop["plan_quality"]["planning_blocked"] is False
+    assert int(loop["plan"].get("ready_template_actions") or 0) >= 1
+    assert all(
+        str(item.get("reason")) != "planning_incomplete"
+        for item in loop["replan"]["items"]
+        if isinstance(item, dict)
+    )
 
 
 def test_build_followup_react_loop_ignores_low_trust_answer_command_in_templates():
