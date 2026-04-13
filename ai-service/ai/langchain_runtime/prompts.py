@@ -48,7 +48,7 @@ FOLLOWUP_USER_TEMPLATE = """问题：
 证据片段：
 {references_json}
 
-{skill_catalog}
+{skill_catalog}{project_knowledge}
 输出格式要求：
 {format_instructions}
 """
@@ -74,6 +74,15 @@ def build_skill_catalog_section(analysis_context: Dict[str, Any]) -> str:
         return ""
 
 
+def build_project_knowledge_section(analysis_context: Dict[str, Any]) -> str:
+    """Build the project knowledge section for prompt injection."""
+    safe_context = analysis_context if isinstance(analysis_context, dict) else {}
+    prompt_block = str(safe_context.get("project_knowledge_prompt") or "").strip()
+    if not prompt_block:
+        return ""
+    return f"## 项目知识（Project Knowledge）\n{prompt_block}\n\n"
+
+
 def build_followup_prompt(payload: Dict[str, Any]) -> str:
     """构建追问提示词。"""
     safe_payload = dict(payload)
@@ -81,6 +90,9 @@ def build_followup_prompt(payload: Dict[str, Any]) -> str:
     if "skill_catalog" not in safe_payload:
         analysis_context = safe_payload.get("analysis_context") or {}
         safe_payload["skill_catalog"] = build_skill_catalog_section(analysis_context)
+    if "project_knowledge" not in safe_payload:
+        analysis_context = safe_payload.get("analysis_context") or {}
+        safe_payload["project_knowledge"] = build_project_knowledge_section(analysis_context)
 
     if PromptTemplate is None:
         return FOLLOWUP_USER_TEMPLATE.format(**safe_payload)

@@ -93,6 +93,7 @@ from ai.followup_persistence_helpers import (
     _persist_followup_messages_and_history,
     _update_followup_session_summary,
 )
+from ai.project_knowledge_pack import select_project_knowledge
 from ai.kb_route_helpers import (
     _build_kb_search_request_context,
     _build_kb_search_response,
@@ -830,6 +831,11 @@ def _build_followup_request_from_ai_run(
     if isinstance(input_payload, dict):
         input_question = _as_str(input_payload.get("question")).strip()
     question = _as_str(getattr(run, "question", "")).strip() or input_question
+    analysis_context = dict(analysis_context)
+    analysis_context.setdefault("question", question)
+    knowledge_selection = select_project_knowledge(analysis_context)
+    analysis_context.update(knowledge_selection)
+    run.context_json = analysis_context
     return FollowUpRequest(
         question=question,
         analysis_session_id=str(getattr(run, "session_id", "") or "").strip(),
@@ -846,6 +852,27 @@ def _build_followup_request_from_ai_run(
         history=normalized_history,
         reset=_as_runtime_bool(safe_runtime_options.get("reset"), False),
     )
+
+
+def _build_project_knowledge_summary_updates(analysis_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    safe_context = analysis_context if isinstance(analysis_context, dict) else {}
+    updates = {
+        "knowledge_pack_version": _as_str(safe_context.get("knowledge_pack_version")),
+        "knowledge_primary_service": _as_str(safe_context.get("knowledge_primary_service")),
+        "knowledge_primary_path": _as_str(safe_context.get("knowledge_primary_path")),
+        "knowledge_related_services": _as_list(safe_context.get("knowledge_related_services"))[:2],
+        "knowledge_selection_reason": _as_str(safe_context.get("knowledge_selection_reason")),
+    }
+    filtered: Dict[str, Any] = {}
+    for key, value in updates.items():
+        if isinstance(value, list):
+            if value:
+                filtered[key] = value
+            continue
+        if value in {"", None}:
+            continue
+        filtered[key] = value
+    return filtered
 
 
 def _emit_runtime_stage_event(
@@ -1623,6 +1650,9 @@ async def _run_followup_runtime_task(
     )
 
     followup_request = _build_followup_request_from_ai_run(run, runtime_options)
+    knowledge_updates = _build_project_knowledge_summary_updates(followup_request.analysis_context)
+    if knowledge_updates:
+        runtime_service._update_run_summary(run, **knowledge_updates)  # noqa: SLF001
     if previous_executed_commands:
         followup_request.analysis_context = {
             **(followup_request.analysis_context or {}),
@@ -2179,6 +2209,11 @@ async def _create_ai_run_impl(request: AIRunCreateRequest) -> Dict[str, Any]:
             analysis_context=request.analysis_context,
             runtime_options=request.runtime_options,
         )
+        knowledge_updates = _build_project_knowledge_summary_updates(
+            run.context_json if isinstance(getattr(run, "context_json", None), dict) else {}
+        )
+        if knowledge_updates:
+            runtime_service._update_run_summary(run, **knowledge_updates)  # noqa: SLF001
         runtime_mode = _resolve_ai_run_runtime_mode(request.analysis_context, request.runtime_options)
         if runtime_mode in {"followup", "followup_analysis", "followup_runtime"}:
             session_store = get_ai_session_store(storage)

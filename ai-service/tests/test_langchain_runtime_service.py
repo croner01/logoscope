@@ -409,3 +409,35 @@ def test_sanitize_json_like_answer_uses_fallback_keys_when_conclusion_missing():
     assert "- 先看 query-service 错误日志" in sanitized["answer"]
     assert "仍缺失证据：" in sanitized["answer"]
     assert "trace_id" in sanitized["answer"]
+
+
+def test_run_followup_langchain_prompt_injects_project_knowledge_section(monkeypatch):
+    captured = {}
+
+    async def _fake_collect_chat_response(**kwargs):
+        captured["message"] = kwargs.get("message", "")
+        return '{"conclusion":"ok","summary":"done","actions":[]}'
+
+    monkeypatch.setattr("ai.langchain_runtime.service.collect_chat_response", _fake_collect_chat_response)
+
+    async def _run():
+        kwargs = _build_runtime_kwargs(DummyStreamingLLM([]))
+        kwargs["analysis_context"] = {
+            "service_name": "query-service",
+            "knowledge_pack_version": "2026-04-13.v1",
+            "knowledge_primary_service": "query-service",
+            "knowledge_primary_path": "log-ingest-query",
+            "project_knowledge_prompt": "服务摘要: query-service 是主读路径\\n链路摘要: log ingest -> clickhouse -> query-service",
+        }
+        return await run_followup_langchain(
+            **kwargs,
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["analysis_method"] == "langchain"
+    message = str(captured.get("message") or "")
+    assert "## 项目知识（Project Knowledge）" in message
+    assert "query-service 是主读路径" in message
+    assert "log ingest -> clickhouse -> query-service" in message
