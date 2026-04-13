@@ -221,6 +221,10 @@ def test_create_ai_run_followup_mode_emits_final_answer_events(monkeypatch):
 
     assert fetched["run"]["status"] == "completed"
     assert fetched["run"]["conversation_id"] == "conv-followup-001"
+    assert fetched["run"]["summary_json"]["knowledge_pack_version"] == "2026-04-13.v1"
+    assert fetched["run"]["summary_json"]["knowledge_primary_service"] == "query-service"
+    assert fetched["run"]["summary_json"]["knowledge_primary_path"] == "log-ingest-query"
+    assert "service=query-service" in fetched["run"]["summary_json"]["knowledge_selection_reason"]
     event_types = [item["event_type"] for item in events["events"]]
     assert "assistant_delta" in event_types
     assert "assistant_message_finalized" in event_types
@@ -3658,3 +3662,31 @@ def test_interrupt_ai_run_cancels_active_command_and_run(monkeypatch):
     event_types = [item["event_type"] for item in events["events"]]
     assert "run_interrupted" in event_types
     assert "run_cancelled" in event_types
+
+def test_build_followup_request_from_ai_run_enriches_project_knowledge_metadata():
+    run = SimpleNamespace(
+        question="继续分析 query-service Code:241",
+        session_id="sess-knowledge-001",
+        conversation_id="conv-knowledge-001",
+        context_json={
+            "analysis_type": "log",
+            "service_name": "query-service",
+            "input_text": "ERROR query-service Code:241",
+        },
+        input_json={"question": "继续分析 query-service Code:241"},
+    )
+
+    request = _build_followup_request_from_ai_run(
+        run,
+        {
+            "mode": "followup_analysis",
+            "conversation_id": "conv-knowledge-001",
+            "history": [{"role": "user", "content": "继续分析 query-service Code:241"}],
+        },
+    )
+
+    analysis_context = request.analysis_context
+    assert analysis_context["knowledge_pack_version"] == "2026-04-13.v1"
+    assert analysis_context["knowledge_primary_service"] == "query-service"
+    assert analysis_context["knowledge_primary_path"] == "log-ingest-query"
+    assert analysis_context["project_knowledge_prompt"]
