@@ -391,6 +391,412 @@ def test_create_ai_run_followup_mode_blocks_when_planning_incomplete(monkeypatch
     assert run_finished_payload["blocked_reason"] == "planning_incomplete"
 
 
+def test_create_ai_run_followup_mode_marks_policy_block_when_templates_exist(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "已生成排查命令，但本轮未自动执行。"})
+        return {
+            "analysis_session_id": "sess-policy-001",
+            "conversation_id": "conv-policy-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "已生成排查命令，但本轮未自动执行。",
+            "references": [],
+            "actions": [
+                {
+                    "id": "tmpl-1",
+                    "source": "template_command",
+                    "title": "自动补证据命令：kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command_type": "query",
+                    "executable": True,
+                    "reason": "structured_template_ready_for_auto_exec",
+                }
+            ],
+            "action_observations": [],
+            "react_loop": {
+                "phase": "replan",
+                "plan": {"ready_template_actions": 1},
+                "replan": {"needed": True, "next_actions": ["本轮只生成命令，不会自动执行"]},
+                "plan_quality": {"planning_blocked": False},
+                "execute": {"observed_actions": 0},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-policy-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-policy-001",
+                    "auto_exec_readonly": False,
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "blocked":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+
+    assert fetched["run"]["status"] == "blocked"
+    assert fetched["run"]["summary_json"]["blocked_reason"] == "readonly_auto_exec_disabled"
+    assert "只读自动执行" in str(fetched["run"]["summary_json"].get("blocked_reason_detail") or "")
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "blocked"
+    assert run_finished_payload["blocked_reason"] == "readonly_auto_exec_disabled"
+
+
+def test_create_ai_run_followup_mode_marks_backend_unready_when_templates_cannot_run(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "已生成排查命令，但执行网关未就绪。"})
+        return {
+            "analysis_session_id": "sess-backend-001",
+            "conversation_id": "conv-backend-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "已生成排查命令，但执行网关未就绪。",
+            "references": [],
+            "actions": [
+                {
+                    "id": "tmpl-backend-1",
+                    "source": "template_command",
+                    "title": "自动补证据命令：kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command_type": "query",
+                    "executable": True,
+                    "reason": "structured_template_ready_for_auto_exec",
+                }
+            ],
+            "action_observations": [
+                {
+                    "action_id": "tmpl-backend-1",
+                    "status": "skipped",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "reason_code": "backend_unready",
+                    "message": "执行网关未就绪，命令未自动执行。",
+                }
+            ],
+            "react_loop": {
+                "phase": "replan",
+                "plan": {"ready_template_actions": 1},
+                "replan": {
+                    "needed": True,
+                    "items": [{"execution_disposition": "backend_unready"}],
+                    "next_actions": ["执行网关未就绪，建议稍后重试"],
+                },
+                "plan_quality": {"planning_blocked": False},
+                "execute": {"observed_actions": 0},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-backend-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-backend-001",
+                    "auto_exec_readonly": True,
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "blocked":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+
+    assert fetched["run"]["status"] == "blocked"
+    assert fetched["run"]["summary_json"]["blocked_reason"] == "backend_unready"
+    assert "执行网关" in str(fetched["run"]["summary_json"].get("blocked_reason_detail") or "")
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "blocked"
+    assert run_finished_payload["blocked_reason"] == "backend_unready"
+
+
+def test_create_ai_run_followup_mode_marks_observation_missing_when_templates_exist_without_observations(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "已生成排查命令，但当前还没有观测结果。"})
+        return {
+            "analysis_session_id": "sess-observe-001",
+            "conversation_id": "conv-observe-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "已生成排查命令，但当前还没有观测结果。",
+            "references": [],
+            "actions": [
+                {
+                    "id": "tmpl-observe-1",
+                    "source": "template_command",
+                    "title": "自动补证据命令：kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command_type": "query",
+                    "executable": True,
+                    "reason": "structured_template_ready_for_auto_exec",
+                }
+            ],
+            "action_observations": [],
+            "react_loop": {
+                "phase": "replan",
+                "plan": {"ready_template_actions": 1},
+                "replan": {"needed": True, "items": [], "next_actions": ["继续执行模板命令并观察结果"]},
+                "plan_quality": {"planning_blocked": False},
+                "execute": {"observed_actions": 0},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-observe-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-observe-001",
+                    "auto_exec_readonly": True,
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "blocked":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+
+    assert fetched["run"]["status"] == "blocked"
+    assert fetched["run"]["summary_json"]["blocked_reason"] == "observation_missing"
+    assert "尚未获得执行观察结果" in str(fetched["run"]["summary_json"].get("blocked_reason_detail") or "")
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "blocked"
+    assert run_finished_payload["blocked_reason"] == "observation_missing"
+
+
+def test_create_ai_run_followup_mode_does_not_leak_blocked_reason_when_completed(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "证据已补齐，本轮完成。"})
+        return {
+            "analysis_session_id": "sess-complete-001",
+            "conversation_id": "conv-complete-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "证据已补齐，本轮完成。",
+            "references": [],
+            "actions": [
+                {
+                    "id": "tmpl-complete-1",
+                    "source": "template_command",
+                    "title": "自动补证据命令",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command_type": "query",
+                    "executable": True,
+                    "reason": "structured_template_ready_for_auto_exec",
+                }
+            ],
+            "action_observations": [
+                {
+                    "action_id": "tmpl-complete-1",
+                    "status": "executed",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "exit_code": 0,
+                    "stdout": "ok",
+                }
+            ],
+            "react_loop": {
+                "phase": "finalized",
+                "plan": {"ready_template_actions": 1},
+                "execute": {"observed_actions": 1, "executed_success": 1, "executed_failed": 0},
+                "observe": {"coverage": 1.0, "evidence_coverage": 1.0, "confidence": 0.95, "final_confidence": 0.95},
+                "replan": {"needed": False, "items": [], "next_actions": []},
+                "plan_quality": {"planning_blocked": False},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-complete-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-complete-001",
+                    "auto_exec_readonly": False,
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "completed":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+
+    assert fetched["run"]["status"] == "completed"
+    assert fetched["run"]["summary_json"].get("blocked_reason") in {None, ""}
+    assert fetched["run"]["summary_json"].get("blocked_reason_detail") in {None, ""}
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "completed"
+    assert run_finished_payload.get("blocked_reason") in {None, ""}
+
+
+def test_create_ai_run_followup_mode_templates_prevent_planning_block_when_observed(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "模板命令已执行，当前无需再按 planning_incomplete 阻断。"})
+        return {
+            "analysis_session_id": "sess-template-plan-001",
+            "conversation_id": "conv-template-plan-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "模板命令已执行，当前无需再按 planning_incomplete 阻断。",
+            "references": [],
+            "actions": [
+                {
+                    "id": "tmpl-plan-1",
+                    "source": "template_command",
+                    "title": "自动补证据命令",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "command_type": "query",
+                    "executable": True,
+                    "reason": "structured_template_ready_for_auto_exec",
+                }
+            ],
+            "action_observations": [
+                {
+                    "action_id": "tmpl-plan-1",
+                    "status": "executed",
+                    "command": "kubectl -n islap logs -l app=query-service --since-time=2026-04-12T13:26:14Z --tail=200",
+                    "exit_code": 0,
+                    "stdout": "ok",
+                }
+            ],
+            "react_loop": {
+                "phase": "finalized",
+                "plan": {"ready_template_actions": 1},
+                "execute": {"observed_actions": 1, "executed_success": 1, "executed_failed": 0},
+                "observe": {"coverage": 1.0, "evidence_coverage": 1.0, "confidence": 0.8, "final_confidence": 0.82},
+                "replan": {"needed": False, "items": [], "next_actions": []},
+                "plan_quality": {"planning_blocked": True, "planning_blocked_reason": "旧计划大多不可执行"},
+            },
+            "react_iterations": [],
+            "subgoals": [],
+            "reflection": {},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-template-plan-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-template-plan-001",
+                    "auto_exec_readonly": True,
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] in {"completed", "blocked"}:
+                break
+        return fetched
+
+    fetched = asyncio.run(_run())
+
+    assert fetched["run"]["status"] == "completed"
+    assert fetched["run"]["summary_json"].get("blocked_reason") in {None, ""}
+    assert fetched["run"]["summary_json"]["gate_decision"]["reason"] == "ok"
+
+
 def test_create_ai_run_followup_mode_softens_answer_when_evidence_is_weak(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)

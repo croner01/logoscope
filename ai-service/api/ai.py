@@ -1708,6 +1708,16 @@ async def _run_followup_runtime_task(
             if isinstance(react_loop_payload.get("replan"), dict)
             else {}
         )
+        plan_payload = (
+            react_loop_payload.get("plan")
+            if isinstance(react_loop_payload.get("plan"), dict)
+            else {}
+        )
+        execute_payload = (
+            react_loop_payload.get("execute")
+            if isinstance(react_loop_payload.get("execute"), dict)
+            else {}
+        )
         react_replan_needed = bool(react_replan_payload.get("needed"))
         subgoals_payload = assistant_metadata["subgoals"] if isinstance(assistant_metadata.get("subgoals"), list) else []
         has_needs_data_subgoal = any(
@@ -1725,7 +1735,42 @@ async def _run_followup_runtime_task(
             if isinstance(react_loop_payload.get("plan_quality"), dict)
             else {}
         )
+        runtime_options_payload = runtime_options if isinstance(runtime_options, dict) else {}
+        allow_auto_exec_readonly = _as_runtime_bool(runtime_options_payload.get("auto_exec_readonly"), True)
+        react_replan_items = [
+            item
+            for item in _as_list(react_replan_payload.get("items"))
+            if isinstance(item, dict)
+        ]
+        action_observations_payload = [
+            item
+            for item in _as_list(assistant_metadata.get("action_observations"))
+            if isinstance(item, dict)
+        ]
+        derived_ready_template_actions = sum(
+            1
+            for item in _as_list(assistant_metadata.get("actions"))
+            if isinstance(item, dict)
+            and bool(item.get("executable"))
+            and _as_str(item.get("source")).strip().lower() == "template_command"
+        )
+        derived_observed_actions = len(action_observations_payload)
+        ready_template_actions = max(
+            int(_as_float(plan_payload.get("ready_template_actions"), 0)),
+            derived_ready_template_actions,
+        )
+        observed_actions = max(
+            int(_as_float(execute_payload.get("observed_actions"), 0)),
+            derived_observed_actions,
+        )
         planning_blocked = bool(plan_quality_payload.get("planning_blocked"))
+        backend_unready = any(
+            _as_str(item.get("execution_disposition")).strip().lower() == "backend_unready"
+            for item in react_replan_items
+        ) or any(
+            _as_str(item.get("reason_code")).strip().lower() == "backend_unready"
+            for item in action_observations_payload
+        )
         evidence_slot_map = (
             observe_payload.get("evidence_slot_map")
             if isinstance(observe_payload.get("evidence_slot_map"), dict)
@@ -1773,7 +1818,41 @@ async def _run_followup_runtime_task(
             or answer_declares_insufficient
             or evidence_slots_missing
         )
-        final_status = "blocked" if (planning_blocked or react_replan_needed or evidence_incomplete) else "completed"
+        def _compact_blocked_reason_detail(value: Any, fallback: str = "") -> str:
+            text = _as_str(value).strip() or fallback
+            return text[:240]
+
+        blocked_reason = ""
+        blocked_reason_detail = ""
+        if ready_template_actions > 0 and observed_actions <= 0 and not allow_auto_exec_readonly:
+            blocked_reason = "readonly_auto_exec_disabled"
+            blocked_reason_detail = "当前运行已禁用只读自动执行，请手动执行或开启自动执行后继续。"
+        elif ready_template_actions > 0 and backend_unready:
+            blocked_reason = "backend_unready"
+            blocked_reason_detail = "执行网关未就绪，模板命令暂未自动执行，请稍后重试。"
+        elif ready_template_actions <= 0 and planning_blocked:
+            blocked_reason = "planning_incomplete"
+            blocked_reason_detail = _compact_blocked_reason_detail(plan_quality_payload.get("planning_blocked_reason"), (
+                "当前命令计划大多不可执行，应先修复结构化命令再继续闭环。"
+            ))
+        elif ready_template_actions > 0 and observed_actions <= 0:
+            blocked_reason = "observation_missing"
+            blocked_reason_detail = "已生成可执行模板命令，但尚未获得执行观察结果。"
+        elif react_replan_needed:
+            blocked_reason = "react_replan_needed"
+            next_actions = [
+                _as_str(item).strip()
+                for item in _as_list(react_replan_payload.get("next_actions"))
+                if _as_str(item).strip()
+            ]
+            blocked_reason_detail = _compact_blocked_reason_detail(
+                next_actions[0] if next_actions else "",
+                "关键证据仍未补齐，当前需继续执行建议动作。",
+            )
+        elif evidence_incomplete:
+            blocked_reason = "evidence_incomplete"
+            blocked_reason_detail = "当前证据覆盖度或结论置信度不足，需继续补齐证据。"
+        final_status = "blocked" if (bool(blocked_reason) or evidence_incomplete) else "completed"
         next_best_commands = [
             item
             for item in _as_list((react_replan_payload or {}).get("next_best_commands"))
@@ -1801,15 +1880,7 @@ async def _run_followup_runtime_task(
         gate_conflict = bool(gate_conflict_reasons)
         gate_decision = {
             "result": final_status,
-            "reason": (
-                "planning_incomplete"
-                if planning_blocked
-                else "react_replan_needed"
-                if react_replan_needed
-                else "evidence_incomplete"
-                if evidence_incomplete
-                else "ok"
-            ),
+            "reason": blocked_reason or "ok",
             "metrics": {
                 "legacy_coverage": legacy_coverage_value,
                 "evidence_coverage": evidence_coverage_value,
@@ -1820,6 +1891,10 @@ async def _run_followup_runtime_task(
                 "confidence_insufficient": confidence_insufficient,
                 "answer_declares_insufficient": answer_declares_insufficient,
                 "planning_blocked": planning_blocked,
+                "ready_template_actions": ready_template_actions,
+                "observed_actions": observed_actions,
+                "backend_unready": backend_unready,
+                "auto_exec_readonly": allow_auto_exec_readonly,
             },
             "thresholds": {
                 "min_evidence_coverage": min_coverage,
@@ -1853,6 +1928,8 @@ async def _run_followup_runtime_task(
             "final_confidence": final_confidence_value,
             "plan_quality": plan_quality_payload,
         }
+        if blocked_reason_detail:
+            finish_summary_updates["blocked_reason_detail"] = blocked_reason_detail
         finish_payload = {
             "status": final_status,
             "assistant_message_id": latest_run.assistant_message_id,
@@ -1863,14 +1940,12 @@ async def _run_followup_runtime_task(
             "fault_summary": fault_summary,
             "gate_decision": gate_decision,
         }
-        if planning_blocked:
-            finish_summary_updates["blocked_reason"] = "planning_incomplete"
-            finish_payload["blocked_reason"] = "planning_incomplete"
-        elif react_replan_needed:
-            finish_summary_updates["blocked_reason"] = "react_replan_needed"
-            finish_payload["blocked_reason"] = "react_replan_needed"
-        elif evidence_incomplete:
-            finish_summary_updates["blocked_reason"] = "evidence_incomplete"
+        if blocked_reason:
+            finish_summary_updates["blocked_reason"] = blocked_reason
+            finish_payload["blocked_reason"] = blocked_reason
+        if blocked_reason_detail:
+            finish_payload["blocked_reason_detail"] = blocked_reason_detail
+        if evidence_incomplete:
             finish_summary_updates["evidence_needs_data_subgoal"] = has_needs_data_subgoal
             if evidence_coverage_value >= 0:
                 finish_summary_updates["evidence_coverage"] = evidence_coverage_value
@@ -1878,7 +1953,6 @@ async def _run_followup_runtime_task(
             if final_confidence_value >= 0:
                 finish_summary_updates["final_confidence"] = final_confidence_value
             finish_summary_updates["evidence_confidence_threshold"] = min_final_confidence
-            finish_payload["blocked_reason"] = "evidence_incomplete"
         runtime_service.finish_run(
             run_id,
             summary_updates=finish_summary_updates,
