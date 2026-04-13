@@ -19,6 +19,7 @@ import {
   buildRuntimeThoughtTimeline,
 } from '../features/ai-runtime/utils/runtimeMessages';
 import { api } from '../utils/api';
+import { buildRuntimeFollowUpContext } from '../utils/runtimeFollowUpContext';
 import type { Event } from '../utils/api';
 import { normalizeAgentRunEventEnvelope, type AgentRunEventEnvelope } from '../utils/aiAgentRuntime';
 import {
@@ -5055,26 +5056,28 @@ const AIAnalysis: React.FC = () => {
     try {
       const detectedTraceId = extractTraceId(inputText);
       const detectedRequestId = extractRequestId(question) || extractRequestId(inputText);
-      const followUpContext: Record<string, unknown> = {
-        session_id: analysisSessionId || undefined,
-        analysis_type: analysisType,
-        service_name: serviceName,
-        input_text: inputText,
-        trace_id: detectedTraceId,
-        request_id: detectedRequestId,
-        llm_info: llmInfo || {},
+      const sourceAttributes = asObject(sourceLogData?.attributes);
+      const followUpContext = buildRuntimeFollowUpContext({
+        analysisSessionId,
+        analysisType,
+        serviceName,
+        inputText,
+        question,
+        llmInfo: llmInfo || {},
         result,
-        agent_mode: 'request_flow',
-      };
-      if (Array.isArray(options?.followupRelatedLogs) && options.followupRelatedLogs.length > 0) {
-        followUpContext.followup_related_logs = options.followupRelatedLogs;
-        followUpContext.followup_related_log_count = Number(
-          options.followupRelatedLogCount || options.followupRelatedLogs.length,
-        );
-      }
-      if (options?.followupRelatedMeta && typeof options.followupRelatedMeta === 'object') {
-        Object.assign(followUpContext, options.followupRelatedMeta);
-      }
+        detectedTraceId,
+        detectedRequestId,
+        sourceLogTimestamp: String(sourceLogData?.timestamp || ''),
+        sourceTraceId: String(sourceLogData?.trace_id || ''),
+        sourceRequestId: (
+          extractRequestIdFromRecord(sourceAttributes)
+          || extractRequestIdFromRecord(asObject(sourceAttributes.log_meta))
+          || extractRequestId(inputText)
+        ),
+        followupRelatedLogs: options?.followupRelatedLogs,
+        followupRelatedLogCount: options?.followupRelatedLogCount,
+        followupRelatedMeta: options?.followupRelatedMeta,
+      });
 
       const requestPayload = {
         question,

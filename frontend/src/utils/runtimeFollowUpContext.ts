@@ -1,19 +1,37 @@
-import { buildRuntimeAnalysisContext, type RuntimeAnalysisMode } from './runtimeAnalysisMode.js';
+/**
+ * Runtime follow-up context normalization helpers.
+ */
 
-const toObject = (value: unknown): Record<string, unknown> => (
-  value && typeof value === 'object' ? { ...value as Record<string, unknown> } : {}
+import {
+  buildRuntimeAnalysisContext,
+  type RuntimeAnalysisMode,
+} from './runtimeAnalysisMode.js';
+
+const normalizeText = (value: unknown): string => String(value ?? '').trim();
+
+const asRecord = (value: unknown): Record<string, unknown> => (
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {}
 );
 
-const toNormalizedString = (value: unknown): string => {
-  if (value === undefined || value === null) {
-    return '';
-  }
-  return String(value).trim();
-};
+const compactRecord = (record: Record<string, unknown>): Record<string, unknown> => (
+  Object.fromEntries(
+    Object.entries(record).filter(([, value]) => {
+      if (value === undefined || value === null) {
+        return false;
+      }
+      if (typeof value === 'string') {
+        return value.trim().length > 0;
+      }
+      return true;
+    }),
+  )
+);
 
-const pickFirstString = (values: Array<unknown>): string => {
-  for (const candidate of values) {
-    const normalized = toNormalizedString(candidate);
+const firstText = (...values: unknown[]): string => {
+  for (const value of values) {
+    const normalized = normalizeText(value);
     if (normalized) {
       return normalized;
     }
@@ -21,27 +39,17 @@ const pickFirstString = (values: Array<unknown>): string => {
   return '';
 };
 
-const applyCanonicalStringField = (
-  context: Record<string, unknown>,
-  key: string,
-  value: string,
-) => {
-  if (value) {
-    context[key] = value;
-    return;
+const normalizeCount = (value: unknown): number | undefined => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
   }
-  if (
-    Object.prototype.hasOwnProperty.call(context, key)
-    && typeof context[key] === 'string'
-    && !String(context[key]).trim()
-  ) {
-    delete context[key];
-  }
+  return Math.max(0, Math.floor(parsed));
 };
 
 export function buildRuntimeFollowUpContext(params: {
   analysisSessionId?: string | null;
-  analysisType: 'log' | 'trace';
+  analysisType: RuntimeAnalysisMode;
   serviceName?: string | null;
   inputText: string;
   question?: string | null;
@@ -52,129 +60,145 @@ export function buildRuntimeFollowUpContext(params: {
   sourceLogTimestamp?: string | null;
   sourceTraceId?: string | null;
   sourceRequestId?: string | null;
+  followup_related_anchor_utc?: string | null;
+  followup_related_start_time?: string | null;
+  followup_related_end_time?: string | null;
+  evidence_window_start?: string | null;
+  evidence_window_end?: string | null;
+  followupRelatedAnchorUtc?: string | null;
+  followupRelatedStartTime?: string | null;
+  followupRelatedEndTime?: string | null;
+  evidenceWindowStart?: string | null;
+  evidenceWindowEnd?: string | null;
   followupRelatedLogs?: unknown[] | null;
   followupRelatedLogCount?: number | null;
   followupRelatedMeta?: Record<string, unknown> | null;
 }): Record<string, unknown> {
-  const normalizedSessionId = toNormalizedString(params.analysisSessionId);
-  const normalizedInputText = toNormalizedString(params.inputText);
-  const normalizedQuestion = toNormalizedString(params.question);
-
-  const llmInfo = params.llmInfo && typeof params.llmInfo === 'object'
-    ? { ...params.llmInfo }
-    : {};
-  const resultPayload = toObject(params.result);
-  const agentPayload = toObject(resultPayload.agent);
-  const followupMeta = toObject(params.followupRelatedMeta);
-
-  const requestIdFromResult = pickFirstString([
-    resultPayload.request_id,
-    resultPayload.requestId,
-    agentPayload.request_id,
-    agentPayload.requestId,
-  ]);
-  const traceIdFromResult = pickFirstString([
-    resultPayload.trace_id,
-    resultPayload.traceId,
-    agentPayload.trace_id,
-    agentPayload.traceId,
-  ]);
-
-  const requestIdFromMeta = pickFirstString([
-    followupMeta.followup_related_request_id,
-    followupMeta.request_id,
-  ]);
-  const traceIdFromMeta = pickFirstString([
-    followupMeta.followup_related_trace_id,
-    followupMeta.trace_id,
-  ]);
-
-  const resolvedTraceId = pickFirstString([
-    traceIdFromResult,
-    traceIdFromMeta,
+  const followupRelatedMeta = compactRecord(asRecord(params.followupRelatedMeta));
+  const resultRecord = compactRecord(asRecord(params.result));
+  const agentRecord = compactRecord(asRecord(resultRecord.agent));
+  const normalizedSessionId = firstText(params.analysisSessionId);
+  const normalizedSourceLogTimestamp = firstText(
+    params.sourceLogTimestamp,
+    followupRelatedMeta.source_log_timestamp,
+  );
+  const canonicalTraceId = firstText(
     params.detectedTraceId,
     params.sourceTraceId,
-  ]);
-  const resolvedRequestId = pickFirstString([
-    requestIdFromResult,
-    requestIdFromMeta,
+    resultRecord.trace_id,
+    resultRecord.traceId,
+    agentRecord.trace_id,
+    agentRecord.traceId,
+    followupRelatedMeta.trace_id,
+    followupRelatedMeta.followup_related_trace_id,
+  );
+  const canonicalRequestId = firstText(
     params.detectedRequestId,
     params.sourceRequestId,
-  ]);
+    resultRecord.request_id,
+    resultRecord.requestId,
+    agentRecord.request_id,
+    agentRecord.requestId,
+    followupRelatedMeta.request_id,
+    followupRelatedMeta.followup_related_request_id,
+  );
+  const relatedLogAnchorTimestamp = firstText(
+    params.followup_related_anchor_utc,
+    params.followupRelatedAnchorUtc,
+    normalizedSourceLogTimestamp,
+    followupRelatedMeta.related_log_anchor_timestamp,
+    followupRelatedMeta.followup_related_anchor_utc,
+  );
+  const requestFlowWindowStart = firstText(
+    resultRecord.request_flow_window_start,
+    params.followup_related_start_time,
+    params.followupRelatedStartTime,
+    params.evidence_window_start,
+    params.evidenceWindowStart,
+    followupRelatedMeta.request_flow_window_start,
+    followupRelatedMeta.followup_related_start_time,
+    followupRelatedMeta.evidence_window_start,
+  );
+  const requestFlowWindowEnd = firstText(
+    resultRecord.request_flow_window_end,
+    params.followup_related_end_time,
+    params.followupRelatedEndTime,
+    params.evidence_window_end,
+    params.evidenceWindowEnd,
+    followupRelatedMeta.request_flow_window_end,
+    followupRelatedMeta.followup_related_end_time,
+    followupRelatedMeta.evidence_window_end,
+  );
+  const evidenceWindowStart = firstText(
+    params.evidence_window_start,
+    params.evidenceWindowStart,
+    resultRecord.request_flow_window_start,
+    followupRelatedMeta.evidence_window_start,
+  );
+  const evidenceWindowEnd = firstText(
+    params.evidence_window_end,
+    params.evidenceWindowEnd,
+    resultRecord.request_flow_window_end,
+    followupRelatedMeta.evidence_window_end,
+  );
 
-  const runtimeAnalysisType: RuntimeAnalysisMode = params.analysisType === 'trace'
-    ? 'trace'
-    : 'log';
-  const analysisContext = buildRuntimeAnalysisContext({
-    analysisType: runtimeAnalysisType,
-    traceId: resolvedTraceId,
+  const baseContext: Record<string, unknown> = {
+    ...followupRelatedMeta,
+    session_id: normalizedSessionId || undefined,
+    analysis_session_id: normalizedSessionId || undefined,
+    input_text: String(params.inputText ?? ''),
+    question: firstText(params.question) || undefined,
+    llm_info: params.llmInfo && typeof params.llmInfo === 'object'
+      ? params.llmInfo
+      : undefined,
+    result: params.result === undefined || params.result === null ? undefined : params.result,
+    agent_mode: 'request_flow',
+    source_log_timestamp: normalizedSourceLogTimestamp || undefined,
+    source_trace_id: firstText(params.sourceTraceId) || undefined,
+    source_request_id: firstText(params.sourceRequestId) || undefined,
+    followup_related_anchor_utc: firstText(
+      params.followup_related_anchor_utc,
+      params.followupRelatedAnchorUtc,
+      followupRelatedMeta.followup_related_anchor_utc,
+    ) || undefined,
+    followup_related_start_time: firstText(
+      params.followup_related_start_time,
+      params.followupRelatedStartTime,
+      followupRelatedMeta.followup_related_start_time,
+    ) || undefined,
+    followup_related_end_time: firstText(
+      params.followup_related_end_time,
+      params.followupRelatedEndTime,
+      followupRelatedMeta.followup_related_end_time,
+    ) || undefined,
+    evidence_window_start: evidenceWindowStart || undefined,
+    evidence_window_end: evidenceWindowEnd || undefined,
+    related_log_anchor_timestamp: relatedLogAnchorTimestamp || undefined,
+    request_flow_window_start: requestFlowWindowStart || undefined,
+    request_flow_window_end: requestFlowWindowEnd || undefined,
+    request_id: canonicalRequestId || undefined,
+  };
+
+  if (Array.isArray(params.followupRelatedLogs) && params.followupRelatedLogs.length > 0) {
+    baseContext.followup_related_logs = params.followupRelatedLogs;
+    baseContext.followup_related_log_count = normalizeCount(params.followupRelatedLogCount)
+      ?? params.followupRelatedLogs.length;
+  } else {
+    baseContext.followup_related_log_count = normalizeCount(params.followupRelatedLogCount);
+  }
+
+  const context = buildRuntimeAnalysisContext({
+    analysisType: params.analysisType,
+    traceId: canonicalTraceId,
     serviceName: params.serviceName,
-    baseContext: {
-      agent_mode: 'request_flow',
-      session_id: normalizedSessionId || undefined,
-      analysis_session_id: normalizedSessionId || undefined,
-      input_text: normalizedInputText || undefined,
-      question: normalizedQuestion || undefined,
-      llm_info: llmInfo,
-      result: params.result,
-    },
+    baseContext,
   });
 
-  const context = { ...analysisContext };
-  if (Object.keys(followupMeta).length > 0) {
-    Object.assign(context, followupMeta);
+  if (canonicalTraceId) {
+    context.trace_id = canonicalTraceId;
   }
 
-  const anchorTimestamp = pickFirstString([
-    followupMeta.related_log_anchor_timestamp,
-    followupMeta.followup_related_anchor_utc,
-    params.sourceLogTimestamp,
-  ]);
-  applyCanonicalStringField(context, 'related_log_anchor_timestamp', anchorTimestamp);
-
-  const windowStart = pickFirstString([
-    followupMeta.request_flow_window_start,
-    followupMeta.followup_related_start_time,
-    followupMeta.evidence_window_start,
-  ]);
-  applyCanonicalStringField(context, 'request_flow_window_start', windowStart);
-
-  const windowEnd = pickFirstString([
-    followupMeta.request_flow_window_end,
-    followupMeta.followup_related_end_time,
-    followupMeta.evidence_window_end,
-  ]);
-  applyCanonicalStringField(context, 'request_flow_window_end', windowEnd);
-
-  applyCanonicalStringField(context, 'request_id', resolvedRequestId);
-
-  const normalizedSourceLogTimestamp = toNormalizedString(params.sourceLogTimestamp);
-  if (normalizedSourceLogTimestamp) {
-    context.source_log_timestamp = normalizedSourceLogTimestamp;
-  }
-
-  const normalizedSourceTraceId = toNormalizedString(params.sourceTraceId);
-  if (normalizedSourceTraceId) {
-    context.source_trace_id = normalizedSourceTraceId;
-  }
-
-  const normalizedSourceRequestId = toNormalizedString(params.sourceRequestId);
-  if (normalizedSourceRequestId) {
-    context.source_request_id = normalizedSourceRequestId;
-  }
-
-  const explicitRelatedLogCount = (
-    typeof params.followupRelatedLogCount === 'number'
-    && Number.isFinite(params.followupRelatedLogCount)
-  )
-    ? params.followupRelatedLogCount
-    : undefined;
-  if (Array.isArray(params.followupRelatedLogs) && params.followupRelatedLogs.length > 0) {
-    context.followup_related_logs = params.followupRelatedLogs;
-    context.followup_related_log_count = explicitRelatedLogCount ?? params.followupRelatedLogs.length;
-  } else if (explicitRelatedLogCount !== undefined) {
-    context.followup_related_log_count = explicitRelatedLogCount;
-  }
-
-  return context;
+  return Object.fromEntries(
+    Object.entries(context).filter(([, value]) => value !== undefined),
+  );
 }

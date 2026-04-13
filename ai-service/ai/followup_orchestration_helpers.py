@@ -97,8 +97,24 @@ def _resolve_followup_evidence_window(
     default_minutes: int = 15,
 ) -> Dict[str, str]:
     context_payload = analysis_context if isinstance(analysis_context, dict) else {}
-    explicit_start = _parse_optional_iso_datetime(context_payload.get("request_flow_window_start"))
-    explicit_end = _parse_optional_iso_datetime(context_payload.get("request_flow_window_end"))
+
+    def _parse_first_valid_iso(*candidates: Any) -> Optional[datetime]:
+        for candidate in candidates:
+            parsed = _parse_optional_iso_datetime(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+
+    explicit_start = _parse_first_valid_iso(
+        context_payload.get("request_flow_window_start"),
+        context_payload.get("followup_related_start_time"),
+        context_payload.get("evidence_window_start"),
+    )
+    explicit_end = _parse_first_valid_iso(
+        context_payload.get("request_flow_window_end"),
+        context_payload.get("followup_related_end_time"),
+        context_payload.get("evidence_window_end"),
+    )
     if explicit_start and explicit_end and explicit_start <= explicit_end:
         return {
             "start_iso": _to_utc_iso_text(explicit_start),
@@ -108,6 +124,7 @@ def _resolve_followup_evidence_window(
     anchor_candidates = [
         context_payload.get("source_log_timestamp"),
         context_payload.get("related_log_anchor_timestamp"),
+        context_payload.get("followup_related_anchor_utc"),
         context_payload.get("timestamp"),
     ]
     anchor_dt: Optional[datetime] = None

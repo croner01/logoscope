@@ -7,6 +7,7 @@ import {
   buildRuntimePipelineSteps,
   resolveRuntimeClientDeadlineMs,
 } from '../../../utils/commandSpec';
+import { buildRuntimeAnalysisContext } from '../../../utils/runtimeAnalysisMode';
 import {
   agentRunReducer,
   createInitialAgentRunState,
@@ -324,6 +325,9 @@ export const useAgentRuntimeCommandFlow = ({
       || params.command,
     ).trim();
     const clientDeadlineMs = resolveRuntimeClientDeadlineMs(180000);
+    const normalizedTraceId = String(traceId || '').trim();
+    const normalizedServiceName = String(serviceName || '').trim();
+    const normalizedAnalysisType = analysisType === 'trace' ? 'trace' : 'log';
     const commandSpec = (
       asOptionalObject(params.commandSpec)
       || buildRuntimeCommandSpec({
@@ -336,14 +340,16 @@ export const useAgentRuntimeCommandFlow = ({
     const created = await api.createAIRun({
       session_id: analysisSessionId || undefined,
       question: params.question,
-      analysis_context: {
-        analysis_type: analysisType,
-        service_name: serviceName || undefined,
-        trace_id: traceId || undefined,
-        source_message_id: params.sourceMessageId || undefined,
-        source_command: params.command,
-        agent_mode: 'followup_command_runtime',
-      },
+      analysis_context: buildRuntimeAnalysisContext({
+        analysisType: normalizedAnalysisType,
+        traceId: normalizedTraceId,
+        serviceName: normalizedServiceName,
+        baseContext: {
+          source_message_id: params.sourceMessageId || undefined,
+          source_command: params.command,
+          agent_mode: 'followup_command_runtime',
+        },
+      }),
       runtime_options: {
         auto_exec_readonly: false,
       },

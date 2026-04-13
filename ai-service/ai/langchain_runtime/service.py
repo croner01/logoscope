@@ -731,6 +731,7 @@ def _should_stream_raw_tokens() -> bool:
 def _build_followup_prompt_payload(
     *,
     question: str,
+    analysis_context: Dict[str, Any],
     memory_summary: str,
     long_term_memory_summary: str,
     recent_history: str,
@@ -738,9 +739,10 @@ def _build_followup_prompt_payload(
     reflection: Dict[str, Any],
     tool_observations: Dict[str, Any],
     references: List[Dict[str, str]],
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     return {
         "question": question,
+        "analysis_context": analysis_context,
         "memory_summary": memory_summary,
         "long_term_memory_summary": long_term_memory_summary,
         "recent_history": recent_history,
@@ -829,6 +831,7 @@ async def run_followup_langchain(
     )
     prompt_payload = _build_followup_prompt_payload(
         question=question,
+        analysis_context=analysis_context,
         memory_summary=memory_view.get("memory_summary", ""),
         long_term_memory_summary=memory_view.get("long_term_memory_summary", ""),
         recent_history=memory_view.get("recent_history", ""),
@@ -841,6 +844,7 @@ async def run_followup_langchain(
     if token_budget > 0 and estimated_tokens > token_budget:
         reduced_payload = _build_followup_prompt_payload(
             question=question,
+            analysis_context=analysis_context,
             memory_summary=memory_view.get("memory_summary", "")[:400],
             long_term_memory_summary=memory_view.get("long_term_memory_summary", "")[:800],
             recent_history=memory_view.get("recent_history", "")[:900],

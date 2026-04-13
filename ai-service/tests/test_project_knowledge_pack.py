@@ -1,0 +1,76 @@
+"""Tests for ai.project_knowledge_pack."""
+
+from pathlib import Path
+
+from ai.project_knowledge_pack import (
+    extract_markdown_sections,
+    load_project_knowledge_registry,
+    select_project_knowledge,
+)
+
+
+def test_extract_markdown_sections_reads_summary_and_sources():
+    content = """# query-service
+
+## Summary
+query read path
+
+## Preferred Evidence Sources
+- query-service logs
+- ClickHouse system.query_log
+
+## Common Failures and Cautions
+- do not confuse query-service symptoms with ClickHouse root cause
+
+## Sources
+- /root/logoscope/docs/api/reference.md
+"""
+    sections = extract_markdown_sections(content)
+
+    assert sections["Summary"] == "query read path"
+    assert "ClickHouse system.query_log" in sections["Preferred Evidence Sources"]
+    assert "/root/logoscope/docs/api/reference.md" in sections["Sources"]
+
+
+def test_load_project_knowledge_registry_loads_expected_assets():
+    root = Path(__file__).resolve().parents[2]
+    registry = load_project_knowledge_registry(root / "docs" / "superpowers" / "knowledge")
+
+    assert "query-service" in registry["services"]
+    assert "ai-runtime-diagnosis" in registry["paths"]
+    assert registry["services"]["query-service"]["summary"]
+    assert registry["paths"]["log-ingest-query"]["summary"]
+
+
+def test_select_project_knowledge_prefers_service_and_log_path_for_query_failures():
+    root = Path(__file__).resolve().parents[2]
+    selection = select_project_knowledge(
+        {
+            "service_name": "query-service",
+            "analysis_type": "log",
+            "question": "query-service Code:241 clickhouse 慢查询怎么排查",
+            "input_text": "ERROR query-service Code:241 request failed",
+        },
+        knowledge_root=root / "docs" / "superpowers" / "knowledge",
+    )
+
+    assert selection["knowledge_primary_service"] == "query-service"
+    assert selection["knowledge_primary_path"] == "log-ingest-query"
+    assert selection["knowledge_pack_version"] == "2026-04-13.v1"
+    assert "ClickHouse" in selection["project_knowledge_prompt"]
+
+
+def test_select_project_knowledge_can_fallback_to_path_when_service_missing():
+    root = Path(__file__).resolve().parents[2]
+    selection = select_project_knowledge(
+        {
+            "analysis_type": "log",
+            "question": "topology edge preview 返回空结果",
+            "input_text": "preview topology edge empty",
+        },
+        knowledge_root=root / "docs" / "superpowers" / "knowledge",
+    )
+
+    assert selection["knowledge_primary_service"] == ""
+    assert selection["knowledge_primary_path"] == "topology-generation-preview"
+    assert selection["project_knowledge_prompt"]
