@@ -1,4 +1,4 @@
-import { buildRuntimeAnalysisContext, type RuntimeAnalysisMode } from './runtimeAnalysisMode';
+import { buildRuntimeAnalysisContext, type RuntimeAnalysisMode } from './runtimeAnalysisMode.js';
 
 const toObject = (value: unknown): Record<string, unknown> => (
   value && typeof value === 'object' ? { ...value as Record<string, unknown> } : {}
