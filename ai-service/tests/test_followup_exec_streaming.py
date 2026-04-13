@@ -11,6 +11,7 @@ from ai.followup_orchestration_helpers import (
     _build_non_executable_command_templates,
     _build_structured_template_actions,
     _emit_followup_event,
+    _resolve_followup_evidence_window,
     _run_followup_auto_exec_react_loop,
     _run_followup_readonly_auto_exec,
     _select_followup_react_iteration_actions,
@@ -70,6 +71,35 @@ def test_non_executable_templates_use_anchor_window_when_available():
     assert any("toDateTime64('2026-04-11T13:08:33Z', 9, 'UTC')" in item for item in templates)
     assert any("FROM system.processes" in item and "evidence_window_start" in item for item in templates)
     assert any("FROM system.metrics" in item and "evidence_window_end" in item for item in templates)
+
+
+def test_orchestration_evidence_window_supports_followup_aliases():
+    window = _resolve_followup_evidence_window(
+        {
+            "followup_related_start_time": "2026-04-12T13:26:14Z",
+            "followup_related_end_time": "2026-04-12T13:36:14Z",
+            "followup_related_anchor_utc": "2026-04-12T13:31:14Z",
+        }
+    )
+
+    assert window == {
+        "start_iso": "2026-04-12T13:26:14Z",
+        "end_iso": "2026-04-12T13:36:14Z",
+    }
+
+
+def test_orchestration_evidence_window_supports_evidence_window_aliases():
+    window = _resolve_followup_evidence_window(
+        {
+            "evidence_window_start": "2026-04-12T13:20:00Z",
+            "evidence_window_end": "2026-04-12T13:40:00Z",
+        }
+    )
+
+    assert window == {
+        "start_iso": "2026-04-12T13:20:00Z",
+        "end_iso": "2026-04-12T13:40:00Z",
+    }
 
 
 def test_structured_template_actions_keep_stable_id_and_skip_existing_command():
