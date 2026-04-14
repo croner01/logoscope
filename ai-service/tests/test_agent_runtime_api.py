@@ -83,6 +83,42 @@ def test_create_ai_run_returns_run_snapshot(monkeypatch):
     assert run["summary_json"]["current_phase"] == "planning"
 
 
+def test_create_ai_run_auto_downgrades_trace_without_trace_id(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _run():
+        return await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-trace-downgrade",
+                question="排查 trace 模式但缺少 trace_id",
+                analysis_context={"analysis_type": "trace"},
+                runtime_options={"conversation_id": "conv-trace-downgrade"},
+            )
+        )
+
+    result = asyncio.run(_run())
+    run = result["run"]
+    assert run["analysis_type"] == "log"
+    assert run["context_json"]["analysis_type_downgraded"] is True
+    assert run["context_json"]["analysis_type_original"] == "trace"
+    assert run["context_json"]["analysis_type_downgrade_reason"] == "trace_id_missing"
+    assert run["summary_json"]["analysis_type_downgraded"] is True
+    assert run["summary_json"]["analysis_type_original"] == "trace"
+    assert run["summary_json"]["analysis_type_downgrade_reason"] == "trace_id_missing"
+
+    created = runtime_service.create_run(
+        session_id="sess-trace-downgrade-2",
+        question="再次校验 service 层 downgrade",
+        analysis_context={"analysis_type": "trace"},
+        runtime_options={"conversation_id": "conv-trace-downgrade-2"},
+    )
+    assert created.analysis_type == "log"
+    assert created.summary_json["analysis_type_downgraded"] is True
+    assert created.summary_json["analysis_type_original"] == "trace"
+    assert created.summary_json["analysis_type_downgrade_reason"] == "trace_id_missing"
+
+
 def test_create_ai_run_rejects_when_runtime_v1_disabled(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)

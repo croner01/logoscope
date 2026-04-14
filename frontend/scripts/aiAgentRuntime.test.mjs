@@ -6,7 +6,10 @@ import {
   parseAgentRuntimeEventBlock,
   takeNextSSEEventBlock,
 } from '../.tmp-tests/utils/aiAgentRuntime.js';
-import { buildRuntimeAnalysisContext } from '../.tmp-tests/utils/runtimeAnalysisMode.js';
+import {
+  buildRuntimeAnalysisContext,
+  buildRuntimeDowngradeNotice,
+} from '../.tmp-tests/utils/runtimeAnalysisMode.js';
 import { buildRuntimeFollowUpContext } from '../.tmp-tests/utils/runtimeFollowUpContext.js';
 import {
   buildHistoryTurns,
@@ -75,6 +78,14 @@ test('buildRuntimeAnalysisContext clears dirty trace_id after downgrade', () => 
     analysis_type_downgrade_reason: 'trace_id_missing',
     service_name: 'query-service',
   });
+});
+
+test('buildRuntimeDowngradeNotice explains trace downgrade clearly', () => {
+  assert.equal(
+    buildRuntimeDowngradeNotice('trace_id_missing'),
+    '未检测到 Trace ID，已自动降级为日志分析（使用时间窗口）。',
+  );
+  assert.equal(buildRuntimeDowngradeNotice(undefined), '');
 });
 
 test('buildRuntimeFollowUpContext carries explicit evidence window and anchor aliases', () => {
