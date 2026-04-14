@@ -140,6 +140,25 @@ class TestRunPlanning:
         assert "skill_a" in new_state.selected_skills
         assert "skill_b" in new_state.selected_skills
 
+    def test_skips_low_confidence_skill_pairs(self):
+        state = _make_state(
+            question="service health check looks unstable",
+            skill_context={
+                "question": "service health check looks unstable",
+                "log_content": "health endpoint flaps intermittently",
+                "component_type": "service",
+                "namespace": "islap",
+            },
+        )
+        low_conf_skill = _make_mock_skill("low_conf_skill")
+        with patch(
+            "ai.runtime_v4.langgraph.nodes.planning._select_skills_by_rules",
+            return_value=[(low_conf_skill, 0.2)],
+        ):
+            new_state = run_planning(state)
+        assert new_state.actions == []
+        assert "low_conf_skill" not in new_state.selected_skills
+
     def test_plan_steps_exception_does_not_crash(self):
         state = _make_state()
         skill = _make_mock_skill()

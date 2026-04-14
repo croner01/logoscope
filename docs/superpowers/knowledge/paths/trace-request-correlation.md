@@ -28,11 +28,11 @@ This path explains how diagnosis should correlate a fault across `trace_id`, `re
 ## Recommended First Checks
 - confirm whether `request_id` is present even when `trace_id` is not
 - confirm whether `request_flow_window_start/end` were preserved
-- confirm whether the generated commands use explicit windows rather than broad defaults
+- confirm whether the generated commands use explicit windows rather than broad defaults, and if the fault layer is already clear, use the strongest available anchor to narrow scope rather than blocking on full correlation completeness
 
 ## Common Misreads
 - absence of `trace_id` does not imply diagnosis must stop
-- request correlation and time windows can be first-class anchors
+- request correlation and time windows can be first-class anchors, but they are not mandatory blockers once direct execution, resource, or topology evidence has become the stronger next step
 
 ## Sources
 - `/root/logoscope/docs/superpowers/specs/2026-04-12-runtime-diagnosis-reliability-design.md`

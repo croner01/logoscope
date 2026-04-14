@@ -977,6 +977,92 @@ def _merge_pending_command_request(existing: Any, updates: Dict[str, Any]) -> Di
     return merged
 
 
+def _find_completed_command_reuse(
+    summary: Any,
+    *,
+    action_id: str,
+    command: str,
+) -> Dict[str, Any]:
+    safe_summary = summary if isinstance(summary, dict) else {}
+    normalized_command = _normalize_followup_command_line(command)
+    if not normalized_command:
+        return {}
+
+    command_run_index = (
+        safe_summary.get("command_run_index")
+        if isinstance(safe_summary.get("command_run_index"), dict)
+        else {}
+    )
+    for entry in command_run_index.values():
+        if not isinstance(entry, dict):
+            continue
+        entry_status = _as_str(entry.get("status")).strip().lower()
+        entry_command = _normalize_followup_command_line(_as_str(entry.get("command")))
+        entry_action_id = _as_str(entry.get("action_id")).strip()
+        entry_exit_code = int(_as_float(entry.get("exit_code"), 1))
+        if entry_status not in {"completed", "succeeded", "success"}:
+            continue
+        if entry_exit_code != 0 or entry_command != normalized_command:
+            continue
+        if action_id and entry_action_id and entry_action_id != action_id:
+            continue
+        return {
+            "command_run_id": _as_str(entry.get("command_run_id")).strip(),
+            "command": entry_command,
+        }
+
+    executed_commands = {
+        _normalize_followup_command_line(item)
+        for item in _as_list(safe_summary.get("executed_commands"))
+        if _normalize_followup_command_line(item)
+    }
+    if normalized_command in executed_commands:
+        return {"command_run_id": "", "command": normalized_command}
+    return {}
+
+
+def _select_preferred_action_observations(action_observations: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    selected: Dict[str, Dict[str, Any]] = {}
+
+    def _observation_priority(observation_payload: Dict[str, Any]) -> tuple[int, int]:
+        status = _as_str(observation_payload.get("status")).strip().lower()
+        exit_code = int(_as_float(observation_payload.get("exit_code"), 0))
+        output_truncated = bool(observation_payload.get("output_truncated"))
+        reason_code = _as_str(observation_payload.get("reason_code")).strip().lower()
+
+        if status == "executed":
+            if exit_code == 0 and not output_truncated:
+                return (6, 0)
+            if exit_code == 0:
+                return (5, 0)
+            return (3, 0)
+        if status == "failed":
+            return (4, 0)
+        if status == "skipped":
+            if reason_code == "duplicate_skipped":
+                return (2, 0)
+            if reason_code == "backend_unready":
+                return (1, 1)
+            return (1, 0)
+        if status in {"permission_required", "confirmation_required", "elevation_required"}:
+            return (1, 0)
+        if status == "semantic_incomplete":
+            return (0, 1)
+        return (0, 0)
+
+    for item in _as_list(action_observations):
+        if not isinstance(item, dict):
+            continue
+        action_id = _as_str(item.get("action_id")).strip()
+        if not action_id:
+            continue
+        existing = selected.get(action_id)
+        if existing is None or _observation_priority(item) >= _observation_priority(existing):
+            selected[action_id] = item
+
+    return selected
+
+
 async def _emit_followup_runtime_event(
     runtime_service: Any,
     run_id: str,
@@ -1409,6 +1495,47 @@ async def _emit_followup_runtime_event(
                     if isinstance(safe_payload.get("diagnosis_contract"), dict)
                     else {}
                 )
+                duplicate_reuse = _find_completed_command_reuse(
+                    latest_summary,
+                    action_id=action_id or tool_call_id,
+                    command=command,
+                )
+                if duplicate_reuse:
+                    reused_command_run_id = _as_str(duplicate_reuse.get("command_run_id")).strip()
+                    finished_key = "|".join(
+                        [
+                            tool_call_id,
+                            "skipped_duplicate",
+                            reused_command_run_id,
+                            "duplicate_skipped",
+                        ]
+                    )
+                    finished_tool_calls = state.setdefault("finished_tool_calls", set())
+                    if finished_key not in finished_tool_calls:
+                        finished_tool_calls.add(finished_key)
+                        runtime_service.append_event(
+                            run_id,
+                            event_protocol.TOOL_CALL_SKIPPED_DUPLICATE,
+                            {
+                                "tool_call_id": tool_call_id,
+                                "tool_name": "command.exec",
+                                "title": str(safe_payload.get("title") or command or "执行命令").strip() or "执行命令",
+                                "status": "skipped_duplicate",
+                                "action_id": action_id or tool_call_id,
+                                "command_run_id": reused_command_run_id,
+                                "reused_command_run_id": reused_command_run_id,
+                                "command": command,
+                                "purpose": purpose or command,
+                                "command_type": command_type or "unknown",
+                                "risk_level": str(safe_payload.get("risk_level") or "high").strip() or "high",
+                                "message": "同一 run 已存在已完成命令结果，跳过重复审批。",
+                                "reason_code": "duplicate_skipped",
+                                "evidence_reuse": True,
+                                "reused_evidence_ids": [reused_command_run_id] if reused_command_run_id else [],
+                                "evidence_outcome": "reused",
+                            },
+                        )
+                    return
                 if command_type in {"", "unknown"}:
                     question_payload = build_business_question(
                         failure_code="unknown_semantics",
@@ -6229,11 +6356,7 @@ async def _run_follow_up_analysis_core(
         status="warning" if react_need_replan else "success",
     )
 
-    observations_by_action = {
-        _as_str(item.get("action_id")): item
-        for item in action_observations
-        if isinstance(item, dict) and _as_str(item.get("action_id"))
-    }
+    observations_by_action = _select_preferred_action_observations(action_observations)
     for action in followup_actions:
         action_id = _as_str((action or {}).get("id"))
         if not action_id:

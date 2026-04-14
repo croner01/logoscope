@@ -6,6 +6,7 @@ import pytest
 from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep
 from ai.skills.matcher import (
     build_skill_catalog_for_prompt,
+    extract_auto_selected_skills,
     extract_high_confidence_skills,
     get_skill_selection_summary,
     match_skills_by_rules,
@@ -177,6 +178,32 @@ class TestExtractHighConfidenceSkills:
         )
         skills = extract_high_confidence_skills(ctx, threshold=0.9)
         assert len(skills) == 0
+
+
+class TestExtractAutoSelectedSkills:
+    def test_rejects_component_only_match(self):
+        register_skill(_NetworkSkill)
+        ctx = SkillContext(
+            question="service health check looks unstable",
+            service_name="query-service",
+            log_content="health endpoint flaps intermittently",
+            component_type="service",
+        )
+        skills = extract_auto_selected_skills(ctx, threshold=0.35)
+        assert skills == []
+
+    def test_catalog_can_include_low_score_skill_without_auto_selecting_it(self):
+        register_skill(_NetworkSkill)
+        ctx = SkillContext(
+            question="service health check looks unstable",
+            service_name="query-service",
+            log_content="health endpoint flaps intermittently",
+            component_type="service",
+        )
+        catalog = build_skill_catalog_for_prompt(ctx)
+        skills = extract_auto_selected_skills(ctx, threshold=0.35)
+        assert "network_skill" in catalog
+        assert skills == []
 
 
 # ---------------------------------------------------------------------------

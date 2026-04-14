@@ -2,11 +2,12 @@
 Tests for ai.followup_session_helpers.
 """
 
+import asyncio
 from types import SimpleNamespace
 
-import pytest
-
+from api.ai import FollowUpMessage
 from ai.followup_session_helpers import (
+    _build_followup_history,
     _seed_followup_runtime_history_session,
     _upsert_followup_user_message,
 )
@@ -20,8 +21,48 @@ def _extract_overview_summary(_payload):
     return ""
 
 
-@pytest.mark.asyncio
-async def test_seed_followup_runtime_history_session_creates_running_session_and_initial_user_message():
+def test_build_followup_history_preserves_message_ids_from_pydantic_history_items():
+    class SessionStore:
+        def get_messages(self, session_id, limit):
+            return []
+
+    request_history = [
+        FollowUpMessage(
+            message_id="msg-history-user-1",
+            role="user",
+            content="历史提问",
+            timestamp="2026-03-02T10:00:00Z",
+        ),
+        FollowUpMessage(
+            message_id="msg-history-assistant-1",
+            role="assistant",
+            content="历史回答",
+            timestamp="2026-03-02T10:00:05Z",
+        ),
+    ]
+
+    history = asyncio.run(
+        _build_followup_history(
+            session_store=SessionStore(),
+            run_blocking=_run_blocking,
+            analysis_session_id="sess-followup-id-002",
+            request_history=request_history,
+            conversation_id="conv-001",
+            normalize_conversation_history=lambda items, max_items=40: items[-max_items:],
+            mask_sensitive_payload=lambda payload: payload,
+            get_conversation_history=lambda _conversation_id: [],
+            session_messages_to_conversation_history=lambda messages, max_items=40: messages[-max_items:],
+            merge_conversation_history=lambda base, extra, max_items=40: (base + extra)[-max_items:],
+        )
+    )
+
+    assert [item["message_id"] for item in history] == [
+        "msg-history-user-1",
+        "msg-history-assistant-1",
+    ]
+
+
+def test_seed_followup_runtime_history_session_creates_running_session_and_initial_user_message():
     calls = []
 
     class SessionStore:
@@ -68,17 +109,19 @@ async def test_seed_followup_runtime_history_session_creates_running_session_and
 
     session_store = SessionStore()
 
-    session_id = await _seed_followup_runtime_history_session(
-        session_store=session_store,
-        run_blocking=_run_blocking,
-        analysis_session_id="sess-new",
-        analysis_context={"analysis_type": "log", "service_name": "checkout-service"},
-        question="排查 checkout-service 超时",
-        user_message_id="msg-u-001",
-        conversation_id="conv-001",
-        extract_overview_summary=_extract_overview_summary,
-        llm_provider="deepseek",
-        utc_now_iso=lambda: "2026-03-19T07:30:00Z",
+    session_id = asyncio.run(
+        _seed_followup_runtime_history_session(
+            session_store=session_store,
+            run_blocking=_run_blocking,
+            analysis_session_id="sess-new",
+            analysis_context={"analysis_type": "log", "service_name": "checkout-service"},
+            question="排查 checkout-service 超时",
+            user_message_id="msg-u-001",
+            conversation_id="conv-001",
+            extract_overview_summary=_extract_overview_summary,
+            llm_provider="deepseek",
+            utc_now_iso=lambda: "2026-03-19T07:30:00Z",
+        )
     )
 
     assert session_id == "sess-new"
@@ -93,8 +136,7 @@ async def test_seed_followup_runtime_history_session_creates_running_session_and
     assert any(call[0] == "append_messages" for call in calls)
 
 
-@pytest.mark.asyncio
-async def test_seed_followup_runtime_history_session_skips_duplicate_user_message():
+def test_seed_followup_runtime_history_session_skips_duplicate_user_message():
     existing_session = SimpleNamespace(
         session_id="sess-existing",
         context={"analysis_type": "log"},
@@ -130,24 +172,25 @@ async def test_seed_followup_runtime_history_session_skips_duplicate_user_messag
         def append_messages(self, session_id, messages):
             raise AssertionError(f"append_messages should not be called, got: {session_id}, {messages}")
 
-    session_id = await _seed_followup_runtime_history_session(
-        session_store=SessionStore(),
-        run_blocking=_run_blocking,
-        analysis_session_id="sess-existing",
-        analysis_context={"analysis_type": "log", "service_name": "checkout-service"},
-        question="已有问题",
-        user_message_id="msg-u-dup",
-        conversation_id="conv-001",
-        extract_overview_summary=_extract_overview_summary,
-        llm_provider="deepseek",
-        utc_now_iso=lambda: "2026-03-19T07:30:00Z",
+    session_id = asyncio.run(
+        _seed_followup_runtime_history_session(
+            session_store=SessionStore(),
+            run_blocking=_run_blocking,
+            analysis_session_id="sess-existing",
+            analysis_context={"analysis_type": "log", "service_name": "checkout-service"},
+            question="已有问题",
+            user_message_id="msg-u-dup",
+            conversation_id="conv-001",
+            extract_overview_summary=_extract_overview_summary,
+            llm_provider="deepseek",
+            utc_now_iso=lambda: "2026-03-19T07:30:00Z",
+        )
     )
 
     assert session_id == "sess-existing"
 
 
-@pytest.mark.asyncio
-async def test_seed_followup_runtime_history_session_skips_duplicate_last_user_content():
+def test_seed_followup_runtime_history_session_skips_duplicate_last_user_content():
     existing_session = SimpleNamespace(
         session_id="sess-existing",
         context={"analysis_type": "log"},
@@ -183,17 +226,19 @@ async def test_seed_followup_runtime_history_session_skips_duplicate_last_user_c
         def append_messages(self, session_id, messages):
             raise AssertionError(f"append_messages should not be called, got: {session_id}, {messages}")
 
-    session_id = await _seed_followup_runtime_history_session(
-        session_store=SessionStore(),
-        run_blocking=_run_blocking,
-        analysis_session_id="sess-existing",
-        analysis_context={"analysis_type": "log", "service_name": "checkout-service"},
-        question="排查   checkout-service   timeout",
-        user_message_id="msg-u-new",
-        conversation_id="conv-001",
-        extract_overview_summary=_extract_overview_summary,
-        llm_provider="deepseek",
-        utc_now_iso=lambda: "2026-03-19T07:30:00Z",
+    session_id = asyncio.run(
+        _seed_followup_runtime_history_session(
+            session_store=SessionStore(),
+            run_blocking=_run_blocking,
+            analysis_session_id="sess-existing",
+            analysis_context={"analysis_type": "log", "service_name": "checkout-service"},
+            question="排查   checkout-service   timeout",
+            user_message_id="msg-u-new",
+            conversation_id="conv-001",
+            extract_overview_summary=_extract_overview_summary,
+            llm_provider="deepseek",
+            utc_now_iso=lambda: "2026-03-19T07:30:00Z",
+        )
     )
 
     assert session_id == "sess-existing"

@@ -386,6 +386,46 @@ def test_build_followup_react_loop_duplicate_skipped_reuses_full_signal_matched_
     assert slot_map["action:a2"]["signal_match"] is True
 
 
+def test_build_followup_react_loop_same_action_duplicate_skip_keeps_success_evidence():
+    actions = [
+        {
+            "id": "tmpl-450de615",
+            "title": "查询 query-service 日志",
+            "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+            "expected_signal": "query-service http request completed",
+            "command_type": "query",
+            "executable": True,
+        }
+    ]
+    observations = [
+        {
+            "action_id": "tmpl-450de615",
+            "status": "executed",
+            "exit_code": 0,
+            "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+            "stdout": "query-service http request completed",
+            "command_run_id": "cmdrun-query-001",
+            "output_truncated": False,
+        },
+        {
+            "action_id": "tmpl-450de615",
+            "status": "skipped",
+            "reason_code": "duplicate_skipped",
+            "message": "同一 run 已执行过该命令，跳过重复执行。",
+            "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+            "command_run_id": "cmdrun-query-001",
+        },
+    ]
+
+    loop = _build_followup_react_loop(actions=actions, action_observations=observations)
+
+    assert loop["phase"] == "finalized"
+    assert loop["replan"]["needed"] is False
+    assert loop["observe"]["evidence_coverage"] == 1.0
+    assert loop["observe"]["evidence_missing_slots"] == 0
+    assert loop["observe"]["evidence_slot_map"]["action:tmpl-450de615"]["status"] == "filled"
+
+
 def test_build_followup_react_loop_output_truncated_is_partial_evidence():
     actions = [
         {

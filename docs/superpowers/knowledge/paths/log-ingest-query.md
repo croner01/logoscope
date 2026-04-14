@@ -33,16 +33,18 @@ The log ingest and query path explains how a log enters Logoscope, is normalized
 - semantic-engine worker logs
 - ClickHouse `logs.logs`
 - ClickHouse `system.query_log`
+- ClickHouse `system.processes`
+- ClickHouse `system.metrics`
 - query-service logs
 
 ## Recommended First Checks
 - confirm whether the event was accepted by ingest-service
 - confirm whether normalized rows exist in ClickHouse
-- confirm whether query-service failures are storage-driven or API-driven
+- confirm whether query-service failures are storage-driven or API-driven; if the dominant symptom is slow query or timeout rather than missing data, pivot from ingest-path checks to ClickHouse execution/resource evidence
 
 ## Common Misreads
 - missing log results in UI do not automatically mean ingest failed
-- slow query symptoms often come from ClickHouse even when surfaced by query-service
+- slow query symptoms often come from ClickHouse even when surfaced by query-service, and continuing to ask for more correlation anchors is not the best next move once storage/read-path latency is already the stronger fault surface
 
 ## Sources
 - `/root/logoscope/docs/architecture/log-ingest-query-runtime-path.zh-CN.md`

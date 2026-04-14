@@ -10,6 +10,11 @@ import {
   buildRuntimeAnalysisContext,
   buildRuntimeDowngradeNotice,
 } from '../.tmp-tests/utils/runtimeAnalysisMode.js';
+import {
+  extractRequestId,
+  extractTraceId,
+} from '../.tmp-tests/utils/runtimeCorrelation.js';
+import { buildRuntimeCommandAnalysisContext } from '../.tmp-tests/utils/runtimeCommandContext.js';
 import { buildRuntimeFollowUpContext } from '../.tmp-tests/utils/runtimeFollowUpContext.js';
 import {
   buildHistoryTurns,
@@ -86,6 +91,42 @@ test('buildRuntimeDowngradeNotice explains trace downgrade clearly', () => {
     '未检测到 Trace ID，已自动降级为日志分析（使用时间窗口）。',
   );
   assert.equal(buildRuntimeDowngradeNotice(undefined), '');
+});
+
+test('extractTraceId recognizes trace=... inline payloads', () => {
+  assert.equal(
+    extractTraceId('2026-04-14 09:29:05 WARNING [query-service] [req-5bca26 trace=07845a75beecfbfd17f9439d5fedac72] slow query'),
+    '07845a75beecfbfd17f9439d5fedac72',
+  );
+});
+
+test('extractRequestId keeps req-... correlation ids from inline payloads', () => {
+  assert.equal(
+    extractRequestId('2026-04-14 09:29:05 WARNING [query-service] [req-5bca26bbd91e49b8b2080f800301ac49 trace=07845a75beecfbfd17f9439d5fedac72] slow query'),
+    'req-5bca26bbd91e49b8b2080f800301ac49',
+  );
+});
+
+test('buildRuntimeCommandAnalysisContext carries request_id into runtime command runs', () => {
+  const context = buildRuntimeCommandAnalysisContext({
+    analysisType: 'log',
+    traceId: 'trace-001',
+    requestId: 'req-001',
+    serviceName: 'query-service',
+    sourceMessageId: 'msg-src-001',
+    sourceCommand: 'kubectl -n islap get pods',
+  });
+
+  assert.deepEqual(context, {
+    analysis_type: 'log',
+    trace_id: 'trace-001',
+    request_id: 'req-001',
+    source_request_id: 'req-001',
+    service_name: 'query-service',
+    source_message_id: 'msg-src-001',
+    source_command: 'kubectl -n islap get pods',
+    agent_mode: 'followup_command_runtime',
+  });
 });
 
 test('buildRuntimeFollowUpContext carries explicit evidence window and anchor aliases', () => {

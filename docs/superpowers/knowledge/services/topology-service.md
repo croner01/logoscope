@@ -34,11 +34,11 @@
 
 ## Common Failures and Cautions
 - Empty topology can come from upstream graph-input loss, not only topology-service API bugs
-- Trace ID absence does not imply topology generation is impossible because hybrid topology also uses logs and metrics
+- Trace ID absence does not imply topology generation is impossible because hybrid topology also uses logs and metrics; preview anomalies and empty topology should be separated from read-path slow-query incidents because they are not the same fault surface
 
 ## Diagnosis Entry Hints
 - For topology anomalies, compare topology API output with upstream graph-building expectations
-- Use hybrid topology and edge preview together before concluding graph corruption
+- Use hybrid topology and edge preview together; if topology data is empty, first decide whether graph input is absent, filtered, or served incorrectly before expanding into generic correlation-only troubleshooting
 
 ## Sources
 - `/root/logoscope/AGENTS.md`

@@ -1422,7 +1422,13 @@ class TestFollowUpEndpoint:
         react_loop = result.get("react_loop") or {}
         next_actions = (react_loop.get("replan") or {}).get("next_actions") or []
         if next_actions:
-            assert any("结构化查询命令模板" in str(item) or "可直接执行（已生成 command_spec）" in str(item) for item in next_actions)
+            assert any(
+                "结构化查询命令模板" in str(item)
+                or "可直接执行（已生成 command_spec）" in str(item)
+                or "复核并重试命令" in str(item)
+                or "补齐证据槽位" in str(item)
+                for item in next_actions
+            )
             assert all("请先补全 command_spec" not in str(item) for item in next_actions)
         else:
             execute = react_loop.get("execute") if isinstance(react_loop.get("execute"), dict) else {}
@@ -3125,6 +3131,39 @@ class TestFollowupAnswerStabilization:
         assert "待证据验证的诊断草稿" in stabilized
         assert "当前还没有生成通过校验的结构化查询命令" in stabilized
         assert "以下项目仅是待验证排查草稿" in stabilized
+
+
+class TestFollowupObservationSelection:
+    """测试 follow-up 动作展示层的 observation 选优逻辑。"""
+
+    def test_prefers_successful_observation_over_later_duplicate_skip(self):
+        """同一 action 先成功后 duplicate_skipped 时，应保留成功态用于展示。"""
+        from api.ai import _select_preferred_action_observations
+
+        observations = [
+            {
+                "action_id": "tmpl-450de615",
+                "status": "executed",
+                "exit_code": 0,
+                "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+                "stdout": "query-service http request completed",
+                "command_run_id": "cmdrun-query-001",
+                "output_truncated": False,
+            },
+            {
+                "action_id": "tmpl-450de615",
+                "status": "skipped",
+                "reason_code": "duplicate_skipped",
+                "command": "kubectl -n islap logs -l app=query-service --since=15m --tail=200",
+                "message": "同一 run 已执行过该命令，跳过重复执行。",
+                "command_run_id": "cmdrun-query-001",
+            },
+        ]
+
+        selected = _select_preferred_action_observations(observations)
+
+        assert selected["tmpl-450de615"]["status"] == "executed"
+        assert int(selected["tmpl-450de615"]["exit_code"]) == 0
 
 
 class TestStorageAdapter:

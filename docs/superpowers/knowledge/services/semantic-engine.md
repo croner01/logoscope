@@ -31,11 +31,11 @@
 
 ## Common Failures and Cautions
 - Missing fields downstream may come from normalization loss, not user query bugs
-- Topology symptoms can start in semantic processing rather than topology-service presentation
+- Topology symptoms can start in semantic processing rather than topology-service presentation, and query rendering anomalies are not enough to blame frontend or query-service until semantic output shape is checked
 
 ## Diagnosis Entry Hints
 - When service names or trace fields look malformed, inspect normalization before blaming query rendering
-- For topology anomalies, verify whether semantic-engine produced the expected graph inputs
+- For topology anomalies or missing downstream fields, verify whether semantic-engine produced the expected graph inputs and raw envelope -> normalized output transformation before investigating unrelated read-path latency
 
 ## Sources
 - `/root/logoscope/AGENTS.md`

@@ -32,6 +32,13 @@ def _to_message_dict(item: Any) -> Dict[str, Any]:
                 return dumped
         except Exception:
             return {}
+    if hasattr(item, "dict"):
+        try:
+            dumped = item.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
     return {}
 
 

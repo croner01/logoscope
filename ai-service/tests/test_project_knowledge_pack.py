@@ -58,8 +58,25 @@ def test_select_project_knowledge_prefers_service_and_log_path_for_query_failure
 
     assert selection["knowledge_primary_service"] == "query-service"
     assert selection["knowledge_primary_path"] == "log-ingest-query"
-    assert selection["knowledge_pack_version"] == "2026-04-13.v1"
+    assert selection["knowledge_pack_version"] == "2026-04-14.v2"
     assert "ClickHouse" in selection["project_knowledge_prompt"]
+    assert "execution/resource evidence" in selection["project_knowledge_prompt"]
+
+
+def test_select_project_knowledge_prefers_trace_request_path_for_correlation_questions():
+    root = Path(__file__).resolve().parents[2]
+    selection = select_project_knowledge(
+        {
+            "analysis_type": "log",
+            "question": "缺少 trace_id 但有 request_id 和 time window 时该怎么继续排查",
+            "input_text": "request_id=req-001 time window 2026-04-14T10:30Z",
+        },
+        knowledge_root=root / "docs" / "superpowers" / "knowledge",
+    )
+
+    assert selection["knowledge_primary_service"] == ""
+    assert selection["knowledge_primary_path"] == "trace-request-correlation"
+    assert "not mandatory blockers" in selection["project_knowledge_prompt"]
 
 
 def test_select_project_knowledge_can_fallback_to_path_when_service_missing():
@@ -103,7 +120,7 @@ def test_select_project_knowledge_degrades_gracefully_when_assets_missing(tmp_pa
         knowledge_root=tmp_path / "missing-knowledge-root",
     )
 
-    assert selection["knowledge_pack_version"] == "2026-04-13.v1"
+    assert selection["knowledge_pack_version"] == "2026-04-14.v2"
     assert selection["knowledge_primary_service"] == ""
     assert selection["knowledge_primary_path"] == ""
     assert selection["knowledge_related_services"] == []

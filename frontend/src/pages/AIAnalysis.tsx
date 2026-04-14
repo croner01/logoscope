@@ -36,6 +36,12 @@ import {
   normalizeFollowUpCommandMatchKey,
 } from '../utils/followUpCommandMatch';
 import {
+  extractRequestId,
+  extractRequestIdFromRecord,
+  extractTraceId,
+  extractTraceIdFromRecord,
+} from '../utils/runtimeCorrelation';
+import {
   buildRuntimeDowngradeNotice,
   resolveRuntimeAnalysisMode,
 } from '../utils/runtimeAnalysisMode';
@@ -2746,148 +2752,6 @@ const AIAnalysis: React.FC = () => {
   };
   runTraceAnalysisRef.current = runTraceAnalysis;
 
-  const extractTraceIdFromRecord = (record?: Record<string, unknown> | null): string => {
-    if (!record || typeof record !== 'object') {
-      return '';
-    }
-    const keys = [
-      'trace_id',
-      'trace.id',
-      'traceId',
-      'trace-id',
-      'otel.trace_id',
-    ];
-
-    for (const key of keys) {
-      const direct = record[key];
-      if (direct !== undefined && direct !== null) {
-        const normalized = String(direct).trim();
-        if (normalized) {
-          return normalized;
-        }
-      }
-      if (key.includes('.')) {
-        const nested = resolveDotPathValue(record, key);
-        if (nested !== undefined && nested !== null) {
-          const normalized = String(nested).trim();
-          if (normalized) {
-            return normalized;
-          }
-        }
-      }
-    }
-    return '';
-  };
-
-  const extractTraceId = (value: string): string => {
-    const text = (value || '').trim();
-    if (!text) return '';
-
-    if (text.startsWith('{')) {
-      try {
-        const parsed = JSON.parse(text);
-        const parsedTraceId = extractTraceIdFromRecord(parsed);
-        if (parsedTraceId) {
-          return parsedTraceId;
-        }
-      } catch {
-        // ignore JSON parse errors and fallback to raw text detection
-      }
-    }
-
-    const inlineMatch = text.match(/(?:trace[_-]?id|trace\.id)\s*[:=]\s*([a-zA-Z0-9_-]{8,})/i);
-    if (inlineMatch?.[1]) {
-      return inlineMatch[1].trim();
-    }
-
-    if (/^[a-zA-Z0-9_-]{8,}$/.test(text)) {
-      return text;
-    }
-
-    return '';
-  };
-
-  const resolveDotPathValue = (input: Record<string, unknown>, path: string): unknown => {
-    const segments = String(path || '').split('.').filter(Boolean);
-    let current: unknown = input;
-    for (const segment of segments) {
-      if (!current || typeof current !== 'object') {
-        return undefined;
-      }
-      current = asObject(current)[segment];
-    }
-    return current;
-  };
-
-  const extractRequestIdFromRecord = (record?: Record<string, unknown> | null): string => {
-    if (!record || typeof record !== 'object') {
-      return '';
-    }
-    const keys = [
-      'request_id',
-      'request.id',
-      'requestId',
-      'req_id',
-      'x-request-id',
-      'x_request_id',
-      'http.request_id',
-      'trace.request_id',
-    ];
-
-    for (const key of keys) {
-      const direct = record[key];
-      if (direct !== undefined && direct !== null) {
-        const normalized = String(direct).trim();
-        if (normalized) {
-          return normalized;
-        }
-      }
-      if (key.includes('.')) {
-        const nested = resolveDotPathValue(record, key);
-        if (nested !== undefined && nested !== null) {
-          const normalized = String(nested).trim();
-          if (normalized) {
-            return normalized;
-          }
-        }
-      }
-    }
-    return '';
-  };
-
-  const extractRequestId = (value: string): string => {
-    const text = String(value || '').trim();
-    if (!text) {
-      return '';
-    }
-
-    if (text.startsWith('{')) {
-      try {
-        const parsed = JSON.parse(text);
-        const parsedRequestId = extractRequestIdFromRecord(parsed);
-        if (parsedRequestId) {
-          return parsedRequestId;
-        }
-      } catch {
-        // ignore JSON parse errors and continue with text regex extraction
-      }
-    }
-
-    const explicitMatch = text.match(
-      /(?:request[_-]?id|req[_-]?id|x-request-id)\s*[:=]\s*([a-zA-Z0-9._:-]{6,})/i,
-    );
-    if (explicitMatch?.[1]) {
-      return explicitMatch[1].trim();
-    }
-
-    const reqPrefixMatch = text.match(/\b(req-[a-zA-Z0-9._:-]{3,})\b/i);
-    if (reqPrefixMatch?.[1]) {
-      return reqPrefixMatch[1].trim();
-    }
-
-    return '';
-  };
-
   const extractTimestampFromInput = (value: string): string => {
     const text = String(value || '').trim();
     if (!text) {
@@ -4402,6 +4266,7 @@ const AIAnalysis: React.FC = () => {
   }, [upsertFollowUpAssistantMessage]);
 
   const agentRuntimeSourceTraceId = extractTraceId(inputText);
+  const agentRuntimeSourceRequestId = extractRequestId(inputText);
 
   const {
     ensureSession: ensureAgentRuntimeCommandSession,
@@ -4417,6 +4282,7 @@ const AIAnalysis: React.FC = () => {
     analysisType,
     serviceName,
     traceId: agentRuntimeSourceTraceId,
+    requestId: agentRuntimeSourceRequestId,
     runtimeEnabled: FOLLOWUP_AGENT_RUNTIME_COMMANDS_ENABLED,
     classifyCommand: classifyFollowUpCommand,
     syncSessionMessage: syncAgentRuntimeCommandMessage,

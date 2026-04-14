@@ -28,15 +28,17 @@
 ## Preferred Evidence Sources
 - query-service logs
 - ClickHouse `system.query_log`
+- ClickHouse `system.processes`
+- ClickHouse `system.metrics`
 - frontend request parameters hitting query-service APIs
 
 ## Common Failures and Cautions
-- Slow reads may be query-service symptoms but ClickHouse root causes
+- Slow reads may be query-service symptoms but ClickHouse root causes; once slow-query or large-read symptoms are clear, missing `trace_id` alone is not a valid reason to stop read-path diagnosis
 - Missing topology preview data may reflect upstream topology generation issues rather than query-service-only bugs
 
 ## Diagnosis Entry Hints
 - For user-facing read failures, start with query-service logs plus ClickHouse query evidence
-- Prefer request window + request_id correlation before assuming trace-only visibility
+- Prefer request window + request_id correlation before assuming trace-only visibility; if the symptom is already slow query / timeout / large result scan, pivot quickly to ClickHouse execution and resource evidence before asking for more generic correlation anchors
 
 ## Sources
 - `/root/logoscope/AGENTS.md`

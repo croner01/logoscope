@@ -81,6 +81,44 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _model_to_dict(value: Any) -> Dict[str, Any]:
+    """Compat helper for Pydantic v1/v2 models."""
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    return {}
+
+
+def _structured_answer_from_payload(payload: Dict[str, Any]) -> Optional[StructuredAnswer]:
+    """Compat helper for Pydantic v1/v2 StructuredAnswer parsing."""
+    if not isinstance(payload, dict):
+        return None
+    if hasattr(StructuredAnswer, "model_validate"):
+        try:
+            return StructuredAnswer.model_validate(payload)
+        except Exception:
+            return None
+    if hasattr(StructuredAnswer, "parse_obj"):
+        try:
+            return StructuredAnswer.parse_obj(payload)
+        except Exception:
+            return None
+    return None
+
+
 def _collapse_unquoted_whitespace(text: str) -> str:
     chars: List[str] = []
     quote_char = ""
@@ -370,7 +408,9 @@ def _parse_structured_answer(content: str) -> Optional[StructuredAnswer]:
         if not isinstance(payload, dict):
             continue
         try:
-            return StructuredAnswer.model_validate(payload)
+            parsed = _structured_answer_from_payload(payload)
+            if parsed is not None:
+                return parsed
         except Exception:
             continue
 
@@ -476,8 +516,7 @@ def _format_cause_line(item: Dict[str, Any]) -> str:
 
 def _resolve_renderable_action_command(action: Any) -> str:
     raw_command_spec = getattr(action, "command_spec", None)
-    if hasattr(raw_command_spec, "model_dump"):
-        raw_command_spec = raw_command_spec.model_dump()
+    raw_command_spec = _model_to_dict(raw_command_spec)
     command_spec = normalize_followup_command_spec(raw_command_spec)
     if not command_spec:
         return ""
@@ -500,7 +539,7 @@ def _render_structured_answer(answer: StructuredAnswer) -> str:
     if answer.root_causes:
         lines.append("根因分析：")
         cause_lines = [
-            _format_cause_line(item.model_dump() if hasattr(item, "model_dump") else item)
+            _format_cause_line(_model_to_dict(item))
             for item in answer.root_causes
         ]
         lines.extend([line for line in cause_lines if line])
@@ -557,8 +596,7 @@ def _extract_structured_actions(answer: StructuredAnswer) -> List[Dict[str, Any]
         action_text = _as_str(getattr(action, "action", ""))
         expected_outcome = _as_str(getattr(action, "expected_outcome", ""))
         raw_command_spec = getattr(action, "command_spec", None)
-        if hasattr(raw_command_spec, "model_dump"):
-            raw_command_spec = raw_command_spec.model_dump()
+        raw_command_spec = _model_to_dict(raw_command_spec)
         command_spec = normalize_followup_command_spec(raw_command_spec)
         command = ""
         command_display = _normalize_action_command(getattr(action, "command", ""))

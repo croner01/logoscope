@@ -32,10 +32,10 @@
 
 ## Common Failures and Cautions
 - Do not confuse successful ingest acceptance with downstream persistence success
-- Request-format adaptation issues often appear before queue or storage failures
+- Request-format adaptation issues often appear before queue or storage failures, and query-side symptoms are not proof that ingest-service is healthy or unhealthy until queue/envelope progression is verified
 
 ## Diagnosis Entry Hints
-- Check whether payloads reached Kafka before blaming query-side services
+- Check whether payloads reached Kafka before blaming query-side services; if rows are already present in ClickHouse and only reads are slow, stop blaming ingest and pivot to read-path / storage execution evidence
 - When logs are missing downstream, verify `/v1/logs` path and envelope transformation first
 
 ## Sources

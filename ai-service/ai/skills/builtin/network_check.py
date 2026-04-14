@@ -68,7 +68,7 @@ class NetworkConnectivitySkill(DiagnosticSkill):
                 step_id="net-health-check",
                 title="curl 服务健康端点",
                 command_spec=_generic_exec(
-                    f"curl -sS --max-time 5 http://{svc_host}/health 2>&1 | head -20",
+                    f"curl -sS --max-time 5 http://{svc_host}/health",
                     timeout_s=15,
                 ),
                 purpose="验证目标服务 HTTP 健康端点是否可达，检测 4xx/5xx 响应",
@@ -79,7 +79,7 @@ class NetworkConnectivitySkill(DiagnosticSkill):
                 title="DNS 解析验证",
                 command_spec=_generic_exec(
                     f"kubectl exec -n {ns} deploy/{svc or 'semantic-engine'} -- "
-                    f"nslookup {svc_host} 2>&1 | head -15",
+                    f"nslookup {svc_host}",
                     timeout_s=15,
                 ),
                 purpose="确认 Kubernetes DNS 解析是否正常",
@@ -90,7 +90,7 @@ class NetworkConnectivitySkill(DiagnosticSkill):
                 step_id="net-k8s-endpoints",
                 title="检查 Service Endpoints",
                 command_spec=_generic_exec(
-                    f"kubectl get endpoints -n {ns} {svc or ''} -o wide 2>&1".strip(),
+                    f"kubectl get endpoints -n {ns} {svc or ''} -o wide".strip(),
                     timeout_s=10,
                 ),
                 purpose="确认 Service 是否有健康的 Endpoint，排除 Pod 未就绪问题",

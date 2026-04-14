@@ -68,7 +68,7 @@ class ResourceUsageSkill(DiagnosticSkill):
                 step_id="res-top-nodes",
                 title="查看节点资源用量",
                 command_spec=_generic_exec(
-                    "kubectl top nodes --no-headers 2>/dev/null | sort -k3 -hr",
+                    "kubectl top nodes --no-headers",
                     timeout_s=15,
                 ),
                 purpose="了解集群节点整体资源压力，判断是否存在节点级别的资源瓶颈",
@@ -78,7 +78,7 @@ class ResourceUsageSkill(DiagnosticSkill):
                 step_id="res-top-pods",
                 title="查看命名空间 Pod 资源用量排序",
                 command_spec=_generic_exec(
-                    f"kubectl top pod -n {ns} --no-headers 2>/dev/null | sort -k3 -hr | head -20",
+                    f"kubectl top pod -n {ns} --no-headers",
                     timeout_s=15,
                 ),
                 purpose="找出内存用量最高的 Pod，定位资源占用异常的进程",
@@ -89,11 +89,10 @@ class ResourceUsageSkill(DiagnosticSkill):
                 step_id="res-quota-check",
                 title="检查 ResourceQuota 限制",
                 command_spec=_generic_exec(
-                    f"kubectl describe resourcequota -n {ns} 2>/dev/null && "
-                    f"kubectl describe limitrange -n {ns} 2>/dev/null | head -40",
+                    f"kubectl describe resourcequota -n {ns}",
                     timeout_s=15,
                 ),
-                purpose="确认命名空间资源配额是否已满，是否触发了 LimitRange 约束",
+                purpose="确认命名空间资源配额是否已满，是否存在 requests / limits 约束压力",
                 depends_on=["res-top-nodes"],
                 parse_hints={"extract": ["Used", "Hard", "requests", "limits", "memory", "cpu"]},
             ),

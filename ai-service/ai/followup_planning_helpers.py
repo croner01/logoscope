@@ -973,18 +973,58 @@ def _build_followup_react_loop(
     """构建 ReAct 可控闭环状态：Plan -> Policy -> Execute -> Observe -> Replan."""
     safe_actions = [item for item in _as_list(actions) if isinstance(item, dict)]
     safe_observations = [item for item in _as_list(action_observations) if isinstance(item, dict)]
-    obs_by_action_id = {
-        _as_str(item.get("action_id")): item
-        for item in safe_observations
-        if _as_str(item.get("action_id"))
-    }
+
+    def _observation_priority(observation_payload: Dict[str, Any]) -> tuple[int, int]:
+        status = _as_str(observation_payload.get("status")).strip().lower()
+        exit_code = int(_as_float(observation_payload.get("exit_code"), 0))
+        output_truncated = bool(observation_payload.get("output_truncated"))
+        reason_code = _as_str(observation_payload.get("reason_code")).strip().lower()
+
+        if status == "executed":
+            if exit_code == 0 and not output_truncated:
+                return (6, 0)
+            if exit_code == 0:
+                return (5, 0)
+            return (3, 0)
+        if status == "failed":
+            return (4, 0)
+        if status == "skipped":
+            if reason_code == "duplicate_skipped":
+                return (2, 0)
+            if reason_code == "backend_unready":
+                return (1, 1)
+            return (1, 0)
+        if status in {"permission_required", "confirmation_required", "elevation_required"}:
+            return (1, 0)
+        if status == "semantic_incomplete":
+            return (0, 1)
+        return (0, 0)
+
+    def _upsert_preferred_observation(
+        target: Dict[str, Dict[str, Any]],
+        key: str,
+        observation_payload: Dict[str, Any],
+    ) -> None:
+        if not key:
+            return
+        existing = target.get(key)
+        if existing is None:
+            target[key] = observation_payload
+            return
+        existing_rank = _observation_priority(existing)
+        candidate_rank = _observation_priority(observation_payload)
+        if candidate_rank >= existing_rank:
+            target[key] = observation_payload
+
+    obs_by_action_id: Dict[str, Dict[str, Any]] = {}
     obs_by_command: Dict[str, Dict[str, Any]] = {}
     for item in safe_observations:
+        action_id = _as_str(item.get("action_id"))
         command_key = _normalize_followup_command_match_key(_as_str(item.get("command")))
-        if not command_key:
-            continue
-        if command_key not in obs_by_command:
-            obs_by_command[command_key] = item
+        if action_id:
+            _upsert_preferred_observation(obs_by_action_id, action_id, item)
+        if command_key:
+            _upsert_preferred_observation(obs_by_command, command_key, item)
 
     def _resolve_action_observation(action_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         safe_action_id = _as_str(action_payload.get("id")).strip()
