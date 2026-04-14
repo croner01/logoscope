@@ -30,6 +30,15 @@ export const resolveRuntimeAnalysisMode = (params: {
   };
 };
 
+export function buildRuntimeDowngradeNotice(
+  reason?: RuntimeAnalysisModeResolution['reason'],
+): string {
+  if (reason === 'trace_id_missing') {
+    return '未检测到 Trace ID，已自动降级为日志分析（使用时间窗口）。';
+  }
+  return '';
+}
+
 export function buildRuntimeAnalysisContext(params: {
   analysisType: RuntimeAnalysisMode;
   traceId?: string | null;

@@ -973,6 +973,18 @@ class AgentRuntimeService:
         runtime_options: Optional[Dict[str, Any]] = None,
     ) -> AgentRun:
         safe_context = analysis_context if isinstance(analysis_context, dict) else {}
+        analysis_type = _as_str(safe_context.get("analysis_type"), "log").strip().lower() or "log"
+        trace_id = _as_str(safe_context.get("trace_id")).strip()
+        if analysis_type == "trace" and not trace_id:
+            safe_context = dict(safe_context)
+            safe_context["analysis_type"] = "log"
+            safe_context["analysis_type_original"] = "trace"
+            safe_context["analysis_type_downgraded"] = True
+            safe_context["analysis_type_downgrade_reason"] = "trace_id_missing"
+            analysis_type = "log"
+        else:
+            safe_context = dict(safe_context)
+            safe_context["analysis_type"] = analysis_type
         safe_runtime_options = self._normalize_runtime_options(runtime_options)
         safe_conversation_id = _as_str(safe_runtime_options.get("conversation_id")) or build_id("conv")
         safe_runtime_options["conversation_id"] = safe_conversation_id
@@ -981,11 +993,27 @@ class AgentRuntimeService:
             raise ValueError("question is required")
 
         created_at = utc_now_iso()
+        summary_json = {
+            "title": safe_question[:120],
+            "current_phase": "planning",
+            "iteration": 0,
+            "runtime_options": safe_runtime_options,
+            "pending_approval_count": 0,
+            "replan_count": 0,
+        }
+        if safe_context.get("analysis_type_downgraded"):
+            summary_json.update(
+                {
+                    "analysis_type_downgraded": True,
+                    "analysis_type_original": _as_str(safe_context.get("analysis_type_original")),
+                    "analysis_type_downgrade_reason": _as_str(safe_context.get("analysis_type_downgrade_reason")),
+                }
+            )
         run = AgentRun(
             run_id=build_id("run"),
             session_id=_as_str(session_id) or build_id("sess"),
             conversation_id=safe_conversation_id,
-            analysis_type=_as_str(safe_context.get("analysis_type"), "log"),
+            analysis_type=analysis_type,
             engine="agent-runtime-v1",
             runtime_version="v1",
             user_message_id=build_id("msg-u"),
@@ -996,14 +1024,7 @@ class AgentRuntimeService:
             question=safe_question,
             input_json={"question": safe_question},
             context_json=safe_context,
-            summary_json={
-                "title": safe_question[:120],
-                "current_phase": "planning",
-                "iteration": 0,
-                "runtime_options": safe_runtime_options,
-                "pending_approval_count": 0,
-                "replan_count": 0,
-            },
+            summary_json=summary_json,
             created_at=created_at,
             updated_at=created_at,
         )

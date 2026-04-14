@@ -35,6 +35,10 @@ import {
   normalizeExecutableCommand,
   normalizeFollowUpCommandMatchKey,
 } from '../utils/followUpCommandMatch';
+import {
+  buildRuntimeDowngradeNotice,
+  resolveRuntimeAnalysisMode,
+} from '../utils/runtimeAnalysisMode';
 import type { AgentRuntimeCommandSession } from '../features/ai-runtime/types/command';
 import type { RuntimeApprovalEntry } from '../features/ai-runtime/types/view';
 import { useNavigation } from '../hooks/useNavigation';
@@ -3693,6 +3697,8 @@ const AIAnalysis: React.FC = () => {
 
     try {
       let response: AIAnalysisResponse;
+      let resolvedAnalysisType = analysisType;
+      let downgradeNotice = '';
       if (analysisType === 'log') {
         const snapshotContext = serviceErrorSnapshot && inputText === serviceErrorSnapshot.generatedInput
           ? serviceErrorSnapshot.context
@@ -3721,30 +3727,59 @@ const AIAnalysis: React.FC = () => {
         });
       } else {
         const traceId = extractTraceId(inputText);
-        if (!traceId) {
-          setError('请输入有效的 Trace ID，或粘贴包含 trace_id 的 JSON');
-          return;
+        const resolved = resolveRuntimeAnalysisMode({ analysisType, traceId });
+        if (resolved.downgraded) {
+          resolvedAnalysisType = resolved.resolvedType;
+          downgradeNotice = buildRuntimeDowngradeNotice(resolved.reason);
+          setAnalysisType('log');
+          setAnalysisAssistNotice(downgradeNotice);
+          const preparedInput = inputText;
+          const mergedContext: Record<string, unknown> = {
+            source_log_timestamp: String(sourceLogData?.timestamp || ''),
+            source_service_name: String(sourceLogData?.service_name || serviceName || ''),
+            source_trace_id: String(sourceLogData?.trace_id || ''),
+            source_request_id: extractRequestId(inputText),
+            agent_mode: 'request_flow',
+            analysis_type_original: 'trace',
+            analysis_type_downgraded: true,
+            analysis_type_downgrade_reason: resolved.reason,
+          };
+          response = await runLogAnalysis({
+            logContent: preparedInput,
+            service: serviceName,
+            context: mergedContext,
+            useLLM,
+          });
+          handleFindSimilarCases(preparedInput, response.overview?.problem, serviceName, mergedContext);
+          handleKBSearch(preparedInput, {
+            problemType: response.overview?.problem,
+            service: serviceName,
+          });
+        } else {
+          resolvedAnalysisType = resolved.resolvedType;
+          response = await runTraceAnalysis({
+            traceId,
+            service: serviceName || undefined,
+            useLLM,
+          });
+          handleKBSearch(traceId, {
+            problemType: response.overview?.problem,
+            service: serviceName,
+          });
         }
-
-        response = await runTraceAnalysis({
-          traceId,
-          service: serviceName || undefined,
-          useLLM,
-        });
-        handleKBSearch(traceId, {
-          problemType: response.overview?.problem,
-          service: serviceName,
-        });
       }
       setResult(response);
       buildDefaultContextPills({
         result: response,
         sessionId: String(response.session_id || ''),
         service: serviceName,
-        traceId: analysisType === 'trace' ? extractTraceId(inputText) : '',
+        traceId: resolvedAnalysisType === 'trace' ? extractTraceId(inputText) : '',
         input: inputText,
-        type: analysisType,
+        type: resolvedAnalysisType,
       });
+      if (!downgradeNotice) {
+        setAnalysisAssistNotice('');
+      }
     } catch (err: unknown) {
       setError(parseAnalyzeErrorMessage(err, { useLLM }));
     } finally {
