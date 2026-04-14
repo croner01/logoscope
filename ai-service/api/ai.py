@@ -1648,21 +1648,6 @@ async def _run_followup_runtime_task(
         followup_runtime_task_count=followup_task_count,
         followup_runtime_last_started_at=_utc_now_iso(),
     )
-
-    followup_request = _build_followup_request_from_ai_run(run, runtime_options)
-    knowledge_updates = _build_project_knowledge_summary_updates(followup_request.analysis_context)
-    if knowledge_updates:
-        runtime_service._update_run_summary(run, **knowledge_updates)  # noqa: SLF001
-    if previous_executed_commands:
-        followup_request.analysis_context = {
-            **(followup_request.analysis_context or {}),
-            "_runtime_executed_commands": previous_executed_commands,
-        }
-    if previous_action_observations:
-        followup_request.analysis_context = {
-            **(followup_request.analysis_context or {}),
-            "_runtime_prior_action_observations": previous_action_observations[-200:],
-        }
     runtime_state: Dict[str, Any] = {
         "thought_index": 0,
         "tool_call_ids": {},
@@ -1684,6 +1669,20 @@ async def _run_followup_runtime_task(
         )
 
     try:
+        followup_request = _build_followup_request_from_ai_run(run, runtime_options)
+        knowledge_updates = _build_project_knowledge_summary_updates(followup_request.analysis_context)
+        if knowledge_updates:
+            runtime_service._update_run_summary(run, **knowledge_updates)  # noqa: SLF001
+        if previous_executed_commands:
+            followup_request.analysis_context = {
+                **(followup_request.analysis_context or {}),
+                "_runtime_executed_commands": previous_executed_commands,
+            }
+        if previous_action_observations:
+            followup_request.analysis_context = {
+                **(followup_request.analysis_context or {}),
+                "_runtime_prior_action_observations": previous_action_observations[-200:],
+            }
         result = await _run_follow_up_analysis_core(
             followup_request,
             event_callback=_runtime_event_callback,
@@ -2008,7 +2007,7 @@ async def _run_followup_runtime_task(
         )
     finally:
         latest_run = runtime_service.get_run_fresh(run_id) if hasattr(runtime_service, "get_run_fresh") else runtime_service.get_run(run_id)
-        if latest_run is not None and not is_terminal_run_status(latest_run.status):
+        if latest_run is not None:
             runtime_service._update_run_summary(  # noqa: SLF001
                 latest_run,
                 followup_runtime_worker="idle",

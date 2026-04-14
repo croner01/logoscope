@@ -36,6 +36,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY shared_src/ /app/shared_lib/
 RUN ln -s /app/shared_lib /app/shared_lib/shared_src
 COPY ai-service/ .
+COPY docs/superpowers/knowledge/ /app/docs/superpowers/knowledge/
 
 EXPOSE 8090
 

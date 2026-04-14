@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
+import ai.project_knowledge_pack as project_knowledge_pack
 from ai.project_knowledge_pack import (
+    _default_knowledge_root,
     extract_markdown_sections,
     load_project_knowledge_registry,
     select_project_knowledge,
@@ -74,3 +76,36 @@ def test_select_project_knowledge_can_fallback_to_path_when_service_missing():
     assert selection["knowledge_primary_service"] == ""
     assert selection["knowledge_primary_path"] == "topology-generation-preview"
     assert selection["project_knowledge_prompt"]
+
+
+def test_default_knowledge_root_prefers_app_docs_layout(monkeypatch, tmp_path):
+    app_root = tmp_path / "app"
+    module_dir = app_root / "ai"
+    knowledge_root = app_root / "docs" / "superpowers" / "knowledge"
+    knowledge_root.mkdir(parents=True)
+    fake_module_file = module_dir / "project_knowledge_pack.py"
+    fake_module_file.parent.mkdir(parents=True)
+    fake_module_file.write_text("# test module path\n", encoding="utf-8")
+
+    monkeypatch.setattr(project_knowledge_pack, "__file__", str(fake_module_file))
+
+    assert _default_knowledge_root() == knowledge_root
+
+
+def test_select_project_knowledge_degrades_gracefully_when_assets_missing(tmp_path):
+    selection = select_project_knowledge(
+        {
+            "analysis_type": "log",
+            "service_name": "ai-service",
+            "question": "runtime run 直接中断",
+            "input_text": "follow-up runtime task failed",
+        },
+        knowledge_root=tmp_path / "missing-knowledge-root",
+    )
+
+    assert selection["knowledge_pack_version"] == "2026-04-13.v1"
+    assert selection["knowledge_primary_service"] == ""
+    assert selection["knowledge_primary_path"] == ""
+    assert selection["knowledge_related_services"] == []
+    assert selection["project_knowledge_prompt"] == ""
+    assert selection["knowledge_selection_reason"] == "fallback=knowledge_unavailable"
