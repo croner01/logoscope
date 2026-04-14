@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 
-PROJECT_KNOWLEDGE_PACK_VERSION = "2026-04-13.v1"
+PROJECT_KNOWLEDGE_PACK_VERSION = "2026-04-14.v2"
 logger = logging.getLogger(__name__)
 
 _SERVICE_MANIFEST = {

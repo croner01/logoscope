@@ -1080,8 +1080,7 @@ class AgentRuntimeService:
         try:
             from ai.skills.base import SkillContext
             from ai.skills.matcher import (
-                build_skill_catalog_for_prompt,
-                extract_high_confidence_skills,
+                extract_auto_selected_skills,
                 get_skill_selection_summary,
             )
 
@@ -1089,7 +1088,7 @@ class AgentRuntimeService:
                 **context,
                 "question": run.question,
             })
-            matched_skills = extract_high_confidence_skills(skill_ctx, threshold=0.1, max_skills=3)
+            matched_skills = extract_auto_selected_skills(skill_ctx, threshold=0.35, max_skills=3)
 
             if not matched_skills:
                 self.append_event(
@@ -1182,6 +1181,7 @@ class AgentRuntimeService:
             # Persist selected skills in run summary
             summary_json = dict(run.summary_json or {})
             summary_json["selected_skills"] = skill_names
+            summary_json["skill_selection_policy"] = "pattern_hits_required+threshold_0_35"
             summary_json["skill_step_count"] = step_seq - 1
             run.summary_json = summary_json
             run.updated_at = utc_now_iso()

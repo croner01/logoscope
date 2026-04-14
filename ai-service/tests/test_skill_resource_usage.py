@@ -94,6 +94,18 @@ class TestResourceUsageSkill:
         steps = skill.plan_steps(ctx)
         assert len(steps) <= skill.max_steps
 
+    def test_plan_steps_avoid_shell_chaining_and_redirection(self, skill):
+        ctx = _ctx()
+        steps = skill.plan_steps(ctx)
+        commands = [
+            str(step.command_spec.get("args", {}).get("command") or "")
+            for step in steps
+        ]
+        assert commands
+        assert all("|" not in command for command in commands)
+        assert all("&&" not in command for command in commands)
+        assert all(">" not in command for command in commands)
+
     def test_step_ids_are_unique(self, skill):
         ctx = _ctx()
         steps = skill.plan_steps(ctx)

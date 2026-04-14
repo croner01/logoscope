@@ -187,6 +187,30 @@ def test_get_ai_run_events_returns_initial_runtime_events(monkeypatch):
     assert payload["next_after_seq"] >= 4
 
 
+def test_create_ai_run_does_not_auto_select_low_confidence_service_skill(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-skill-gating-001",
+                question="service health check looks unstable",
+                analysis_context={
+                    "analysis_type": "log",
+                    "service_name": "query-service",
+                    "component_type": "service",
+                    "runtime_profile": "ai-runtime-lab",
+                },
+            )
+        )
+        return created["run"]["run_id"]
+
+    run_id = asyncio.run(_run())
+    events = runtime_service.list_events(run_id, after_seq=0, limit=50)
+    assert "skill_matched" not in [item.event_type for item in events]
+
+
 def test_create_ai_run_followup_mode_emits_final_answer_events(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
@@ -259,7 +283,7 @@ def test_create_ai_run_followup_mode_emits_final_answer_events(monkeypatch):
 
     assert fetched["run"]["status"] == "completed"
     assert fetched["run"]["conversation_id"] == "conv-followup-001"
-    assert fetched["run"]["summary_json"]["knowledge_pack_version"] == "2026-04-13.v1"
+    assert fetched["run"]["summary_json"]["knowledge_pack_version"] == "2026-04-14.v2"
     assert fetched["run"]["summary_json"]["knowledge_primary_service"] == "query-service"
     assert fetched["run"]["summary_json"]["knowledge_primary_path"] == "log-ingest-query"
     assert "service=query-service" in fetched["run"]["summary_json"]["knowledge_selection_reason"]
@@ -1445,6 +1469,64 @@ def test_emit_followup_runtime_event_dedupes_terminal_observation_and_preserves_
     assert len(skipped_events) == 1
     assert skipped_events[0].payload.get("reason_code") == "duplicate_skipped"
     assert skipped_events[0].payload.get("action_id") == "act-ob-001"
+
+
+def test_emit_followup_runtime_event_skips_duplicate_approval_when_command_already_completed(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+
+    run = runtime_service.create_run(
+        session_id="sess-runtime-approval-dedupe-001",
+        question="检查重复审批去重",
+        analysis_context={"analysis_type": "log", "service_name": "query-service"},
+        runtime_options={"mode": "followup_analysis"},
+    )
+    runtime_service._update_run_summary(  # noqa: SLF001
+        run,
+        command_run_index={
+            "approval-dedupe-key-001": {
+                "status": "completed",
+                "command_run_id": "cmdrun-existing-001",
+                "action_id": "act-approval-runtime-001",
+                "command": "kubectl -n islap exec pod/clickhouse-0 -- clickhouse-client --query \"DESCRIBE TABLE logs.traces\"",
+                "purpose": "获取表字段、类型、默认表达式等信息",
+                "exit_code": 0,
+            },
+        },
+    )
+    state = {"tool_call_ids": {}, "started_tool_calls": set(), "finished_tool_calls": set()}
+
+    async def _run():
+        await _emit_followup_runtime_event(
+            runtime_service,
+            run.run_id,
+            "observation",
+            {
+                "action_id": "act-approval-runtime-001",
+                "command": "kubectl -n islap exec pod/clickhouse-0 -- clickhouse-client --query \"DESCRIBE TABLE logs.traces\"",
+                "purpose": "获取表字段、类型、默认表达式等信息",
+                "status": "confirmation_required",
+                "message": "命令不在免审批白名单模板内，需人工确认后执行。",
+                "command_type": "query",
+                "risk_level": "high",
+                "requires_confirmation": True,
+                "requires_elevation": False,
+                "confirmation_ticket": "exec-ticket-runtime-dup-001",
+                "command_family": "kubernetes",
+                "approval_policy": "confirmation_required",
+            },
+            state,
+        )
+
+    asyncio.run(_run())
+
+    events = runtime_service.list_events(run.run_id, after_seq=0, limit=80)
+    event_types = [item.event_type for item in events]
+    assert "approval_required" not in event_types
+    skipped_events = [item for item in events if item.event_type == "tool_call_skipped_duplicate"]
+    assert len(skipped_events) == 1
+    assert skipped_events[0].payload.get("command_run_id") == "cmdrun-existing-001"
+    assert skipped_events[0].payload.get("reason_code") == "duplicate_skipped"
 
 
 def test_finalize_assistant_message_skips_when_waiting_approval():
@@ -3724,7 +3806,7 @@ def test_build_followup_request_from_ai_run_enriches_project_knowledge_metadata(
     )
 
     analysis_context = request.analysis_context
-    assert analysis_context["knowledge_pack_version"] == "2026-04-13.v1"
+    assert analysis_context["knowledge_pack_version"] == "2026-04-14.v2"
     assert analysis_context["knowledge_primary_service"] == "query-service"
     assert analysis_context["knowledge_primary_path"] == "log-ingest-query"
     assert analysis_context["project_knowledge_prompt"]

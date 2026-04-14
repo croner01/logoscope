@@ -4,6 +4,7 @@ Tests for ai.langchain_runtime.service
 
 import asyncio
 
+from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT
 from ai.langchain_runtime.schemas import ActionItem, StructuredAnswer
 from ai.langchain_runtime.service import (
     _extract_structured_actions,
@@ -193,6 +194,14 @@ def test_run_followup_langchain_prompt_prefers_stable_readonly_commands(monkeypa
     assert "禁止脚本化链式拼接（| && || ;）" in message
     assert "命令必须保留标准空格分词" in message
     assert "禁止用 echo/printf 把人工说明" in message
+    assert "`trace_id`、`request_id`、时间窗是重要诊断锚点" in message
+    assert "若症状已明显落在某一故障层，优先收集该层直接证据" in message
+
+
+def test_followup_system_prompt_keeps_fault_layer_rule_generic():
+    assert "`trace_id`、`request_id`、时间窗是重要诊断锚点" in FOLLOWUP_SYSTEM_PROMPT
+    assert "若症状已明显落在某一故障层，优先收集该层直接证据" in FOLLOWUP_SYSTEM_PROMPT
+    assert "query-service" not in FOLLOWUP_SYSTEM_PROMPT
 
 
 def test_extract_structured_actions_demotes_placeholder_echo_command():
@@ -424,7 +433,7 @@ def test_run_followup_langchain_prompt_injects_project_knowledge_section(monkeyp
         kwargs = _build_runtime_kwargs(DummyStreamingLLM([]))
         kwargs["analysis_context"] = {
             "service_name": "query-service",
-            "knowledge_pack_version": "2026-04-13.v1",
+            "knowledge_pack_version": "2026-04-14.v2",
             "knowledge_primary_service": "query-service",
             "knowledge_primary_path": "log-ingest-query",
             "project_knowledge_prompt": "服务摘要: query-service 是主读路径\\n链路摘要: log ingest -> clickhouse -> query-service",

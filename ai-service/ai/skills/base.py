@@ -95,6 +95,16 @@ class SkillStep:
         }
 
 
+@dataclass
+class SkillMatchDetails:
+    """Detailed rule-based match result for a skill/context pair."""
+
+    pattern_hits: int = 0
+    pattern_score: float = 0.0
+    component_bonus: float = 0.0
+    total_score: float = 0.0
+
+
 class DiagnosticSkill(ABC):
     """
     Base class for all diagnostic skills.
@@ -117,12 +127,8 @@ class DiagnosticSkill(ABC):
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
         """Generate ordered diagnostic steps for the given context."""
 
-    def match_score(self, context: SkillContext) -> float:
-        """Return a relevance score in [0.0, 1.0] for this context."""
-        text = context.combined_text().lower()
-        if not text:
-            return 0.0
-
+    def _count_pattern_hits(self, text: str) -> int:
+        """Count regex hits against the merged context text."""
         import re as _re
 
         pattern_hits = 0
@@ -134,18 +140,40 @@ class DiagnosticSkill(ABC):
             elif hasattr(pattern, "search"):
                 if pattern.search(text):
                     pattern_hits += 1
+        return pattern_hits
 
+    def _component_bonus(self, context: SkillContext) -> float:
+        """Small relevance boost when component_type and skill scope align."""
+        if not context.component_type or not self.applicable_components:
+            return 0.0
+
+        ct_lower = context.component_type.lower()
+        for comp in self.applicable_components:
+            if comp.lower() in ct_lower or ct_lower in comp.lower():
+                return 0.2
+        return 0.0
+
+    def match_details(self, context: SkillContext) -> SkillMatchDetails:
+        """Return detailed rule-based matching evidence for this context."""
+        text = context.combined_text().lower()
+        if not text:
+            return SkillMatchDetails()
+
+        pattern_hits = self._count_pattern_hits(text)
         pattern_score = min(1.0, pattern_hits / max(1, len(self.trigger_patterns)))
+        component_bonus = self._component_bonus(context)
+        total_score = min(1.0, pattern_score + component_bonus)
 
-        component_bonus = 0.0
-        if context.component_type and self.applicable_components:
-            ct_lower = context.component_type.lower()
-            for comp in self.applicable_components:
-                if comp.lower() in ct_lower or ct_lower in comp.lower():
-                    component_bonus = 0.2
-                    break
+        return SkillMatchDetails(
+            pattern_hits=pattern_hits,
+            pattern_score=pattern_score,
+            component_bonus=component_bonus,
+            total_score=total_score,
+        )
 
-        return min(1.0, pattern_score + component_bonus)
+    def match_score(self, context: SkillContext) -> float:
+        """Return a relevance score in [0.0, 1.0] for this context."""
+        return self.match_details(context).total_score
 
     def to_catalog_entry(self) -> Dict[str, Any]:
         """Serialized form for LLM prompt injection."""

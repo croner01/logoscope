@@ -7,7 +7,7 @@ import {
   buildRuntimePipelineSteps,
   resolveRuntimeClientDeadlineMs,
 } from '../../../utils/commandSpec';
-import { buildRuntimeAnalysisContext } from '../../../utils/runtimeAnalysisMode';
+import { buildRuntimeCommandAnalysisContext } from '../../../utils/runtimeCommandContext';
 import {
   agentRunReducer,
   createInitialAgentRunState,
@@ -90,6 +90,7 @@ interface UseAgentRuntimeCommandFlowParams {
   analysisType: string;
   serviceName?: string;
   traceId?: string;
+  requestId?: string;
   runtimeEnabled: boolean;
   classifyCommand: (command: string) => AgentRuntimeCommandClassification;
   syncSessionMessage: (runId: string) => void;
@@ -104,6 +105,7 @@ export const useAgentRuntimeCommandFlow = ({
   analysisType,
   serviceName,
   traceId,
+  requestId,
   runtimeEnabled,
   classifyCommand,
   syncSessionMessage,
@@ -326,6 +328,7 @@ export const useAgentRuntimeCommandFlow = ({
     ).trim();
     const clientDeadlineMs = resolveRuntimeClientDeadlineMs(180000);
     const normalizedTraceId = String(traceId || '').trim();
+    const normalizedRequestId = String(requestId || '').trim();
     const normalizedServiceName = String(serviceName || '').trim();
     const normalizedAnalysisType = analysisType === 'trace' ? 'trace' : 'log';
     const commandSpec = (
@@ -340,15 +343,13 @@ export const useAgentRuntimeCommandFlow = ({
     const created = await api.createAIRun({
       session_id: analysisSessionId || undefined,
       question: params.question,
-      analysis_context: buildRuntimeAnalysisContext({
+      analysis_context: buildRuntimeCommandAnalysisContext({
         analysisType: normalizedAnalysisType,
         traceId: normalizedTraceId,
+        requestId: normalizedRequestId,
         serviceName: normalizedServiceName,
-        baseContext: {
-          source_message_id: params.sourceMessageId || undefined,
-          source_command: params.command,
-          agent_mode: 'followup_command_runtime',
-        },
+        sourceMessageId: params.sourceMessageId || undefined,
+        sourceCommand: params.command,
       }),
       runtime_options: {
         auto_exec_readonly: false,
@@ -393,6 +394,7 @@ export const useAgentRuntimeCommandFlow = ({
     serviceName,
     syncSessionMessage,
     traceId,
+    requestId,
   ]);
 
   const ensureSession = useCallback(async (params: {

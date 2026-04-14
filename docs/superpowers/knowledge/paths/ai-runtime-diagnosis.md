@@ -31,11 +31,11 @@ This path explains how runtime diagnosis builds context, plans evidence collecti
 ## Recommended First Checks
 - inspect `analysis_context` first
 - inspect `ready_template_actions` and `observed_actions`
-- inspect whether blocked reason is planning, policy, backend, or evidence related
+- inspect whether blocked reason is planning, policy, backend, or evidence related, and whether low confidence comes from missing anchors or from collecting evidence at the wrong fault layer
 
 ## Common Misreads
 - low confidence may come from missing observations, not weak reasoning alone
-- a blocked run does not always mean the planner failed
+- a blocked run does not always mean the planner failed; repeated requests for `trace_id` / `request_id` can indicate wrong evidence-layer choice, not just missing context
 
 ## Sources
 - `/root/logoscope/docs/superpowers/specs/2026-04-12-runtime-diagnosis-reliability-design.md`

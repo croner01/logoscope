@@ -32,11 +32,12 @@
 
 ## Common Failures and Cautions
 - Missing backend evidence can begin with frontend context loss
-- Over-strict frontend gating can block legitimate diagnosis flows before backend logic runs
+- Over-strict frontend gating can block legitimate diagnosis flows before backend logic runs, and weak runtime diagnosis may reflect missing anchors or time windows in the request payload rather than backend reasoning quality
 
 ## Diagnosis Entry Hints
 - Verify what `analysis_context` the page actually sends before assuming backend reasoning failure
 - When trace IDs are absent, confirm whether log-mode + time-window fallback still carries request anchors
+- When the backend already has a strong fault-layer signal, avoid forcing the frontend to supply perfect correlation fields before runtime diagnosis can continue
 
 ## Sources
 - `/root/logoscope/AGENTS.md`

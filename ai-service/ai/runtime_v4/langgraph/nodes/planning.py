@@ -15,7 +15,7 @@ from ai.runtime_v4.langgraph.state import InnerGraphState
 logger = logging.getLogger(__name__)
 
 _PLANNING_MAX_SKILLS = 3
-_PLANNING_MIN_SCORE = 0.1
+_PLANNING_AUTOSELECT_MIN_SCORE = 0.35
 
 
 def _as_str(value: Any, default: str = "") -> str:
@@ -45,14 +45,15 @@ def _build_skill_context_from_state(state: InnerGraphState):
 def _select_skills_by_rules(state: InnerGraphState) -> List[Any]:
     """Run rule-based skill matching and return (skill, score) pairs."""
     try:
-        from ai.skills.matcher import match_skills_by_rules
+        from ai.skills.matcher import extract_auto_selected_skills
 
         context = _build_skill_context_from_state(state)
-        return match_skills_by_rules(
+        selected = extract_auto_selected_skills(
             context,
-            min_score=_PLANNING_MIN_SCORE,
+            threshold=_PLANNING_AUTOSELECT_MIN_SCORE,
             max_skills=_PLANNING_MAX_SKILLS,
         )
+        return [(skill, skill.match_score(context)) for skill in selected]
     except Exception:
         logger.exception("Rule-based skill matching failed")
         return []
@@ -68,7 +69,9 @@ def _populate_actions_from_skills(
     except Exception:
         return
 
-    for skill, _score in skill_score_pairs:
+    for skill, score in skill_score_pairs:
+        if score < _PLANNING_AUTOSELECT_MIN_SCORE:
+            continue
         if skill.name in state.selected_skills:
             continue  # avoid duplicates across iterations
         try:

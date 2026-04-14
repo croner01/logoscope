@@ -8,17 +8,17 @@ Two public functions:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, List, Tuple
 
-from ai.skills.base import DiagnosticSkill, SkillContext
+from ai.skills.base import DiagnosticSkill, SkillContext, SkillMatchDetails
 from ai.skills.registry import get_skill_registry
 
 logger = logging.getLogger(__name__)
 
 # Threshold above which a skill is considered "high-confidence" for auto-selection
 _HIGH_CONFIDENCE_THRESHOLD = 0.7
+_AUTO_SELECT_MIN_SCORE = 0.35
 
 
 def match_skills_by_rules(
@@ -39,7 +39,7 @@ def match_skills_by_rules(
 
     for skill in registry.values():
         try:
-            score = skill.match_score(context)
+            score = skill.match_details(context).total_score
         except Exception:
             logger.exception("match_score raised for skill %r", skill.name)
             score = 0.0
@@ -121,6 +121,38 @@ def extract_high_confidence_skills(
     """
     candidates = match_skills_by_rules(context, min_score=threshold, max_skills=max_skills)
     return [skill for skill, _score in candidates]
+
+
+def extract_auto_selected_skills(
+    context: SkillContext,
+    *,
+    threshold: float = _AUTO_SELECT_MIN_SCORE,
+    max_skills: int = 3,
+) -> List[DiagnosticSkill]:
+    """
+    Return skills eligible for automatic step injection.
+
+    Unlike prompt/catalog discovery, auto-selection requires direct pattern
+    evidence and a stricter threshold so generic component matches do not
+    automatically expand into command chains.
+    """
+    registry = get_skill_registry()
+    candidates: List[Tuple[DiagnosticSkill, SkillMatchDetails]] = []
+
+    for skill in registry.values():
+        try:
+            details = skill.match_details(context)
+        except Exception:
+            logger.exception("match_details raised for skill %r", skill.name)
+            continue
+        if details.total_score < threshold:
+            continue
+        if details.pattern_hits <= 0:
+            continue
+        candidates.append((skill, details))
+
+    candidates.sort(key=lambda pair: pair[1].total_score, reverse=True)
+    return [skill for skill, _details in candidates[:max_skills]]
 
 
 def get_skill_selection_summary(
