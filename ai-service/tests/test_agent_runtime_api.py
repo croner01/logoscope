@@ -28,8 +28,10 @@ from api.ai import (
     _RuntimePauseForPendingAction,
     _build_followup_request_from_ai_run,
     _emit_followup_runtime_event,
+    _run_followup_runtime_task,
     runtime_v1_api_guard_bypass,
 )
+from ai.agent_runtime import event_protocol
 from ai.agent_runtime.service import AgentRuntimeService
 
 
@@ -3726,3 +3728,39 @@ def test_build_followup_request_from_ai_run_enriches_project_knowledge_metadata(
     assert analysis_context["knowledge_primary_service"] == "query-service"
     assert analysis_context["knowledge_primary_path"] == "log-ingest-query"
     assert analysis_context["project_knowledge_prompt"]
+
+
+def test_run_followup_runtime_task_marks_run_failed_when_followup_request_build_crashes(monkeypatch):
+    runtime_service = _build_runtime_service()
+    run = runtime_service.create_run(
+        session_id="sess-followup-crash-001",
+        question="继续分析 ai-service follow-up runtime 中断",
+        analysis_context={"analysis_type": "log", "service_name": "ai-service"},
+        runtime_options={"mode": "followup_analysis", "conversation_id": "conv-followup-crash-001"},
+    )
+
+    def _raise_build_failure(_run, _runtime_options):
+        raise FileNotFoundError("/docs/superpowers/knowledge/services/ai-service.md")
+
+    monkeypatch.setattr("api.ai._build_followup_request_from_ai_run", _raise_build_failure)
+
+    async def _run_task():
+        await _run_followup_runtime_task(
+            runtime_service,
+            run.run_id,
+            {"mode": "followup_analysis", "conversation_id": "conv-followup-crash-001"},
+        )
+        latest = runtime_service.get_run(run.run_id)
+        events = runtime_service.list_events(run.run_id, after_seq=0, limit=100)
+        return latest, events
+
+    latest, events = asyncio.run(_run_task())
+
+    assert latest is not None
+    assert latest.status == "failed"
+    assert latest.error_code == "followup_runtime_failed"
+    assert "ai-service.md" in str(latest.error_detail)
+    assert latest.summary_json["current_phase"] == "failed"
+    assert latest.summary_json["followup_runtime_worker"] == "idle"
+    event_types = [item.event_type for item in events]
+    assert event_protocol.RUN_FAILED in event_types

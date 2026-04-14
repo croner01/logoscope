@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
+import os
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional
 
 
 PROJECT_KNOWLEDGE_PACK_VERSION = "2026-04-13.v1"
+logger = logging.getLogger(__name__)
 
 _SERVICE_MANIFEST = {
     "ai-service": {"asset": "services/ai-service.md", "aliases": ["ai-service"]},
@@ -71,8 +74,15 @@ def load_project_knowledge_registry(knowledge_root: Path) -> Dict[str, Dict[str,
     root = Path(knowledge_root)
     registry = {"services": {}, "paths": {}}
 
+    if not root.exists():
+        logger.warning("Project knowledge root does not exist: %s", root)
+        return registry
+
     for service_name, meta in _SERVICE_MANIFEST.items():
         asset_path = root / meta["asset"]
+        if not asset_path.exists():
+            logger.warning("Project knowledge asset missing: %s", asset_path)
+            continue
         content = asset_path.read_text(encoding="utf-8")
         sections = extract_markdown_sections(content)
         registry["services"][service_name] = {
@@ -87,6 +97,9 @@ def load_project_knowledge_registry(knowledge_root: Path) -> Dict[str, Dict[str,
 
     for path_name, meta in _PATH_MANIFEST.items():
         asset_path = root / meta["asset"]
+        if not asset_path.exists():
+            logger.warning("Project knowledge asset missing: %s", asset_path)
+            continue
         content = asset_path.read_text(encoding="utf-8")
         sections = extract_markdown_sections(content)
         registry["paths"][path_name] = {
@@ -105,7 +118,30 @@ def load_project_knowledge_registry(knowledge_root: Path) -> Dict[str, Dict[str,
 
 
 def _default_knowledge_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "docs" / "superpowers" / "knowledge"
+    configured_root = _as_str(os.getenv("AI_PROJECT_KNOWLEDGE_ROOT")).strip()
+    candidates: List[Path] = []
+
+    if configured_root:
+        candidates.append(Path(configured_root))
+
+    module_path = Path(__file__).resolve()
+    base_candidates = [
+        module_path.parents[1] if len(module_path.parents) > 1 else None,
+        module_path.parents[2] if len(module_path.parents) > 2 else None,
+        Path.cwd(),
+    ]
+    for base in base_candidates:
+        if base is None:
+            continue
+        candidate = Path(base) / "docs" / "superpowers" / "knowledge"
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return candidates[0] if candidates else Path("docs") / "superpowers" / "knowledge"
 
 
 def _normalize_lines(text: str, *, max_lines: int = 3) -> List[str]:
@@ -129,6 +165,7 @@ def select_project_knowledge(
 ) -> Dict[str, Any]:
     safe_context = analysis_context if isinstance(analysis_context, dict) else {}
     registry = load_project_knowledge_registry(Path(knowledge_root or _default_knowledge_root()))
+    knowledge_available = bool(registry["services"]) or bool(registry["paths"])
     safe_service = _as_str(safe_context.get("service_name")).lower()
     search_text = " ".join(
         item
@@ -189,7 +226,9 @@ def select_project_knowledge(
         selection_reason_parts.append(f"service={safe_service}")
     if selected_path_name:
         selection_reason_parts.append(f"path={selected_path_name}")
-    if not selection_reason_parts:
+    if not selection_reason_parts and not knowledge_available:
+        selection_reason_parts.append("fallback=knowledge_unavailable")
+    elif not selection_reason_parts:
         selection_reason_parts.append("fallback=minimal")
 
     return {
