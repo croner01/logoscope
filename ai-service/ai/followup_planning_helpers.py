@@ -24,6 +24,12 @@ from ai.followup_command_spec import (
 )
 
 
+_DEFERRED_STRUCTURED_SPEC_REASONS = {
+    "pod_name_resolution_failed",
+    "clickhouse pod not found",
+}
+
+
 def _as_str(value: Any, default: str = "") -> str:
     if value is None:
         return default
@@ -58,6 +64,16 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def _should_defer_structured_spec_compile(
+    reason: str,
+    command_spec: Dict[str, Any],
+) -> bool:
+    safe_reason = _as_str(reason).strip().lower()
+    if safe_reason not in _DEFERRED_STRUCTURED_SPEC_REASONS:
+        return False
+    return _as_str(command_spec.get("tool")).strip().lower() == "kubectl_clickhouse_query"
 
 
 def _unknown_command_meta() -> Dict[str, Any]:
@@ -624,12 +640,14 @@ def _build_followup_actions(
     langchain_actions: Optional[List[Dict[str, Any]]] = None,
     max_items: int = 8,
     mask_text: Optional[Callable[[str], str]] = None,
+    analysis_context: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """构建追问可执行计划动作（ReAct phase-1: Plan）。"""
     safe_max_items = max(1, min(int(max_items or 8), 20))
     actions: List[Dict[str, Any]] = []
     seen_keys: set = set()
     mask_fn = mask_text if callable(mask_text) else (lambda text: text)
+    safe_analysis_context = analysis_context if isinstance(analysis_context, dict) else {}
 
     def _append_action(action_payload: Dict[str, Any]) -> None:
         if len(actions) >= safe_max_items:
@@ -663,6 +681,61 @@ def _build_followup_actions(
 
     def _new_action_id(index: int, source: str) -> str:
         return f"{source}-{index}"
+
+    def _expand_skill_actions(item_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+        skill_name = _as_str(item_dict.get("skill_name")).strip()
+        if not skill_name:
+            return []
+        try:
+            from ai.skills import SkillContext, get_skill
+        except Exception:
+            return []
+
+        skill = get_skill(skill_name)
+        if skill is None:
+            return []
+
+        skill_context_payload = dict(safe_analysis_context)
+        skill_context_payload.setdefault("question", question)
+        if not _as_str(skill_context_payload.get("service_name")).strip():
+            skill_context_payload["service_name"] = _as_str(item_dict.get("service_name")).strip()
+        try:
+            skill_ctx = SkillContext.from_dict(skill_context_payload)
+            steps = skill.plan_steps(skill_ctx)
+        except Exception:
+            return []
+
+        base_priority = max(1, int(_as_float(item_dict.get("priority"), 1)))
+        base_reason = _normalize_action_text(item_dict.get("reason"))
+        expanded_actions: List[Dict[str, Any]] = []
+        for offset, step in enumerate(steps):
+            step_command_spec = step.command_spec if isinstance(step.command_spec, dict) else {}
+            step_command = _as_str(step_command_spec.get("command")).strip()
+            if not step_command:
+                step_args = step_command_spec.get("args") if isinstance(step_command_spec.get("args"), dict) else {}
+                step_command = _as_str(step_args.get("command")).strip()
+            expanded_actions.append(
+                {
+                    "priority": base_priority + offset,
+                    "title": step.title,
+                    "action": step.title,
+                    "skill_name": skill_name,
+                    "command": step_command,
+                    "command_spec": step.command_spec,
+                    "command_type": "query",
+                    "risk_level": _normalize_action_text(item_dict.get("risk_level")).lower() or skill.risk_level,
+                    "executable": True,
+                    "requires_confirmation": False,
+                    "requires_write_permission": False,
+                    "requires_elevation": False,
+                    "expected_outcome": step.purpose,
+                    "reason": base_reason or f"expanded_from_skill:{skill_name}",
+                    "step_id": step.step_id,
+                    "depends_on": list(step.depends_on),
+                    "parse_hints": dict(step.parse_hints),
+                }
+            )
+        return expanded_actions
 
     def _try_repair_structured_spec(
         *,
@@ -717,149 +790,198 @@ def _build_followup_actions(
         if len(actions) >= safe_max_items:
             break
         item_dict = item if isinstance(item, dict) else {}
-        action_text = _normalize_action_text(item_dict.get("action"))
-        action_title = _normalize_action_text(item_dict.get("title"))
-        command_spec = normalize_followup_command_spec(item_dict.get("command_spec"))
-        command_spec_compile_reason = ""
-        command_spec_compile_detail = ""
-        if command_spec:
-            compiled = compile_followup_command_spec(command_spec)
-            if bool(compiled.get("ok")):
-                command = _normalize_action_command(compiled.get("command"))
-                command_spec = (
-                    compiled.get("command_spec")
-                    if isinstance(compiled.get("command_spec"), dict)
-                    else command_spec
+        expanded_skill_actions = _expand_skill_actions(item_dict)
+        candidate_items = expanded_skill_actions or [item_dict]
+
+        for candidate_item in candidate_items:
+            if len(actions) >= safe_max_items:
+                break
+            action_text = _normalize_action_text(candidate_item.get("action"))
+            action_title = _normalize_action_text(candidate_item.get("title"))
+            skill_name = _as_str(candidate_item.get("skill_name")).strip()
+            command_spec = normalize_followup_command_spec(candidate_item.get("command_spec"))
+            command_spec_compile_reason = ""
+            command_spec_compile_detail = ""
+            if command_spec:
+                compiled = compile_followup_command_spec(command_spec)
+                if bool(compiled.get("ok")):
+                    compiled_command_spec = (
+                        compiled.get("command_spec")
+                        if isinstance(compiled.get("command_spec"), dict)
+                        else command_spec
+                    )
+                    command = _normalize_action_command(
+                        compiled.get("command")
+                        or _as_str(compiled_command_spec.get("command"))
+                        or _as_str(command_spec.get("command"))
+                    )
+                    if not command:
+                        command = _normalize_action_command(candidate_item.get("command"))
+                    command_spec = (
+                        compiled_command_spec
+                    )
+                else:
+                    command = _normalize_action_command(candidate_item.get("command"))
+                    command_spec_compile_reason = _as_str(compiled.get("reason"))
+                    command_spec_compile_detail = _as_str(compiled.get("detail"))
+                    if skill_name and command_spec:
+                        command = _normalize_action_command(
+                            command
+                            or _as_str(command_spec.get("command"))
+                            or _as_str((command_spec.get("args") or {}).get("command"))
+                        )
+                        command_spec_compile_reason = ""
+                        command_spec_compile_detail = ""
+                    elif _should_defer_structured_spec_compile(command_spec_compile_reason, command_spec):
+                        command = _normalize_action_command(
+                            command
+                            or _as_str(command_spec.get("command"))
+                            or _as_str((command_spec.get("args") or {}).get("command"))
+                        )
+                        command_spec_compile_reason = ""
+                        command_spec_compile_detail = ""
+            else:
+                command = _normalize_action_command(candidate_item.get("command"))
+                if command:
+                    command_spec_compile_reason = "missing_structured_spec"
+            if not command:
+                fallback_source = action_text or action_title
+                commands = _extract_commands_from_message_content(fallback_source, limit=1)
+                command = _normalize_action_command(_as_str(commands[0]) if commands else "")
+                if command and not command_spec_compile_reason:
+                    command_spec_compile_reason = "missing_structured_spec"
+
+            initial_spec_compile_reason = _as_str(command_spec_compile_reason).strip()
+            had_invalid_or_missing_spec = bool(command_spec_compile_reason)
+            if had_invalid_or_missing_spec and (command or command_spec):
+                repaired_spec, repaired_reason, repaired_command = _try_repair_structured_spec(
+                    command=command,
+                    command_spec=command_spec,
+                    compile_reason=command_spec_compile_reason,
+                    compile_detail=command_spec_compile_detail,
+                )
+                if repaired_command:
+                    command = repaired_command
+                if repaired_spec:
+                    command_spec = repaired_spec
+                command_spec_compile_reason = _as_str(repaired_reason).strip()
+            if command_spec_compile_reason and command:
+                command_meta_for_invalid = _resolve_action_command_meta(command)
+                has_shell_chain = bool(re.search(r"\|\||&&|\||;", command))
+                should_drop_command = (
+                    command_spec_compile_reason != "missing_structured_spec"
+                    or has_shell_chain
+                    or not bool(command_meta_for_invalid.get("supported"))
+                )
+                if should_drop_command:
+                    # command_spec 未通过校验时，不继续透传高风险自由文本命令，
+                    # 避免把粘连/脚本化命令污染到执行与展示链路。
+                    command = ""
+                    command_spec = {}
+
+            if not action_text and not action_title and not command:
+                continue
+            expected = _normalize_action_text(candidate_item.get("expected_outcome"))
+            structured_display_command = _as_str(command_spec.get("command")).strip()
+            if not structured_display_command:
+                safe_spec_args = command_spec.get("args") if isinstance(command_spec.get("args"), dict) else {}
+                structured_display_command = _as_str(safe_spec_args.get("command")).strip()
+            command_meta = _resolve_action_command_meta(command)
+            command_type = _as_str(command_meta.get("command_type"), "unknown")
+            model_action_type = _normalize_action_text(candidate_item.get("action_type")).lower()
+            model_command_type = _normalize_action_text(candidate_item.get("command_type")).lower()
+            if model_action_type not in {"query", "write", "manual"}:
+                model_action_type = ""
+            # 模型返回 unknown 时，优先采用本地分类结果，避免可识别命令退化为人工语义确认。
+            if model_command_type not in {"query", "repair"}:
+                model_command_type = ""
+            resolved_command_type = (
+                command_type
+                if command_type in {"query", "repair"}
+                else (model_command_type or "unknown")
+            )
+            derived_action_type = (
+                "query"
+                if resolved_command_type == "query"
+                else "write"
+                if resolved_command_type == "repair"
+                else "manual"
+            )
+            if model_action_type == "manual":
+                resolved_action_type = (
+                    "manual"
+                    if (not bool(command and command_meta.get("supported")) or derived_action_type == "manual")
+                    else derived_action_type
                 )
             else:
-                command = _normalize_action_command(item_dict.get("command"))
-                command_spec_compile_reason = _as_str(compiled.get("reason"))
-                command_spec_compile_detail = _as_str(compiled.get("detail"))
-        else:
-            command = _normalize_action_command(item_dict.get("command"))
-            if command:
-                command_spec_compile_reason = "missing_structured_spec"
-        if not command:
-            fallback_source = action_text or action_title
-            commands = _extract_commands_from_message_content(fallback_source, limit=1)
-            command = _normalize_action_command(_as_str(commands[0]) if commands else "")
-            if command and not command_spec_compile_reason:
-                command_spec_compile_reason = "missing_structured_spec"
-
-        initial_spec_compile_reason = _as_str(command_spec_compile_reason).strip()
-        had_invalid_or_missing_spec = bool(command_spec_compile_reason)
-        if had_invalid_or_missing_spec and (command or command_spec):
-            repaired_spec, repaired_reason, repaired_command = _try_repair_structured_spec(
-                command=command,
-                command_spec=command_spec,
-                compile_reason=command_spec_compile_reason,
-                compile_detail=command_spec_compile_detail,
+                resolved_action_type = derived_action_type
+            resolved_write_permission = bool(command_meta.get("requires_write_permission"))
+            if candidate_item.get("requires_write_permission") is not None:
+                resolved_write_permission = _as_bool(candidate_item.get("requires_write_permission"), resolved_write_permission)
+            resolved_executable = bool(
+                (command and command_meta.get("supported"))
+                or (structured_display_command and not command_spec_compile_reason)
             )
-            if repaired_command:
-                command = repaired_command
-            if repaired_spec:
-                command_spec = repaired_spec
-            command_spec_compile_reason = _as_str(repaired_reason).strip()
-        if command_spec_compile_reason and command:
-            command_meta_for_invalid = _resolve_action_command_meta(command)
-            has_shell_chain = bool(re.search(r"\|\||&&|\||;", command))
-            should_drop_command = (
-                command_spec_compile_reason != "missing_structured_spec"
-                or has_shell_chain
-                or not bool(command_meta_for_invalid.get("supported"))
+            spec_repaired = had_invalid_or_missing_spec and not command_spec_compile_reason and bool(command_spec)
+            if candidate_item.get("executable") is not None and not spec_repaired:
+                resolved_executable = _as_bool(candidate_item.get("executable"), resolved_executable) and bool(
+                    (command and command_meta.get("supported"))
+                    or (structured_display_command and not command_spec_compile_reason)
+                )
+            resolved_confirmation = bool(
+                (command and command_meta.get("supported"))
+                or (structured_display_command and not command_spec_compile_reason)
             )
-            if should_drop_command:
-                # command_spec 未通过校验时，不继续透传高风险自由文本命令，
-                # 避免把粘连/脚本化命令污染到执行与展示链路。
-                command = ""
-                command_spec = {}
-
-        if not action_text and not action_title and not command:
-            continue
-        expected = _normalize_action_text(item_dict.get("expected_outcome"))
-        command_meta = _resolve_action_command_meta(command)
-        command_type = _as_str(command_meta.get("command_type"), "unknown")
-        model_action_type = _normalize_action_text(item_dict.get("action_type")).lower()
-        model_command_type = _normalize_action_text(item_dict.get("command_type")).lower()
-        if model_action_type not in {"query", "write", "manual"}:
-            model_action_type = ""
-        # 模型返回 unknown 时，优先采用本地分类结果，避免可识别命令退化为人工语义确认。
-        if model_command_type not in {"query", "repair"}:
-            model_command_type = ""
-        resolved_command_type = (
-            command_type
-            if command_type in {"query", "repair"}
-            else (model_command_type or "unknown")
-        )
-        derived_action_type = (
-            "query"
-            if resolved_command_type == "query"
-            else "write"
-            if resolved_command_type == "repair"
-            else "manual"
-        )
-        if model_action_type == "manual":
-            resolved_action_type = (
-                "manual"
-                if (not bool(command and command_meta.get("supported")) or derived_action_type == "manual")
-                else derived_action_type
+            if candidate_item.get("requires_confirmation") is not None and not spec_repaired:
+                resolved_confirmation = _as_bool(candidate_item.get("requires_confirmation"), resolved_confirmation)
+            resolved_requires_elevation = resolved_write_permission
+            if candidate_item.get("requires_elevation") is not None:
+                resolved_requires_elevation = _as_bool(candidate_item.get("requires_elevation"), resolved_requires_elevation)
+            resolved_reason = (
+                _normalize_action_text(candidate_item.get("reason"))
+                or command_spec_compile_reason
+                or _as_str(command_meta.get("reason"))
             )
-        else:
-            resolved_action_type = derived_action_type
-        resolved_write_permission = bool(command_meta.get("requires_write_permission"))
-        if item_dict.get("requires_write_permission") is not None:
-            resolved_write_permission = _as_bool(item_dict.get("requires_write_permission"), resolved_write_permission)
-        resolved_executable = bool(command and command_meta.get("supported"))
-        spec_repaired = had_invalid_or_missing_spec and not command_spec_compile_reason and bool(command_spec)
-        if item_dict.get("executable") is not None and not spec_repaired:
-            resolved_executable = _as_bool(item_dict.get("executable"), resolved_executable) and bool(command and command_meta.get("supported"))
-        resolved_confirmation = bool(command and command_meta.get("supported"))
-        if item_dict.get("requires_confirmation") is not None and not spec_repaired:
-            resolved_confirmation = _as_bool(item_dict.get("requires_confirmation"), resolved_confirmation)
-        resolved_requires_elevation = resolved_write_permission
-        if item_dict.get("requires_elevation") is not None:
-            resolved_requires_elevation = _as_bool(item_dict.get("requires_elevation"), resolved_requires_elevation)
-        resolved_reason = (
-            _normalize_action_text(item_dict.get("reason"))
-            or command_spec_compile_reason
-            or _as_str(command_meta.get("reason"))
-        )
-        if spec_repaired and command and isinstance(command_spec, dict) and command_spec:
-            lowered_reason = _as_str(resolved_reason).lower()
-            if any(
-                token in lowered_reason
-                for token in [
-                    "missing_structured_spec",
-                    "missing_or_invalid_command_spec",
-                    "unsupported_command_head",
-                    "glued_command_tokens",
-                    "invalid_kubectl_token",
-                ]
-            ):
-                resolved_reason = ""
-        index_counter += 1
-        _append_action(
-            {
-                "id": _new_action_id(index_counter, "lc"),
-                "source": "langchain",
-                "priority": max(1, int(_as_float(item_dict.get("priority"), index_counter))),
-                "title": (action_title or action_text or f"执行命令: {command}")[:220],
-                "purpose": expected[:220],
-                "question": "",
-                "action_type": resolved_action_type,
-                "command": command,
-                "command_spec": command_spec if isinstance(command_spec, dict) else {},
-                "command_type": resolved_command_type or "unknown",
-                "risk_level": _normalize_action_text(item_dict.get("risk_level")).lower() or _as_str(command_meta.get("risk_level"), "high"),
-                "executable": resolved_executable,
-                "requires_confirmation": resolved_confirmation,
-                "requires_write_permission": resolved_write_permission,
-                "requires_elevation": resolved_requires_elevation,
-                "reason": resolved_reason,
-                "spec_repaired": bool(spec_repaired),
-                "spec_repair_from_reason": initial_spec_compile_reason if spec_repaired else "",
-            }
-        )
+            if spec_repaired and command and isinstance(command_spec, dict) and command_spec:
+                lowered_reason = _as_str(resolved_reason).lower()
+                if any(
+                    token in lowered_reason
+                    for token in [
+                        "missing_structured_spec",
+                        "missing_or_invalid_command_spec",
+                        "unsupported_command_head",
+                        "glued_command_tokens",
+                        "invalid_kubectl_token",
+                    ]
+                ):
+                    resolved_reason = ""
+            index_counter += 1
+            _append_action(
+                {
+                    "id": _new_action_id(index_counter, "lc"),
+                    "source": "langchain",
+                    "priority": max(1, int(_as_float(candidate_item.get("priority"), index_counter))),
+                    "title": (action_title or action_text or f"执行命令: {command}")[:220],
+                    "purpose": expected[:220],
+                    "question": "",
+                    "action_type": resolved_action_type,
+                    "skill_name": skill_name,
+                    "command": command or structured_display_command,
+                    "command_spec": command_spec if isinstance(command_spec, dict) else {},
+                    "command_type": resolved_command_type or "unknown",
+                    "risk_level": _normalize_action_text(candidate_item.get("risk_level")).lower() or _as_str(command_meta.get("risk_level"), "high"),
+                    "executable": resolved_executable,
+                    "requires_confirmation": resolved_confirmation,
+                    "requires_write_permission": resolved_write_permission,
+                    "requires_elevation": resolved_requires_elevation,
+                    "reason": resolved_reason,
+                    "spec_repaired": bool(spec_repaired),
+                    "spec_repair_from_reason": initial_spec_compile_reason if spec_repaired else "",
+                    "step_id": _as_str(candidate_item.get("step_id")).strip(),
+                    "depends_on": list(candidate_item.get("depends_on")) if isinstance(candidate_item.get("depends_on"), list) else [],
+                    "parse_hints": dict(candidate_item.get("parse_hints")) if isinstance(candidate_item.get("parse_hints"), dict) else {},
+                }
+            )
 
     for command in _extract_commands_from_message_content(answer, limit=safe_max_items):
         if len(actions) >= safe_max_items:

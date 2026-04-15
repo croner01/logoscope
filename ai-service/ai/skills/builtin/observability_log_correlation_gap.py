@@ -29,10 +29,17 @@ def _generic_exec(command: str, *, timeout_s: int = 20) -> dict:
     }
 
 
-def _clickhouse_query(sql: str, *, database: str = "logs", timeout_s: int = 45) -> dict:
+def _clickhouse_query(
+    sql: str,
+    *,
+    namespace: str = "islap",
+    database: str = "logs",
+    timeout_s: int = 45,
+) -> dict:
     return {
         "tool": "kubectl_clickhouse_query",
         "args": {
+            "namespace": namespace,
             "target_kind": "clickhouse_cluster",
             "target_identity": f"database:{database}",
             "query": sql,
@@ -153,7 +160,7 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
             SkillStep(
                 step_id="corr-anchor-query",
                 title=anchor_title,
-                command_spec=_clickhouse_query(anchor_sql, timeout_s=45),
+                command_spec=_clickhouse_query(anchor_sql, namespace=ns, timeout_s=45),
                 purpose="选择最强可用锚点继续回捞日志证据，而不是因为缺少另一种锚点就停住",
                 depends_on=["corr-window-log-tail"],
                 parse_hints={"extract": ["request_id", "trace_id", "timestamp", "service_name"]},

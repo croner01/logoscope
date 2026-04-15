@@ -57,6 +57,7 @@ class ActionItem(BaseModel):
     priority: int = 1
     title: str = ""
     action: str = ""
+    skill_name: str = ""
     command: str = Field(
         default="",
         description="display_only: 仅用于 UI 展示，不参与执行分支。",

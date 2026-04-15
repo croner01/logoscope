@@ -6284,6 +6284,7 @@ async def _run_follow_up_analysis_core(
         reflection=reflection,
         langchain_actions=langchain_actions,
         mask_text=_mask_sensitive_text,
+        analysis_context=analysis_context,
     )
     followup_actions = _prioritize_followup_actions_with_react_memory(
         actions=followup_actions,

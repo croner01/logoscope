@@ -15,10 +15,17 @@ def _as_str(value: Any, default: str = "") -> str:
     return str(value).strip() if not isinstance(value, str) else value.strip()
 
 
-def _ch_query(sql: str, *, database: str = "logs", timeout_s: int = 45) -> dict:
+def _ch_query(
+    sql: str,
+    *,
+    namespace: str = "islap",
+    database: str = "logs",
+    timeout_s: int = 45,
+) -> dict:
     return {
         "tool": "kubectl_clickhouse_query",
         "args": {
+            "namespace": namespace,
             "target_kind": "clickhouse_cluster",
             "target_identity": f"database:{database}",
             "query": sql,
@@ -58,6 +65,7 @@ class ClickHouseLogQuerySkill(DiagnosticSkill):
     max_steps = 3
 
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
+        ns = _as_str(context.namespace) or "islap"
         svc = _as_str(context.service_name)
         svc_filter = f"AND service_name = '{svc}'" if svc else ""
 
@@ -96,14 +104,14 @@ class ClickHouseLogQuerySkill(DiagnosticSkill):
             SkillStep(
                 step_id="ch-error-count",
                 title="统计近 1 小时各级别日志数量",
-                command_spec=_ch_query(count_sql),
+                command_spec=_ch_query(count_sql, namespace=ns),
                 purpose="快速定位错误日志级别分布，判断故障严重程度",
                 parse_hints={"extract": ["ERROR", "WARN", "count"]},
             ),
             SkillStep(
                 step_id="ch-error-detail",
                 title="查询近 30 分钟错误日志明细",
-                command_spec=_ch_query(detail_sql),
+                command_spec=_ch_query(detail_sql, namespace=ns),
                 purpose="获取具体错误消息和发生时序，定位根因时间点",
                 depends_on=["ch-error-count"],
                 parse_hints={"extract": ["message", "timestamp", "level"]},
@@ -111,7 +119,7 @@ class ClickHouseLogQuerySkill(DiagnosticSkill):
             SkillStep(
                 step_id="ch-error-pattern",
                 title="聚合错误消息模式",
-                command_spec=_ch_query(pattern_sql),
+                command_spec=_ch_query(pattern_sql, namespace=ns),
                 purpose="将相似错误归类，找出最高频错误模式",
                 depends_on=["ch-error-count"],
                 parse_hints={"extract": ["pattern", "count", "msg_pattern"]},

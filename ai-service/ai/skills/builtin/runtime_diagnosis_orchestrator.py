@@ -29,10 +29,17 @@ def _generic_exec(command: str, *, timeout_s: int = 30) -> dict:
     }
 
 
-def _clickhouse_query(sql: str, *, database: str = "logs", timeout_s: int = 45) -> dict:
+def _clickhouse_query(
+    sql: str,
+    *,
+    namespace: str = "islap",
+    database: str = "logs",
+    timeout_s: int = 45,
+) -> dict:
     return {
         "tool": "kubectl_clickhouse_query",
         "args": {
+            "namespace": namespace,
             "target_kind": "clickhouse_cluster",
             "target_identity": f"database:{database}",
             "query": sql,
@@ -100,6 +107,7 @@ class RuntimeDiagnosisOrchestratorSkill(DiagnosticSkill):
                     "WHERE event_time >= now() - INTERVAL 30 MINUTE "
                     "ORDER BY event_time DESC LIMIT 20 "
                     "FORMAT PrettyCompact",
+                    namespace=ns,
                     timeout_s=45,
                 ),
                 purpose="补齐慢查询明细，定位异常 SQL 和 query_id",
@@ -113,6 +121,7 @@ class RuntimeDiagnosisOrchestratorSkill(DiagnosticSkill):
                     "SELECT now() AS ts, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
                     "FROM system.processes ORDER BY elapsed DESC LIMIT 20 "
                     "FORMAT PrettyCompact",
+                    namespace=ns,
                     timeout_s=30,
                 ),
                 purpose="确认是否存在长耗时或资源占用异常的查询",
@@ -127,6 +136,7 @@ class RuntimeDiagnosisOrchestratorSkill(DiagnosticSkill):
                     "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
                     "ORDER BY metric "
                     "FORMAT PrettyCompact",
+                    namespace=ns,
                     timeout_s=20,
                 ),
                 purpose="确认后台合并与并发压力是否异常",
