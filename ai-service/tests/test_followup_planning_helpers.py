@@ -719,6 +719,34 @@ def test_build_followup_actions_prefers_classifier_over_model_repair_for_readonl
     assert action["action_type"] == "query"
 
 
+def test_build_followup_actions_expands_skill_name_into_structured_steps():
+    actions = _build_followup_actions(
+        question="分析 query-service 的慢查询",
+        answer="",
+        reflection={},
+        langchain_actions=[
+            {
+                "priority": 1,
+                "title": "执行读路径延迟排查技能",
+                "action": "优先收集读路径慢查询与资源证据",
+                "skill_name": "observability_read_path_latency",
+                "expected_outcome": "生成 query-service 与 ClickHouse 的结构化取证步骤",
+            }
+        ],
+        analysis_context={
+            "service_name": "query-service",
+            "namespace": "islap",
+        },
+    )
+    assert len(actions) == 4
+    assert all(action["skill_name"] == "observability_read_path_latency" for action in actions)
+    assert all(bool(action["executable"]) for action in actions)
+    assert actions[0]["title"] == "拉取 query-service 读路径日志"
+    assert actions[0]["command_spec"]["tool"] == "generic_exec"
+    assert actions[1]["command_spec"]["tool"] == "kubectl_clickhouse_query"
+    assert actions[1]["command_type"] == "query"
+
+
 def test_build_followup_subgoals_uses_sql_evidence_hint_for_slow_query_context():
     subgoals = _build_followup_subgoals(
         question="请分析这个 ClickHouse 慢查询的根因并优化 SQL",

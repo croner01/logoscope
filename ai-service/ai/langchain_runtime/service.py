@@ -26,6 +26,10 @@ _KUBECTL_VERB_PATTERN = (
     "getpods|get|describe|logs|exec|top|rollout|apply|delete|patch|edit|replace|scale|set|annotate|label|"
     "create|expose|autoscale|cordon|uncordon|drain|taint"
 )
+_DEFERRED_STRUCTURED_SPEC_REASONS = {
+    "pod_name_resolution_failed",
+    "clickhouse pod not found",
+}
 _CLICKHOUSE_SQL_MULTIWORD_KEYWORD_REPAIRS = (
     ("ORDERBY", "ORDER BY"),
     ("GROUPBY", "GROUP BY"),
@@ -100,6 +104,16 @@ def _model_to_dict(value: Any) -> Dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _should_defer_structured_spec_compile(
+    reason: str,
+    command_spec: Dict[str, Any],
+) -> bool:
+    safe_reason = _as_str(reason).strip().lower()
+    if safe_reason not in _DEFERRED_STRUCTURED_SPEC_REASONS:
+        return False
+    return _as_str(command_spec.get("tool")).strip().lower() == "kubectl_clickhouse_query"
 
 
 def _structured_answer_from_payload(payload: Dict[str, Any]) -> Optional[StructuredAnswer]:
@@ -594,6 +608,7 @@ def _extract_structured_actions(answer: StructuredAnswer) -> List[Dict[str, Any]
     for index, action in enumerate(sorted_actions, start=1):
         title = _as_str(getattr(action, "title", ""))
         action_text = _as_str(getattr(action, "action", ""))
+        skill_name = _as_str(getattr(action, "skill_name", "")).strip()
         expected_outcome = _as_str(getattr(action, "expected_outcome", ""))
         raw_command_spec = getattr(action, "command_spec", None)
         raw_command_spec = _model_to_dict(raw_command_spec)
@@ -601,23 +616,41 @@ def _extract_structured_actions(answer: StructuredAnswer) -> List[Dict[str, Any]
         command = ""
         command_display = _normalize_action_command(getattr(action, "command", ""))
         command_spec_compile_reason = ""
-        if not command_spec:
+        if skill_name and not command_spec:
+            command_spec_compile_reason = ""
+        elif not command_spec:
             command_spec_compile_reason = "missing_structured_spec"
         else:
             compiled = compile_followup_command_spec(command_spec)
             if bool(compiled.get("ok")):
-                command = _normalize_action_command(compiled.get("command"))
-                command_spec = (
+                compiled_command_spec = (
                     compiled.get("command_spec")
                     if isinstance(compiled.get("command_spec"), dict)
                     else command_spec
                 )
+                command = _normalize_action_command(
+                    compiled.get("command")
+                    or _model_to_dict(compiled_command_spec).get("command")
+                    or command_spec.get("command")
+                )
+                command_spec = (
+                    compiled_command_spec
+                )
             else:
                 command_spec_compile_reason = _as_str(compiled.get("reason"), "invalid_structured_spec")
+                if _should_defer_structured_spec_compile(command_spec_compile_reason, command_spec):
+                    command = _normalize_action_command(
+                        command_display
+                        or command_spec.get("command")
+                        or _model_to_dict(command_spec.get("args")).get("command")
+                    )
+                    command_spec_compile_reason = ""
         if not command:
             command = command_display
         if not title and action_text:
             title = action_text
+        if not title and skill_name:
+            title = f"执行技能: {skill_name}"
         if not title and command_display:
             title = f"执行命令: {command_display}"
         if not title and command:
@@ -651,6 +684,7 @@ def _extract_structured_actions(answer: StructuredAnswer) -> List[Dict[str, Any]
                 "priority": max(1, _as_int(getattr(action, "priority", 1), 1)),
                 "title": title[:220],
                 "action": action_text,
+                "skill_name": skill_name,
                 "command": command_display or command,
                 "command_spec": command_spec if isinstance(command_spec, dict) else {},
                 "command_type": command_type or "unknown",
@@ -686,10 +720,18 @@ def _build_format_instructions() -> str:
             ],
             "actions": [{"priority": 1, "action": "string", "expected_outcome": "string"}],
             "actions_contract_note": (
-                "action 为描述；必须输出 command_spec（结构化命令）。"
+                "action 为描述；默认应输出 command_spec（结构化命令）；若命中已注册技能，可输出 skill_name 由系统自动展开。"
                 "command 为 display_only 兼容字段，不参与执行。"
             ),
             "actions_schema": [
+                {
+                    "priority": 1,
+                    "title": "执行读路径延迟排查技能",
+                    "action": "优先收集 query-service 与 ClickHouse 读路径证据",
+                    "skill_name": "observability_read_path_latency",
+                    "expected_outcome": "自动展开为结构化读路径排查命令链",
+                    "reason": "该场景已命中注册技能，优先复用技能",
+                },
                 {
                     "priority": 1,
                     "title": "string",

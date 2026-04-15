@@ -322,6 +322,28 @@ def test_extract_structured_actions_supports_generic_exec_command_spec():
     assert actions[0]["executable"] is True
 
 
+def test_extract_structured_actions_preserves_skill_name_without_structured_spec():
+    answer = StructuredAnswer(
+        actions=[
+            ActionItem(
+                priority=1,
+                title="执行读路径延迟排查技能",
+                action="优先收集 query-service 和 ClickHouse 读路径证据",
+                skill_name="observability_read_path_latency",
+                expected_outcome="生成可执行的读路径排查动作链",
+            )
+        ]
+    )
+
+    actions = _extract_structured_actions(answer)
+
+    assert len(actions) == 1
+    assert actions[0]["skill_name"] == "observability_read_path_latency"
+    assert actions[0]["title"] == "执行读路径延迟排查技能"
+    assert actions[0]["executable"] is False
+    assert "missing_structured_spec" not in str(actions[0]["reason"] or "")
+
+
 def test_normalize_action_command_repairs_spacing_for_kubectl_exec_pattern():
     raw = "kubectl -nislapexec -it$(kubectl -nislapgetpods -lapp=clickhouse -ojsonpath='{.items[0].metadata.name}') --clickhouse -client --query \"SHOWCREATETABLElogs.traces\""
     normalized = _normalize_action_command(raw)

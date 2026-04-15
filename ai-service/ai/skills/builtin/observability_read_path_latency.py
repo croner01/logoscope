@@ -29,10 +29,17 @@ def _generic_exec(command: str, *, timeout_s: int = 20) -> dict:
     }
 
 
-def _clickhouse_query(sql: str, *, database: str = "logs", timeout_s: int = 45) -> dict:
+def _clickhouse_query(
+    sql: str,
+    *,
+    namespace: str = "islap",
+    database: str = "logs",
+    timeout_s: int = 45,
+) -> dict:
     return {
         "tool": "kubectl_clickhouse_query",
         "args": {
+            "namespace": namespace,
             "target_kind": "clickhouse_cluster",
             "target_identity": f"database:{database}",
             "query": sql,
@@ -105,7 +112,7 @@ class ObservabilityReadPathLatencySkill(DiagnosticSkill):
             SkillStep(
                 step_id="read-latency-query-log",
                 title="查询 ClickHouse query_log 慢查询样本",
-                command_spec=_clickhouse_query(query_log_sql, timeout_s=45),
+                command_spec=_clickhouse_query(query_log_sql, namespace=ns, timeout_s=45),
                 purpose="确认慢查询样本、耗时、读放大量和异常 SQL",
                 depends_on=["read-latency-log-tail"],
                 parse_hints={"extract": ["query_id", "query_duration_ms", "read_rows", "read_bytes"]},
@@ -113,7 +120,7 @@ class ObservabilityReadPathLatencySkill(DiagnosticSkill):
             SkillStep(
                 step_id="read-latency-processes",
                 title="查看 ClickHouse 当前运行查询",
-                command_spec=_clickhouse_query(processes_sql, timeout_s=30),
+                command_spec=_clickhouse_query(processes_sql, namespace=ns, timeout_s=30),
                 purpose="确认当前是否存在长耗时、大内存或大读放大的运行查询",
                 depends_on=["read-latency-query-log"],
                 parse_hints={"extract": ["elapsed", "memory_usage", "read_rows", "read_bytes"]},
@@ -121,7 +128,7 @@ class ObservabilityReadPathLatencySkill(DiagnosticSkill):
             SkillStep(
                 step_id="read-latency-metrics",
                 title="查看 ClickHouse 关键运行指标",
-                command_spec=_clickhouse_query(metrics_sql, timeout_s=20),
+                command_spec=_clickhouse_query(metrics_sql, namespace=ns, timeout_s=20),
                 purpose="确认查询并发、后台 merge 和延迟写入等运行压力指标",
                 depends_on=["read-latency-processes"],
                 parse_hints={"extract": ["metric", "value", "Merge", "DelayedInserts"]},
