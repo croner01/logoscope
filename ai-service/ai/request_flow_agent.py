@@ -98,6 +98,10 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _as_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _resolve_timezone(value: Any, fallback: tzinfo = timezone.utc) -> tzinfo:
     text = _as_str(value)
     if not text:
@@ -884,6 +888,16 @@ class RequestFlowAgent:
             target_service=target_service,
             limit=self.log_fetch_limit,
         )
+        pull_mode = _as_str(safe_context.get("pull_mode"), "auto_correlation").strip().lower()
+        manual_before = max(0, _as_int(safe_context.get("manual_before"), 10))
+        manual_after = max(0, _as_int(safe_context.get("manual_after"), 10))
+        if pull_mode == "manual_context":
+            related_logs = self._apply_manual_context_window(
+                related_logs=related_logs,
+                anchor_dt=anchor_dt,
+                before_count=manual_before,
+                after_count=manual_after,
+            )
 
         if not trace_id:
             trace_id = self._pick_trace_id_from_logs(related_logs)
@@ -949,6 +963,11 @@ class RequestFlowAgent:
         )
         if web_findings:
             agent_context["agent_web_findings"] = web_findings
+        integrity = self._build_log_integrity(
+            related_logs=selected_logs,
+            context=safe_context,
+        )
+        agent_context["log_integrity"] = integrity
 
         enhanced_input = self._build_augmented_input(
             base_log_content=log_content,
@@ -960,6 +979,9 @@ class RequestFlowAgent:
             f"后端Agent已在 ±{self.window_minutes} 分钟窗口内补充 {len(selected_logs)} 条关联日志"
             f"{'（含 trace 路径）' if trace_spans else ''}"
         )
+        if bool(integrity.get("partial")):
+            missing = ", ".join([_as_str(item) for item in _as_list(integrity.get("missing_components")) if _as_str(item)])
+            notice = f"{notice}；检测到部分关联日志缺失（{missing or 'unknown'}）"
         return AgentPreparation(
             log_content=enhanced_input,
             context=agent_context,
@@ -1010,8 +1032,76 @@ class RequestFlowAgent:
                 for run in preparation.tool_runs
             ],
             "related_log_count": len(preparation.related_logs),
+            "log_integrity": preparation.context.get("log_integrity", {}),
         }
         return result
+
+    def _apply_manual_context_window(
+        self,
+        *,
+        related_logs: List[Dict[str, Any]],
+        anchor_dt: datetime,
+        before_count: int,
+        after_count: int,
+    ) -> List[Dict[str, Any]]:
+        if not related_logs:
+            return []
+        ordered: List[tuple[datetime, Dict[str, Any]]] = []
+        for row in related_logs:
+            parsed = _parse_timestamp(row.get("timestamp"), default_tz=timezone.utc)
+            if parsed is None:
+                continue
+            ordered.append((parsed, row))
+        if not ordered:
+            return related_logs[: max(1, before_count + after_count + 1)]
+        ordered.sort(key=lambda item: item[0])
+        nearest_index = min(
+            range(len(ordered)),
+            key=lambda idx: abs((ordered[idx][0] - anchor_dt).total_seconds()),
+        )
+        start = max(0, nearest_index - before_count)
+        end = min(len(ordered), nearest_index + after_count + 1)
+        return [ordered[idx][1] for idx in range(start, end)]
+
+    def _build_log_integrity(
+        self,
+        *,
+        related_logs: List[Dict[str, Any]],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected_components = []
+        for item in _as_list(context.get("expected_components")):
+            text = _as_str(item).strip()
+            if text and text not in expected_components:
+                expected_components.append(text)
+        if not expected_components:
+            return {
+                "partial": False,
+                "missing_components": [],
+                "next_action": "continue",
+                "message": "integrity_check_skipped",
+            }
+        seen_services = {
+            _as_str(row.get("service_name")).strip().lower()
+            for row in related_logs
+            if _as_str(row.get("service_name")).strip()
+        }
+        missing = [
+            item for item in expected_components
+            if item.lower() not in seen_services
+        ]
+        allow_partial = _as_bool(context.get("allow_partial"), default=False)
+        partial = bool(missing)
+        next_action = "continue" if (allow_partial or not partial) else "repull_required"
+        message = "完整性校验通过"
+        if partial:
+            message = "部分关联日志未获取，是否继续分析？"
+        return {
+            "partial": partial,
+            "missing_components": missing,
+            "next_action": next_action,
+            "message": message,
+        }
 
     def _resolve_anchor_timestamp(
         self,

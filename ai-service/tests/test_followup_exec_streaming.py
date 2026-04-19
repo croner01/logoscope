@@ -8,6 +8,7 @@ import pytest
 
 from ai.agent_runtime.exec_client import ExecServiceClientError
 from ai.followup_orchestration_helpers import (
+    _build_auto_exec_dedupe_key,
     _build_non_executable_command_templates,
     _build_structured_template_actions,
     _emit_followup_event,
@@ -935,6 +936,81 @@ def test_followup_readonly_auto_exec_skips_already_executed_command(monkeypatch)
     assert observations[0]["command_run_id"] == "cmdrun-prev-001"
     assert observations[0]["reused_evidence_ids"] == ["cmdrun-prev-001"]
     assert observations[0]["evidence_reuse"] is True
+
+
+def test_followup_readonly_auto_exec_skips_equivalent_command_spec_key(monkeypatch):
+    monkeypatch.setenv("AI_FOLLOWUP_AUTO_EXEC_READONLY_ENABLED", "true")
+    monkeypatch.setenv("AI_FOLLOWUP_AUTO_EXEC_READONLY_MAX_ACTIONS", "1")
+    monkeypatch.setenv("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", "true")
+
+    async def _fake_precheck_command(**_kwargs):
+        return {
+            "status": "ok",
+            "command": "kubectl get pods -n islap",
+            "command_type": "query",
+            "risk_level": "low",
+            "requires_write_permission": False,
+            "requires_elevation": False,
+            "dispatch_requires_template": False,
+            "dispatch_degraded": False,
+        }
+
+    async def _fail_create_command_run(**_kwargs):
+        raise AssertionError("create_command_run should not be called for equivalent command_spec")
+
+    monkeypatch.setattr("ai.followup_orchestration_helpers.precheck_command", _fake_precheck_command)
+    monkeypatch.setattr("ai.followup_orchestration_helpers.create_command_run", _fail_create_command_run)
+
+    async def _run():
+        dedupe_key = _build_auto_exec_dedupe_key(
+            "kubectl get pods -n islap",
+            {
+                "tool": "generic_exec",
+                "args": {
+                    "command": "kubectl get pods -n islap",
+                    "command_argv": ["kubectl", "get", "pods", "-n", "islap"],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 20,
+                },
+            },
+        )
+        executed = {dedupe_key}
+        observations = await _run_followup_readonly_auto_exec(
+            session_id="sess-stream-dup-spec-001",
+            message_id="msg-stream-dup-spec-001",
+            actions=[
+                {
+                    "id": "act-stream-dup-spec-001",
+                    "command": "kubectl get pods -n islap --request-timeout=5s",
+                    "command_spec": {
+                        "tool": "generic_exec",
+                        "args": {
+                            "command_argv": ["kubectl", "get", "pods", "-n", "islap"],
+                            "target_kind": "runtime_node",
+                            "target_identity": "runtime:local",
+                            "timeout_s": 5,
+                        },
+                    },
+                    "command_type": "query",
+                    "risk_level": "low",
+                    "executable": True,
+                }
+            ],
+            run_blocking=None,
+            executed_commands=executed,
+            prior_observations=[],
+            event_callback=None,
+            logger=None,
+        )
+        return observations
+
+    observations = asyncio.run(_run())
+
+    assert len(observations) == 1
+    assert observations[0]["status"] == "skipped"
+    assert observations[0]["reason_code"] == "duplicate_skipped"
+    assert "等价 command_spec" in str(observations[0]["message"])
 
 
 def test_select_followup_react_iteration_actions_does_not_retry_duplicate_skipped_with_valid_source():

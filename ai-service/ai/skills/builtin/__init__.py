@@ -7,3 +7,6 @@ from ai.skills.builtin import observability_log_correlation_gap  # noqa: F401
 from ai.skills.builtin import observability_read_path_latency  # noqa: F401
 from ai.skills.builtin import resource_usage  # noqa: F401
 from ai.skills.builtin import runtime_diagnosis_orchestrator  # noqa: F401
+from ai.skills.builtin import openstack_diagnostics  # noqa: F401
+from ai.skills.builtin import mariadb_diagnostics  # noqa: F401
+from ai.skills.builtin import linux_system_diagnostics  # noqa: F401
