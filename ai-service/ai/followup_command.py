@@ -1525,38 +1525,42 @@ def _resolve_kubectl_clickhouse_query_argv(args: Dict[str, Any]) -> Dict[str, An
     namespace = _as_str(args.get("namespace"), "islap").strip().lower()
     if not namespace or not _K8S_NAMESPACE_PATTERN.match(namespace):
         return {"ok": False, "reason": "invalid namespace"}
+    pod_name = _as_str(args.get("pod_name")).strip()
+    if pod_name and any(ch in pod_name for ch in "'\"`$;&|<>"):
+        return {"ok": False, "reason": "pod_name contains unsafe characters"}
     pod_selector = _as_str(args.get("pod_selector"), "app=clickhouse").strip()
-    if not pod_selector:
-        return {"ok": False, "reason": "pod_selector is required"}
-    if any(ch in pod_selector for ch in "'\"`$;&|<>"):
+    if pod_selector and any(ch in pod_selector for ch in "'\"`$;&|<>"):
         return {"ok": False, "reason": "pod_selector contains unsafe characters"}
     query = _as_str(args.get("query")).replace("\n", " ").replace("\r", " ").strip()
     if not query:
         return {"ok": False, "reason": "query is required"}
 
-    pod_lookup_result = _execute_followup_argv(
-        [
-            "kubectl",
-            "-n",
-            namespace,
-            "get",
-            "pods",
-            "-l",
-            pod_selector,
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ],
-        timeout_seconds=_STRUCTURED_ACTION_PER_ATTEMPT_TIMEOUT_SECONDS,
-    )
-    if int(pod_lookup_result.get("exit_code") or 0) != 0:
-        return {
-            "ok": False,
-            "reason": _as_str(pod_lookup_result.get("stderr"), "failed to resolve clickhouse pod"),
-            "pod_lookup": pod_lookup_result,
-        }
-    pod_name = _as_str(pod_lookup_result.get("stdout")).strip()
     if not pod_name:
-        return {"ok": False, "reason": "clickhouse pod not found", "pod_lookup": pod_lookup_result}
+        if not pod_selector:
+            return {"ok": False, "reason": "pod_selector is required"}
+        pod_lookup_result = _execute_followup_argv(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "pods",
+                "-l",
+                pod_selector,
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ],
+            timeout_seconds=_STRUCTURED_ACTION_PER_ATTEMPT_TIMEOUT_SECONDS,
+        )
+        if int(pod_lookup_result.get("exit_code") or 0) != 0:
+            return {
+                "ok": False,
+                "reason": _as_str(pod_lookup_result.get("stderr"), "failed to resolve clickhouse pod"),
+                "pod_lookup": pod_lookup_result,
+            }
+        pod_name = _as_str(pod_lookup_result.get("stdout")).strip()
+        if not pod_name:
+            return {"ok": False, "reason": "clickhouse pod not found", "pod_lookup": pod_lookup_result}
 
     return {
         "ok": True,

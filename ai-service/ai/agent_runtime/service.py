@@ -44,6 +44,7 @@ from ai.followup_command_spec import (
     build_command_spec_self_repair_payload,
     compile_followup_command_spec,
     normalize_followup_command_spec,
+    normalize_followup_reason_code,
 )
 from ai.json_dict_helpers import _parse_llm_json_dict
 from ai.llm_service import get_llm_service
@@ -3152,11 +3153,13 @@ class AgentRuntimeService:
                 "command_execution_key": command_execution_key,
             }
             normalized_unknown_reason = unknown_reason.lower()
-            unknown_failure_code = (
-                "sql_preflight_failed"
-                if "sql_preflight_failed" in normalized_unknown_reason
-                else "unknown_semantics"
-            )
+            normalized_failure_reason = normalize_followup_reason_code(unknown_reason)
+            if "sql_preflight_failed" in normalized_unknown_reason:
+                unknown_failure_code = "sql_preflight_failed"
+            elif normalized_failure_reason != "other":
+                unknown_failure_code = normalized_failure_reason
+            else:
+                unknown_failure_code = "unknown_semantics"
             recovery = attempt_command_recovery(
                 command=safe_command,
                 command_spec=safe_command_spec,

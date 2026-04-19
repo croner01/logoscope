@@ -137,6 +137,7 @@ def test_compile_followup_command_spec_rejects_glued_command_head_in_generic_exe
         ("command_argv contains blocked shell operators", "unsupported_command_head", "SECURITY_GUARD"),
         ("unsupported command_spec tool: unknown_tool", "missing_or_invalid_command_spec", "SPEC_MISSING"),
         ("target_identity must look like database:<name>", "missing_target_identity", "SPEC_MISSING"),
+        ("pod_selector and pod_name cannot be used together", "missing_or_invalid_command_spec", "SPEC_MISSING"),
         ("target_kind_mismatch", "target_kind_mismatch", "SPEC_MISSING"),
         ("unexpected_runtime_error", "other", "OTHER"),
     ],
@@ -454,7 +455,29 @@ def test_compile_followup_command_spec_k8s_clickhouse_autoresolves_pod_without_s
     compiled_args = result["command_spec"]["args"]
     assert compiled_args["namespace"] == "islap"
     assert compiled_args["pod_name"] == "clickhouse-0"
-    assert compiled_args["pod_selector"] == "app=clickhouse"
+    assert compiled_args["pod_selector"] == ""
+
+
+def test_compile_followup_command_spec_prefers_pod_name_when_selector_and_pod_name_both_present():
+    result = compile_followup_command_spec(
+        {
+            "tool": "kubectl_clickhouse_query",
+            "args": {
+                "namespace": "islap",
+                "pod_selector": "app=clickhouse",
+                "pod_name": "clickhouse-0",
+                "target_kind": "clickhouse_cluster",
+                "target_identity": "database:logs",
+                "query": "SELECT 1",
+                "timeout_s": 30,
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    compiled_args = result["command_spec"]["args"]
+    assert compiled_args["pod_name"] == "clickhouse-0"
+    assert compiled_args["pod_selector"] == ""
 
 
 def test_compile_followup_command_spec_derives_target_identity_from_query_when_missing():
