@@ -137,3 +137,37 @@ def test_execute_action_spec_blocks_after_two_timeouts(monkeypatch):
     assert result["max_attempts"] == 2
     assert "缩小时间窗口" in str(result.get("next_suggestion", ""))
     assert query_attempt["count"] == 2
+
+
+def test_execute_action_spec_prefers_explicit_pod_name_over_selector(monkeypatch):
+    calls = []
+
+    def _fake_execute_followup_argv(argv, timeout_seconds):
+        calls.append((list(argv), int(timeout_seconds)))
+        return {
+            "status": "executed",
+            "exit_code": 0,
+            "duration_ms": 20,
+            "stdout": "ok",
+            "stderr": "",
+            "output_truncated": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("ai.followup_command._execute_followup_argv", _fake_execute_followup_argv)
+
+    result = execute_action_spec(
+        "kubectl_clickhouse_query",
+        {
+            "namespace": "islap",
+            "pod_selector": "app=clickhouse",
+            "pod_name": "clickhouse-7dd4b5946c-rqh8b",
+            "query": "SELECT 1",
+            "timeout_s": 30,
+        },
+        {},
+    )
+
+    assert result["status"] == "executed"
+    assert len(calls) == 1
+    assert calls[0][0][0:6] == ["kubectl", "-n", "islap", "exec", "-i", "clickhouse-7dd4b5946c-rqh8b"]

@@ -175,6 +175,7 @@ _FOLLOWUP_REASON_CODE_ALIASES: dict[str, str] = {
     "namespace is required when pod_selector is provided": "missing_namespace_for_k8s_clickhouse_query",
     "namespace is required when pod_name is provided": "missing_namespace_for_k8s_clickhouse_query",
     "target_identity must look like database:<name>": "missing_target_identity",
+    "pod_selector and pod_name cannot be used together": "missing_or_invalid_command_spec",
     "command_argv contains blocked fragments": "unsupported_command_head",
     "command_argv contains blocked shell operators": "unsupported_command_head",
     "command_argv contains shell substitution": "unsupported_command_head",
@@ -1137,7 +1138,8 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
     safe_tool = _as_str(tool).strip().lower()
     require_k8s_exec = safe_tool in {"kubectl_clickhouse_query", "k8s_clickhouse_query"}
     if selector and pod_name:
-        return {"ok": False, "reason": "pod_selector and pod_name cannot be used together"}
+        # Prefer the explicit pod target and treat selector as resolution provenance only.
+        selector = ""
     if require_k8s_exec and not namespace:
         return {"ok": False, "reason": "missing_namespace_for_k8s_clickhouse_query"}
     if selector:
@@ -1151,6 +1153,7 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
             )
             if bool(resolved.get("ok")):
                 pod_name = _collapse_spaces(_as_str(resolved.get("pod_name")))
+                selector = ""
             elif not _shell_emergency_enabled():
                 return {
                     "ok": False,
@@ -1185,7 +1188,7 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
             )
             if bool(resolved.get("ok")):
                 pod_name = _collapse_spaces(_as_str(resolved.get("pod_name")))
-                selector = _collapse_spaces(_as_str(resolved.get("pod_selector") or default_selector))
+                selector = ""
                 command = f"kubectl -n {namespace} exec -i {pod_name} -- clickhouse-client --query \"{escaped_query}\""
             elif require_k8s_exec:
                 return {
