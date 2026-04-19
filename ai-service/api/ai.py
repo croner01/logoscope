@@ -543,6 +543,25 @@ def _find_duplicate_question_turn(
     return latest_match
 
 
+def _extract_success_commands_from_assistant_message(message: Dict[str, Any]) -> List[str]:
+    metadata = message.get("metadata") if isinstance(message, dict) else {}
+    commands: List[str] = []
+    if not isinstance(metadata, dict):
+        return commands
+    action_observations = metadata.get("action_observations") if isinstance(metadata.get("action_observations"), list) else []
+    for item in action_observations:
+        payload = item if isinstance(item, dict) else {}
+        status = _as_str(payload.get("status")).strip().lower()
+        if status != "executed":
+            continue
+        if int(_as_float(payload.get("exit_code"), 1)) != 0:
+            continue
+        command = _normalize_followup_command_line(_as_str(payload.get("command")))
+        if command and command not in commands:
+            commands.append(command)
+    return commands
+
+
 def _normalize_diagnosis_contract(raw: Any) -> Dict[str, Any]:
     safe = raw if isinstance(raw, dict) else {}
 
@@ -731,6 +750,23 @@ def _answer_declares_evidence_insufficient(text: Any) -> bool:
     if not safe_text:
         return False
     return any(token in safe_text for token in _EVIDENCE_INSUFFICIENT_HINTS)
+
+
+def _runtime_evidence_gate_mode() -> str:
+    """运行态证据门禁模式。strict: 缺任意槽位即阻断；progressive: 仅硬槽位阻断。"""
+    raw = _as_str(os.getenv("AI_RUNTIME_EVIDENCE_GATE_MODE"), "progressive").strip().lower()
+    if raw in {"strict", "progressive"}:
+        return raw
+    return "progressive"
+
+
+def _is_hard_evidence_slot(slot_id: Any) -> bool:
+    """
+    判定是否为硬阻断证据槽位。
+    约定：`hard:<slot>` 前缀为硬槽位；其余 action 模板槽位默认为软缺失（不直接阻断）。
+    """
+    text = _as_str(slot_id).strip().lower()
+    return bool(text) and text.startswith("hard:")
 
 
 def _soften_low_evidence_diagnosis_text(
@@ -1966,13 +2002,19 @@ async def _run_followup_runtime_task(
             if slot_id and slot_id not in missing_evidence_slots:
                 missing_evidence_slots.append(slot_id)
         evidence_slots_missing = len(missing_evidence_slots) > 0
-        coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        hard_missing_evidence_slots = [slot for slot in missing_evidence_slots if _is_hard_evidence_slot(slot)]
+        hard_evidence_slots_missing = len(hard_missing_evidence_slots) > 0
+        evidence_gate_mode = _runtime_evidence_gate_mode()
+        if evidence_gate_mode == "strict":
+            coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        else:
+            coverage_insufficient = coverage_insufficient or hard_evidence_slots_missing
         evidence_incomplete = (
             has_needs_data_subgoal
             or coverage_insufficient
             or confidence_insufficient
             or answer_declares_insufficient
-            or evidence_slots_missing
+            or hard_evidence_slots_missing
         )
         def _compact_blocked_reason_detail(value: Any, fallback: str = "") -> str:
             text = _as_str(value).strip() or fallback
@@ -2043,6 +2085,7 @@ async def _run_followup_runtime_task(
                 "final_confidence": final_confidence_value,
                 "needs_data_subgoal": has_needs_data_subgoal,
                 "evidence_slots_missing": evidence_slots_missing,
+                "hard_evidence_slots_missing": hard_evidence_slots_missing,
                 "coverage_insufficient": coverage_insufficient,
                 "confidence_insufficient": confidence_insufficient,
                 "answer_declares_insufficient": answer_declares_insufficient,
@@ -2057,6 +2100,7 @@ async def _run_followup_runtime_task(
                 "min_final_confidence": min_final_confidence,
             },
             "missing_evidence_slots": missing_evidence_slots,
+            "hard_missing_evidence_slots": hard_missing_evidence_slots,
             "gate_conflict": gate_conflict,
             "gate_conflict_reasons": gate_conflict_reasons,
         }
@@ -2072,7 +2116,11 @@ async def _run_followup_runtime_task(
             "approval_required": runtime_state.get("approval_required", []),
             "react_loop": assistant_metadata["react_loop"],
             "answer_preview": str(result.get("answer") or "")[:400],
-            "executed_commands": result.get("executed_commands") if isinstance(result.get("executed_commands"), list) else previous_executed_commands,
+            "executed_commands": [
+                item
+                for item in _as_list(result.get("executed_commands"))
+                if _as_str(item).strip() and not _as_str(item).strip().startswith("dedupe::")
+            ] if isinstance(result.get("executed_commands"), list) else previous_executed_commands,
             "diagnosis_status": diagnosis_status,
             "fault_summary": fault_summary,
             "missing_evidence_slots": missing_evidence_slots,
@@ -3399,6 +3447,10 @@ class LLMAnalyzeRequest(BaseModel):
     use_llm: bool = True
     enable_agent: bool = True
     enable_web_search: bool = False
+    pull_mode: str = "auto_correlation"
+    manual_before: int = 10
+    manual_after: int = 10
+    allow_partial: bool = False
 
 
 class LLMTraceAnalyzeRequest(BaseModel):
@@ -4098,6 +4150,10 @@ async def analyze_log_llm(request: LLMAnalyzeRequest) -> Dict[str, Any]:
         safe_context = dict(request.context or {})
         if request.enable_web_search:
             safe_context["enable_web_search"] = True
+        safe_context.setdefault("pull_mode", _as_str(request.pull_mode, "auto_correlation").strip().lower())
+        safe_context.setdefault("manual_before", max(0, int(request.manual_before)))
+        safe_context.setdefault("manual_after", max(0, int(request.manual_after)))
+        safe_context.setdefault("allow_partial", bool(request.allow_partial))
 
         prepared_input = request.log_content
         prepared_context = safe_context
@@ -6003,6 +6059,24 @@ async def _run_follow_up_analysis_core(
             history=compacted_history if isinstance(compacted_history, list) else history,
             question=safe_question,
         )
+        if duplicate_question_turn:
+            assistant_message = (
+                duplicate_question_turn.get("assistant_message")
+                if isinstance(duplicate_question_turn.get("assistant_message"), dict)
+                else {}
+            )
+            dedupe_commands = _extract_success_commands_from_assistant_message(assistant_message)
+            if dedupe_commands:
+                existing_runtime_commands = [
+                    _normalize_followup_command_line(item)
+                    for item in _as_list(analysis_context.get("_runtime_executed_commands"))
+                    if _normalize_followup_command_line(item)
+                ]
+                merged_runtime_commands = existing_runtime_commands[:]
+                for command in dedupe_commands:
+                    if command not in merged_runtime_commands:
+                        merged_runtime_commands.append(command)
+                analysis_context["_runtime_executed_commands"] = merged_runtime_commands[-300:]
 
     long_term_memory_timeout = False
     await _emit_followup_event(event_callback, "plan", {"stage": "long_term_memory"}, logger=logger)
@@ -6552,7 +6626,13 @@ async def _run_follow_up_analysis_core(
         "long_term_memory_timeout": long_term_memory_timeout,
         "react_memory_timeout": react_memory_timeout,
         "answer_generation_timeout": answer_generation_timeout,
-        "executed_commands": sorted(executed_commands_set),
+        "executed_commands": sorted(
+            [
+                item
+                for item in executed_commands_set
+                if _as_str(item).strip() and not _as_str(item).strip().startswith("dedupe::")
+            ]
+        ),
     }
 
 

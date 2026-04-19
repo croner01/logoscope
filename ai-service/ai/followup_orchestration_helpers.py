@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import time
@@ -60,6 +61,28 @@ def _as_text(value: Any, default: str = "") -> str:
 
 def _as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
+
+
+def _build_auto_exec_dedupe_key(command: str, command_spec: Optional[Dict[str, Any]]) -> str:
+    normalized_command = _normalize_followup_command_line(command)
+    safe_spec = normalize_followup_command_spec(command_spec)
+    if not normalized_command and not safe_spec:
+        return ""
+    args = safe_spec.get("args") if isinstance(safe_spec.get("args"), dict) else {}
+    stable_args = dict(args)
+    for key in ("timeout_s",):
+        stable_args.pop(key, None)
+    stable_spec = {
+        "tool": _as_str(safe_spec.get("tool")).strip().lower(),
+        "target_kind": _as_str(safe_spec.get("target_kind") or stable_args.get("target_kind")).strip().lower(),
+        "target_identity": _as_str(safe_spec.get("target_identity") or stable_args.get("target_identity")).strip(),
+        "args": stable_args,
+    }
+    dedupe_payload = {
+        "command": normalized_command,
+        "spec": stable_spec,
+    }
+    return f"dedupe::{json.dumps(dedupe_payload, ensure_ascii=False, sort_keys=True)}"
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -1282,6 +1305,7 @@ async def _run_followup_readonly_auto_exec(
         normalized_command = _normalize_followup_command_line(_as_str(safe_precheck.get("command"), raw_command))
         if not normalized_command:
             normalized_command = raw_command
+        dedupe_key = _build_auto_exec_dedupe_key(normalized_command, effective_command_spec)
         if normalized_command in executed_set:
             reused_observation = _resolve_latest_success_observation(
                 command=normalized_command,
@@ -1294,6 +1318,25 @@ async def _run_followup_readonly_auto_exec(
                 action_id=action_id,
                 command=normalized_command,
                 reason="同一 run 已执行过该命令，跳过重复执行。",
+                reason_code="duplicate_skipped",
+                reused_command_run_id=reused_command_run_id,
+                reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
+            )
+            observations.append(observation)
+            await _emit_followup_event(event_callback, "observation", observation, logger=logger)
+            continue
+        if dedupe_key and dedupe_key in executed_set:
+            reused_observation = _resolve_latest_success_observation(
+                command=normalized_command,
+                observations=safe_prior_observations + observations,
+            )
+            reused_command_run_id = _as_str((reused_observation or {}).get("command_run_id")).strip()
+            observation = _build_followup_auto_exec_skip_observation(
+                session_id=session_id,
+                message_id=message_id,
+                action_id=action_id,
+                command=normalized_command,
+                reason="同一 run 已存在等价 command_spec 结果，跳过重复执行。",
                 reason_code="duplicate_skipped",
                 reused_command_run_id=reused_command_run_id,
                 reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
@@ -1499,6 +1542,8 @@ async def _run_followup_readonly_auto_exec(
                     and int(_as_float(execution_payload.get("exit_code"), 0)) == 0
                 ):
                     executed_set.add(normalized_command)
+                    if dedupe_key:
+                        executed_set.add(dedupe_key)
                 observations.append(execution_payload)
                 continue
 
@@ -1518,6 +1563,8 @@ async def _run_followup_readonly_auto_exec(
                     and int(_as_float(execution_payload.get("exit_code"), 0)) == 0
                 ):
                     executed_set.add(normalized_command)
+                    if dedupe_key:
+                        executed_set.add(dedupe_key)
                 observations.append(execution_payload)
                 await _emit_followup_event(event_callback, "observation", execution_payload, logger=logger)
                 continue
