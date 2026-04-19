@@ -752,6 +752,23 @@ def _answer_declares_evidence_insufficient(text: Any) -> bool:
     return any(token in safe_text for token in _EVIDENCE_INSUFFICIENT_HINTS)
 
 
+def _runtime_evidence_gate_mode() -> str:
+    """运行态证据门禁模式。strict: 缺任意槽位即阻断；progressive: 仅硬槽位阻断。"""
+    raw = _as_str(os.getenv("AI_RUNTIME_EVIDENCE_GATE_MODE"), "progressive").strip().lower()
+    if raw in {"strict", "progressive"}:
+        return raw
+    return "progressive"
+
+
+def _is_hard_evidence_slot(slot_id: Any) -> bool:
+    """
+    判定是否为硬阻断证据槽位。
+    约定：`hard:<slot>` 前缀为硬槽位；其余 action 模板槽位默认为软缺失（不直接阻断）。
+    """
+    text = _as_str(slot_id).strip().lower()
+    return bool(text) and text.startswith("hard:")
+
+
 def _soften_low_evidence_diagnosis_text(
     *,
     answer: Any,
@@ -1985,13 +2002,19 @@ async def _run_followup_runtime_task(
             if slot_id and slot_id not in missing_evidence_slots:
                 missing_evidence_slots.append(slot_id)
         evidence_slots_missing = len(missing_evidence_slots) > 0
-        coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        hard_missing_evidence_slots = [slot for slot in missing_evidence_slots if _is_hard_evidence_slot(slot)]
+        hard_evidence_slots_missing = len(hard_missing_evidence_slots) > 0
+        evidence_gate_mode = _runtime_evidence_gate_mode()
+        if evidence_gate_mode == "strict":
+            coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        else:
+            coverage_insufficient = coverage_insufficient or hard_evidence_slots_missing
         evidence_incomplete = (
             has_needs_data_subgoal
             or coverage_insufficient
             or confidence_insufficient
             or answer_declares_insufficient
-            or evidence_slots_missing
+            or hard_evidence_slots_missing
         )
         def _compact_blocked_reason_detail(value: Any, fallback: str = "") -> str:
             text = _as_str(value).strip() or fallback
@@ -2062,6 +2085,7 @@ async def _run_followup_runtime_task(
                 "final_confidence": final_confidence_value,
                 "needs_data_subgoal": has_needs_data_subgoal,
                 "evidence_slots_missing": evidence_slots_missing,
+                "hard_evidence_slots_missing": hard_evidence_slots_missing,
                 "coverage_insufficient": coverage_insufficient,
                 "confidence_insufficient": confidence_insufficient,
                 "answer_declares_insufficient": answer_declares_insufficient,
@@ -2076,6 +2100,7 @@ async def _run_followup_runtime_task(
                 "min_final_confidence": min_final_confidence,
             },
             "missing_evidence_slots": missing_evidence_slots,
+            "hard_missing_evidence_slots": hard_missing_evidence_slots,
             "gate_conflict": gate_conflict,
             "gate_conflict_reasons": gate_conflict_reasons,
         }
