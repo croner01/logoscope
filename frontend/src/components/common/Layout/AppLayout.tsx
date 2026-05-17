@@ -1,6 +1,6 @@
 /**
- * 应用主布局 - 侧边栏 + 内容区
- * 支持侧边栏收起/展开，参考 Datadog 设计风格
+ * AppLayout — Logoscope Shell
+ * Sidebar + Header + scrollable content area
  */
 import React, { useState, useCallback } from 'react';
 import { Outlet } from 'react-router-dom';
@@ -15,20 +15,23 @@ const AppLayout: React.FC = () => {
   }, []);
 
   return (
-    <div className="flex h-screen bg-[var(--app-bg)] text-[var(--app-text)]">
-      {/* 侧边栏 */}
-      <Sidebar 
+    <div
+      className="flex h-screen overflow-hidden"
+      style={{ background: 'var(--app-bg)', color: 'var(--app-text)' }}
+    >
+      {/* Sidebar */}
+      <Sidebar
         collapsed={sidebarCollapsed}
         onCollapseChange={handleCollapseChange}
       />
 
-      {/* 主内容区 */}
-      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {/* 顶部栏 */}
+      {/* Main panel */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Topbar */}
         <Header />
 
-        {/* 内容区域 */}
-        <main className="flex-1 overflow-auto bg-transparent">
+        {/* Page content */}
+        <main className="flex-1 overflow-auto">
           <Outlet />
         </main>
       </div>

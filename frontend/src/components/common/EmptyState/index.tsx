@@ -1,5 +1,5 @@
 /**
- * 空状态组件
+ * EmptyState — Logoscope Design System
  */
 import React from 'react';
 import { Inbox } from 'lucide-react';
@@ -10,6 +10,7 @@ interface EmptyStateProps {
   description?: string;
   action?: React.ReactNode;
   className?: string;
+  compact?: boolean;
 }
 
 const EmptyState: React.FC<EmptyStateProps> = ({
@@ -18,12 +19,27 @@ const EmptyState: React.FC<EmptyStateProps> = ({
   description,
   action,
   className = '',
+  compact = false,
 }) => {
   return (
-    <div className={`flex flex-col items-center justify-center py-12 ${className}`}>
-      {icon || <Inbox className="w-12 h-12 text-gray-400" />}
-      <h3 className="mt-4 text-lg font-medium text-gray-900">{title}</h3>
-      {description && <p className="mt-2 text-sm text-gray-500">{description}</p>}
+    <div className={`flex flex-col items-center justify-center text-center ${compact ? 'py-6' : 'py-12'} ${className}`}>
+      <div
+        className={`flex items-center justify-center rounded-2xl mb-4 ${compact ? 'w-10 h-10' : 'w-14 h-14'}`}
+        style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}
+      >
+        {icon
+          ? <span style={{ color: 'var(--app-text-subtle)' }}>{icon}</span>
+          : <Inbox size={compact ? 18 : 24} style={{ color: 'var(--app-text-subtle)' }} />
+        }
+      </div>
+      <h3 className={`font-semibold ${compact ? 'text-sm' : 'text-base'}`} style={{ color: 'var(--app-text)' }}>
+        {title}
+      </h3>
+      {description && (
+        <p className="mt-1.5 text-xs max-w-xs" style={{ color: 'var(--app-text-subtle)' }}>
+          {description}
+        </p>
+      )}
       {action && <div className="mt-4">{action}</div>}
     </div>
   );
