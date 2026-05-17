@@ -1,0 +1,99 @@
+---
+# ai-skills-core ConfigMap
+# Core diagnostic skills mounted into the ai-service pod.
+# Hot-reload: the configmap_loader watches /etc/ai-skills/*.yaml every 30s.
+#
+# Usage:
+#   kubectl apply -f k8s/configmaps/ai-skills-core.yaml
+#
+# Mount in your Deployment:
+#   volumeMounts:
+#     - name: ai-skills-core
+#       mountPath: /etc/ai-skills/core
+#       readOnly: true
+#   volumes:
+#     - name: ai-skills-core
+#       configMap:
+#         name: ai-skills-core
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-skills-core
+  namespace: islap
+  labels:
+    app: ai-service
+    component: skills
+    tier: core
+data:
+  # ── K8s generic health check skill ─────────────────────────────────────────
+  k8s-health.yaml: |
+    name: k8s_health_check
+    display_name: "K8s 健康检查"
+    description: "快速检查命名空间内 Pod/Node 健康状态及近期 Warning 事件"
+    applicable_components:
+      - kubernetes
+      - k8s
+      - pod
+      - node
+    trigger_patterns:
+      - "pod.*not running"
+      - "crashloop"
+      - "imagepull"
+      - "node.*notready"
+      - "evicted"
+      - "oom"
+      - "k8s.*error"
+    risk_level: low
+    steps:
+      - step_id: k8s-health-pods
+        title: "检查命名空间 Pod 状态"
+        tool: generic_exec
+        command: "kubectl get pods -n {namespace} -o wide --no-headers | grep -v Running | head -30"
+        purpose: "快速识别非 Running 状态的 Pod"
+        timeout_s: 15
+
+      - step_id: k8s-health-events
+        title: "获取近期 Warning 事件"
+        tool: generic_exec
+        command: >-
+          kubectl get events -n {namespace}
+          --field-selector=type=Warning
+          --sort-by=.lastTimestamp
+          | tail -n 40
+        purpose: "查看最近的告警事件，定位异常根因"
+        timeout_s: 15
+        depends_on:
+          - k8s-health-pods
+
+      - step_id: k8s-health-nodes
+        title: "检查节点状态"
+        tool: generic_exec
+        command: "kubectl get nodes -o wide --no-headers"
+        purpose: "确认所有节点处于 Ready 状态"
+        timeout_s: 15
+        depends_on:
+          - k8s-health-pods
+
+  # ── Generic service log tail skill ─────────────────────────────────────────
+  service-log-tail.yaml: |
+    name: service_log_tail
+    display_name: "服务日志快速查看"
+    description: "快速拉取指定服务的最近 Pod 日志，不依赖 ClickHouse"
+    applicable_components: []
+    trigger_patterns:
+      - "log.*check"
+      - "recent.*error"
+      - "last.*log"
+      - "查日志"
+      - "看日志"
+    risk_level: low
+    steps:
+      - step_id: slt-recent-logs
+        title: "拉取服务最近日志"
+        tool: generic_exec
+        command: >-
+          kubectl logs -n {namespace} -l app={service}
+          --tail=150 --prefix --ignore-errors 2>&1 | tail -n 150
+        purpose: "获取最新的服务日志，快速定位最近错误"
+        timeout_s: 20

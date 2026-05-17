@@ -920,7 +920,32 @@ class AgentRuntimeService:
             event_protocol.RUN_FINISHED,
             payload if isinstance(payload, dict) else {"status": run.status},
         )
+        # Phase 4: auto-save remediation plan to knowledge base when run completes
+        if normalized_final_status == "completed":
+            self._try_auto_save_remediation_plan(run)
         return run
+
+    def _try_auto_save_remediation_plan(self, run: "AgentRun") -> None:
+        """
+        Phase 4: After a diagnostic run completes, extract a RemediationPlan
+        from the run's evidence/summary and save it to the knowledge base as
+        a pending-verification case.
+
+        This is a best-effort fire-and-forget operation — any failure is logged
+        and swallowed so it never affects the run's completion status.
+        """
+        try:
+            from ai.agent_runtime.auto_remediation import build_and_save_remediation_plan
+            build_and_save_remediation_plan(run=run, service=self)
+        except ImportError:
+            pass  # auto_remediation module not yet available
+        except Exception as exc:
+            logger.warning(
+                "Phase4 KB auto-save failed for run_id=%s: %s",
+                run.run_id,
+                exc,
+                exc_info=False,
+            )
 
     def fail_run(
         self,
@@ -2026,6 +2051,14 @@ class AgentRuntimeService:
                     command_fingerprint,
                     max_items=400,
                 )
+        # Phase 3 fix: record failed command fingerprints so the duplicate-check
+        # gate can return needs_rethink instead of blindly re-dispatching
+        if terminal_status and final_exit_code != 0 and command_fingerprint:
+            summary_updates["failed_command_fingerprints"] = _merge_unique_text_items(
+                summary.get("failed_command_fingerprints"),
+                command_fingerprint,
+                max_items=400,
+            )
         if terminal_status and timed_out:
             runtime_options = self._runtime_options(run)
             timeout_recovery = attempt_timeout_recovery(
@@ -2767,14 +2800,42 @@ class AgentRuntimeService:
                 "command_run_id": indexed_run_id,
                 "run": run,
             }
+        # Phase 3 fix: if this exact command previously FAILED, signal needs_rethink
+        # so the LangGraph inner-loop gets a chance to generate an alternative action
+        # instead of blindly re-dispatching the same broken command.
+        failed_fingerprints = {
+            _as_str(item).strip()
+            for item in _as_list(summary.get("failed_command_fingerprints"))
+            if _as_str(item).strip()
+        }
+        if command_fingerprint and command_fingerprint in failed_fingerprints:
+            self.append_event(
+                run.run_id,
+                event_protocol.TOOL_CALL_SKIPPED_DUPLICATE,
+                {
+                    "tool_call_id": safe_tool_call_id,
+                    "tool_name": _as_str(tool_name, "command.exec"),
+                    "title": safe_title,
+                    "status": "needs_rethink",
+                    "reason_code": "previously_failed_command",
+                    "action_id": safe_action_id,
+                    "command": safe_command,
+                    "purpose": safe_purpose,
+                    "message": (
+                        "该命令在本次 run 中已执行并失败，需要重新规划替代方案，"
+                        "拒绝重复执行相同失败命令。"
+                    ),
+                },
+            )
+            return {
+                "status": "needs_rethink",
+                "tool_call_id": safe_tool_call_id,
+                "run": run,
+                "reason": "previously_failed_command",
+            }
         executed_fingerprints = {
             _as_str(item).strip()
             for item in _as_list(summary.get("executed_command_fingerprints"))
-            if _as_str(item).strip()
-        }
-        attempted_fingerprints = {
-            _as_str(item).strip()
-            for item in _as_list(summary.get("attempted_command_fingerprints"))
             if _as_str(item).strip()
         }
         if command_fingerprint and command_fingerprint in executed_fingerprints:
@@ -2797,29 +2858,6 @@ class AgentRuntimeService:
             )
             return {
                 "status": "skipped_duplicate",
-                "tool_call_id": safe_tool_call_id,
-                "run": run,
-            }
-        if attempted_command_fingerprint and attempted_command_fingerprint in attempted_fingerprints:
-            self.append_event(
-                run.run_id,
-                event_protocol.TOOL_CALL_SKIPPED_DUPLICATE,
-                {
-                    "tool_call_id": safe_tool_call_id,
-                    "tool_name": _as_str(tool_name, "command.exec"),
-                    "title": safe_title,
-                    "status": "skipped_duplicate_attempt",
-                    "reason_code": "duplicate_skipped_attempt",
-                    "action_id": safe_action_id,
-                    "command": safe_command,
-                    "purpose": safe_purpose,
-                    "message": "同一 run 已尝试过该命令，跳过重复执行。",
-                    "evidence_reuse": False,
-                    "evidence_outcome": "missing",
-                },
-            )
-            return {
-                "status": "skipped_duplicate_attempt",
                 "tool_call_id": safe_tool_call_id,
                 "run": run,
             }

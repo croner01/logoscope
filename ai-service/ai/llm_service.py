@@ -659,7 +659,7 @@ class LLMService:
         context: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """分析日志"""
-        system_prompt = """你是一个专业的日志分析专家。请严格按以下顺序输出分析：
+        system_prompt = """你是资深运维架构师（10年以上经验），精通 OpenStack、Kubernetes、MariaDB、Linux 故障诊断与修复落地。请严格按以下顺序输出分析：
 1) 先分析请求/数据路径（数据如何在组件间流转）；
 2) 再给出具体问题原因；
 3) 然后给出处理思路；
@@ -700,7 +700,12 @@ class LLMService:
 
 约束：
 - 如果证据不足，也要给出 data_flow.summary，并在 evidence 中说明假设点。
-- handling_ideas 偏方法论（先查什么、如何缩小范围），solutions 偏执行动作。"""
+- handling_ideas 偏方法论（先查什么、如何缩小范围），solutions 偏执行动作。
+- 如果日志上下文显示技术栈特征，优先按对应场景聚焦分析：
+  - Kubernetes: 优先检查 Pod 启动/调度/事件/资源约束；
+  - OpenStack: 优先检查 Nova/Neutron/Cinder 组件间调用与失败链；
+  - MariaDB: 优先检查连接、锁等待、慢查询、主从复制异常；
+  - Linux: 优先检查进程、端口、磁盘、权限与系统日志。"""
 
         prompt = f"""请分析以下日志内容。
 

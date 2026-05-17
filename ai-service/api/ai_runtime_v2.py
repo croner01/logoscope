@@ -202,6 +202,16 @@ def _resolve_thread_id(run_payload: Dict[str, Any], *, fallback: str = "") -> st
     return _as_str(fallback).strip() or get_runtime_v4_thread_store().thread_id_for_run(_as_str(run_payload.get("run_id")))
 
 
+def _resolve_inner_engine(run_payload: Dict[str, Any]) -> str:
+    safe_run = _safe_dict(run_payload)
+    summary = _safe_dict(safe_run.get("summary_json"))
+    inner_backend = _safe_dict(summary.get("inner_backend"))
+    backend_name = _as_str(inner_backend.get("backend")).strip()
+    if backend_name:
+        return backend_name
+    return inner_engine_name()
+
+
 def _map_v2_run_snapshot(run_payload: Dict[str, Any], *, fallback_thread_id: str = "") -> Dict[str, Any]:
     safe_run = _safe_dict(run_payload)
     run_id = _as_str(safe_run.get("run_id")).strip()
@@ -209,7 +219,7 @@ def _map_v2_run_snapshot(run_payload: Dict[str, Any], *, fallback_thread_id: str
         safe_run,
         thread_id=_resolve_thread_id(safe_run, fallback=fallback_thread_id),
         outer_engine=_resolve_outer_engine(run_id),
-        inner_engine=inner_engine_name(),
+        inner_engine=_resolve_inner_engine(safe_run),
     )
 
 
@@ -549,6 +559,75 @@ def _extract_run_actions(run_id: str, events: Any) -> List[Dict[str, Any]]:
     return actions
 
 
+def _extract_backend_preview_actions(run_id: str, run_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    summary = _safe_dict(run_payload.get("summary_json"))
+    inner_backend = _safe_dict(summary.get("inner_backend"))
+    tool_calls = _safe_list(inner_backend.get("tool_calls_preview"))
+    actions: List[Dict[str, Any]] = []
+    for index, item in enumerate(tool_calls, start=1):
+        safe_item = _safe_dict(item)
+        command = _as_str(safe_item.get("command")).strip()
+        title = _as_str(safe_item.get("title")).strip() or f"preview-action-{index}"
+        if not command and not title:
+            continue
+        created_at = _as_str(run_payload.get("updated_at") or run_payload.get("created_at"))
+        action_id = _as_str(safe_item.get("action_id")).strip() or f"planned-preview-{index}"
+        actions.append(
+            {
+                "action_id": action_id,
+                "run_id": run_id,
+                "type": "command",
+                "status": "planned",
+                "tool_call_id": "",
+                "command_run_id": "",
+                "skill_name": _as_str(safe_item.get("skill_name")),
+                "step_id": _as_str(safe_item.get("step_id")),
+                "command": command,
+                "purpose": _as_str(safe_item.get("purpose")),
+                "title": title,
+                "target_kind": _as_str(safe_item.get("target_kind")),
+                "target_identity": _as_str(safe_item.get("target_identity")),
+                "executor_profile": "",
+                "approval_policy": "",
+                "reason_code": "inner_backend_preview",
+                "evidence_slot_id": "",
+                "evidence_outcome": "",
+                "evidence_reuse": False,
+                "reused_evidence_ids": [],
+                "evidence_slot_ids_filled": [],
+                "info_gain_score": 0.0,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+        )
+    return actions
+
+
+def _resolve_backend_preview_action(run_payload: Dict[str, Any], action_id: str) -> Dict[str, Any]:
+    safe_action_id = _as_str(action_id).strip()
+    if not safe_action_id:
+        return {}
+    summary = _safe_dict(run_payload.get("summary_json"))
+    inner_backend = _safe_dict(summary.get("inner_backend"))
+    tool_calls = _safe_list(inner_backend.get("tool_calls_preview"))
+    for index, item in enumerate(tool_calls, start=1):
+        safe_item = _safe_dict(item)
+        candidate_id = _as_str(safe_item.get("action_id")).strip() or f"planned-preview-{index}"
+        if candidate_id != safe_action_id:
+            continue
+        return {
+            "action_id": candidate_id,
+            "tool_name": _as_str(safe_item.get("tool_name"), "command.exec"),
+            "skill_name": _as_str(safe_item.get("skill_name")),
+            "step_id": _as_str(safe_item.get("step_id")),
+            "command": _as_str(safe_item.get("command")).strip(),
+            "purpose": _as_str(safe_item.get("purpose")).strip(),
+            "title": _as_str(safe_item.get("title")).strip(),
+            "command_spec": _safe_dict(safe_item.get("command_spec")),
+        }
+    return {}
+
+
 @router.post("/targets")
 async def register_target(request: TargetRegisterRequest) -> Dict[str, Any]:
     registry = get_runtime_v4_target_registry()
@@ -747,7 +826,7 @@ async def create_thread_run(thread_id: str, request: RunCreateRequest) -> Dict[s
                     existing_payload,
                     thread_id=thread.thread_id,
                     outer_engine=_resolve_outer_engine(existing_run_id),
-                    inner_engine=inner_engine_name(),
+                    inner_engine=_resolve_inner_engine(existing_payload),
                 )
                 return {
                     "run": mapped_existing,
@@ -758,8 +837,12 @@ async def create_thread_run(thread_id: str, request: RunCreateRequest) -> Dict[s
     bridge = get_runtime_v4_bridge()
     analysis_context = request.analysis_context if isinstance(request.analysis_context, dict) else {}
     runtime_options = request.runtime_options if isinstance(request.runtime_options, dict) else {}
+    runtime_backend = _as_str(getattr(request, "runtime_backend", "")).strip().lower()
     client_deadline_ms = _as_int(getattr(request, "client_deadline_ms", 0), 0)
     pipeline_steps = request.pipeline_steps if isinstance(getattr(request, "pipeline_steps", None), list) else []
+    if runtime_backend:
+        runtime_options["runtime_backend"] = runtime_backend
+        analysis_context["runtime_backend"] = runtime_backend
     if client_deadline_ms > 0:
         runtime_options["client_deadline_ms"] = int(client_deadline_ms)
         analysis_context["client_deadline_ms"] = int(client_deadline_ms)
@@ -894,6 +977,8 @@ async def list_run_actions(
         visibility=_RUNTIME_EVENT_VISIBILITY_DEBUG,
     )
     actions = _extract_run_actions(run_id, _safe_dict(event_payload).get("events"))
+    if not actions:
+        actions = _extract_backend_preview_actions(run_id, run_payload)
     return {
         "run_id": run_id,
         "actions": actions[:safe_limit],
@@ -948,6 +1033,25 @@ async def execute_run_command_action(run_id: str, request: CommandActionRequest)
     bridge = get_runtime_v4_bridge()
     payload = request.model_dump()
     command_spec = _safe_dict(payload.get("command_spec"))
+    safe_command = _as_str(payload.get("command")).strip()
+    if not command_spec and not safe_command and _as_str(payload.get("action_id")).strip():
+        run_payload = await _fetch_run_payload_via_bridge(run_id)
+        if run_payload is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        preview_action = _resolve_backend_preview_action(run_payload, _as_str(payload.get("action_id")))
+        if preview_action:
+            payload["tool_name"] = _as_str(preview_action.get("tool_name"), _as_str(payload.get("tool_name"), "command.exec"))
+            payload["skill_name"] = _as_str(preview_action.get("skill_name"))
+            payload["step_id"] = _as_str(preview_action.get("step_id")) or _as_str(payload.get("step_id"))
+            payload["command"] = _as_str(preview_action.get("command"))
+            payload["purpose"] = _as_str(preview_action.get("purpose")) or _as_str(payload.get("purpose"))
+            payload["title"] = _as_str(preview_action.get("title")) or _as_str(payload.get("title"))
+            command_spec = _safe_dict(preview_action.get("command_spec"))
+            timeout_hint = _safe_dict(command_spec.get("args")).get("timeout_s")
+            if timeout_hint is not None and not _as_int(payload.get("timeout_seconds"), 0):
+                payload["timeout_seconds"] = _as_int(timeout_hint, 20)
+        elif _as_str(payload.get("action_id")).strip().startswith("planned-preview-"):
+            raise HTTPException(status_code=404, detail="preview action not found")
     if not command_spec:
         safe_command = _as_str(payload.get("command")).strip()
         if not safe_command:

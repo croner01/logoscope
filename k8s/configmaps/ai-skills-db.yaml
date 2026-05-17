@@ -1,0 +1,51 @@
+---
+# ai-skills-db ConfigMap — database diagnostic skills
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-skills-db
+  namespace: islap
+  labels:
+    app: ai-service
+    component: skills
+    tier: database
+data:
+  mysql-diagnostics.yaml: |
+    name: mysql_connection_diagnostics
+    display_name: "MySQL 连接诊断"
+    description: "诊断 MySQL/MariaDB 连接池耗尽、主从延迟、慢查询等问题"
+    applicable_components:
+      - mysql
+      - mariadb
+      - database
+    trigger_patterns:
+      - "mysql.*error"
+      - "mariadb.*error"
+      - "connection.*pool.*exhaust"
+      - "too many connections"
+      - "replica.*lag"
+      - "slow.*query.*mysql"
+    risk_level: low
+    steps:
+      - step_id: mysql-pod-logs
+        title: "检查 MySQL Pod 错误日志"
+        tool: generic_exec
+        command: "kubectl logs -n {namespace} -l app=mariadb --tail=100 --prefix 2>&1 | grep -i 'error\\|warn\\|aborted' | tail -n 50"
+        purpose: "获取 MySQL 连接/查询错误"
+        timeout_s: 20
+
+      - step_id: mysql-ch-errors
+        title: "ClickHouse 查询数据库错误"
+        tool: kubectl_clickhouse_query
+        query: >
+          SELECT timestamp, service_name, level, message
+          FROM logs.events
+          WHERE (service_name LIKE 'mysql%' OR service_name LIKE 'mariadb%')
+          AND level IN ('ERROR','WARN')
+          AND timestamp >= now() - INTERVAL 30 MINUTE
+          ORDER BY timestamp DESC LIMIT 40
+          FORMAT PrettyCompact
+        purpose: "数据库层错误全量查询"
+        timeout_s: 45
+        depends_on:
+          - mysql-pod-logs

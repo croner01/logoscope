@@ -234,25 +234,23 @@ def _resolve_followup_evidence_window(
 
 def _build_k8s_logs_evidence_command(
     *,
-    namespace: str,
     service_name: str,
     window_start_iso: str = "",
 ) -> str:
     target_service = _as_str(service_name).strip() or "query-service"
     if window_start_iso:
-        return f"kubectl -n {namespace} logs -l app={target_service} --since-time={window_start_iso} --tail=200"
-    return f"kubectl -n {namespace} logs -l app={target_service} --since=15m --tail=200"
+        return f"kubectl -A logs -l app={target_service} --since-time={window_start_iso} --tail=200"
+    return f"kubectl -A logs -l app={target_service} --since=15m --tail=200"
 
 
 def _build_clickhouse_query_log_evidence_command(
     *,
-    namespace: str,
     window_start_iso: str = "",
     window_end_iso: str = "",
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT event_time,query_id,exception_code,exception,query "
             "FROM system.query_log "
             f"WHERE event_time >= toDateTime64('{window_start_iso}', 9, 'UTC') "
@@ -260,7 +258,7 @@ def _build_clickhouse_query_log_evidence_command(
             "ORDER BY event_time DESC LIMIT 20\""
         )
     return (
-        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT event_time,query_id,exception_code,exception,query "
         "FROM system.query_log "
         "WHERE event_time >= now() - INTERVAL 15 MINUTE "
@@ -270,13 +268,12 @@ def _build_clickhouse_query_log_evidence_command(
 
 def _build_clickhouse_processes_evidence_command(
     *,
-    namespace: str,
     window_start_iso: str = "",
     window_end_iso: str = "",
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT "
             f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
             f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
@@ -284,7 +281,7 @@ def _build_clickhouse_processes_evidence_command(
             "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
         )
     return (
-        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
         "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
     )
@@ -292,13 +289,12 @@ def _build_clickhouse_processes_evidence_command(
 
 def _build_clickhouse_metrics_evidence_command(
     *,
-    namespace: str,
     window_start_iso: str = "",
     window_end_iso: str = "",
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT "
             f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
             f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
@@ -307,7 +303,7 @@ def _build_clickhouse_metrics_evidence_command(
             "ORDER BY metric\""
         )
     return (
-        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT now() AS collected_at, metric, value FROM system.metrics "
         "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
         "ORDER BY metric\""
@@ -325,7 +321,6 @@ def _build_non_executable_query_command_hints(
     hints: List[str] = []
     seen: set[str] = set()
     context_payload = analysis_context if isinstance(analysis_context, dict) else {}
-    namespace = _as_str(context_payload.get("namespace"), "islap") or "islap"
     service_name = _as_str(context_payload.get("service_name")).strip()
     trace_id = _as_str(context_payload.get("trace_id")).strip()
     evidence_window = _resolve_followup_evidence_window(context_payload)
@@ -336,7 +331,6 @@ def _build_non_executable_query_command_hints(
         if service_name:
             _append_hint(
                 _build_k8s_logs_evidence_command(
-                    namespace=namespace,
                     service_name=service_name,
                     window_start_iso=window_start_iso,
                 ),
@@ -345,7 +339,6 @@ def _build_non_executable_query_command_hints(
         if trace_id:
             _append_hint(
                 _build_k8s_logs_evidence_command(
-                    namespace=namespace,
                     service_name=service_name or "query-service",
                     window_start_iso=window_start_iso,
                 ),
@@ -388,7 +381,6 @@ def _build_non_executable_query_command_hints(
         if any(token in text_blob for token in ["进程", "process", "running query", "长时间运行"]):
             _append_hint(
                 _build_clickhouse_processes_evidence_command(
-                    namespace=namespace,
                     window_start_iso=window_start_iso,
                     window_end_iso=window_end_iso,
                 ),
@@ -398,7 +390,6 @@ def _build_non_executable_query_command_hints(
         if any(token in text_blob for token in ["指标", "metric", "merge", "mutation", "后台任务"]):
             _append_hint(
                 _build_clickhouse_metrics_evidence_command(
-                    namespace=namespace,
                     window_start_iso=window_start_iso,
                     window_end_iso=window_end_iso,
                 ),
@@ -408,7 +399,6 @@ def _build_non_executable_query_command_hints(
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append_hint(
                 _build_clickhouse_query_log_evidence_command(
-                    namespace=namespace,
                     window_start_iso=window_start_iso,
                     window_end_iso=window_end_iso,
                 ),
@@ -417,20 +407,20 @@ def _build_non_executable_query_command_hints(
             continue
         if any(token in text_blob for token in ["连接池", "pool", "timeout", "配置"]):
             _append_hint(
-                f"kubectl -n {namespace} describe pod -l app={service_name or 'query-service'}",
+                f"kubectl -A describe pod -l app={service_name or 'query-service'}",
                 "核对当前服务的超时和连接配置",
             )
             continue
         if any(token in text_blob for token in ["cpu", "内存", "网络", "资源"]):
             _append_hint(
-                f"kubectl -n {namespace} top pod -l app={service_name or 'query-service'}",
+                f"kubectl -A top pod -l app={service_name or 'query-service'} --no-headers | head -20",
                 "确认当前服务在故障时间窗口是否存在资源压力",
             )
 
     if not hints:
         _append_context_aware_defaults("先回收当前服务的直接证据，再细化结构化命令")
     if not hints:
-        _append_hint(f"kubectl -n {namespace} get pods --show-labels", "先确认可排查目标，再补全具体查询命令")
+        _append_hint("kubectl get pods -A --show-labels", "先确认可排查目标，再补全具体查询命令")
 
     return hints[:safe_limit]
 

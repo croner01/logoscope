@@ -1,0 +1,5 @@
+# Isolated OpenHarness helper environment.
+# Keep this separate from requirements-runtime.txt because openharness-ai currently
+# upgrades starlette/anyio beyond the versions required by ai-service/FastAPI.
+
+openharness-ai==0.1.9

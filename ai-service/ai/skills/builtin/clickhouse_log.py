@@ -3,37 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import List
 
 from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep
+from ai.skills.builtin._helpers import _as_str, _clickhouse_query
 from ai.skills.registry import register_skill
-
-
-def _as_str(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    return str(value).strip() if not isinstance(value, str) else value.strip()
-
-
-def _ch_query(
-    sql: str,
-    *,
-    namespace: str = "islap",
-    database: str = "logs",
-    timeout_s: int = 45,
-) -> dict:
-    return {
-        "tool": "kubectl_clickhouse_query",
-        "args": {
-            "namespace": namespace,
-            "target_kind": "clickhouse_cluster",
-            "target_identity": f"database:{database}",
-            "query": sql,
-            "timeout_s": timeout_s,
-        },
-        "command": f"clickhouse-client --query {sql!r}",
-        "timeout_s": timeout_s,
-    }
 
 
 @register_skill
@@ -52,14 +26,16 @@ class ClickHouseLogQuerySkill(DiagnosticSkill):
         "查询指定时间窗口内的异常明细、聚合错误模式，适用于大批量"
         "日志中定位高频错误和慢操作。"
     )
-    applicable_components = ["clickhouse", "database", "log", "query", "service"]
+    applicable_components = ["clickhouse", "database", "log", "query"]
     trigger_patterns = [
-        re.compile(r"\berror\b", re.IGNORECASE),
-        re.compile(r"\bexception\b", re.IGNORECASE),
-        re.compile(r"\btimeout\b", re.IGNORECASE),
+        # FIX: 收紧 trigger_patterns，避免 \berror\b / \btimeout\b 过于宽泛
+        re.compile(r"\bclickhouse\b", re.IGNORECASE),
+        re.compile(r"clickhouse.*error", re.IGNORECASE),
+        re.compile(r"clickhouse.*timeout", re.IGNORECASE),
         re.compile(r"slow.*query", re.IGNORECASE),
         re.compile(r"query.*fail", re.IGNORECASE),
         re.compile(r"db.*error", re.IGNORECASE),
+        re.compile(r"sql.*exception", re.IGNORECASE),
     ]
     risk_level = "low"
     max_steps = 3
@@ -104,14 +80,14 @@ class ClickHouseLogQuerySkill(DiagnosticSkill):
             SkillStep(
                 step_id="ch-error-count",
                 title="统计近 1 小时各级别日志数量",
-                command_spec=_ch_query(count_sql, namespace=ns),
+                command_spec=_clickhouse_query(count_sql),
                 purpose="快速定位错误日志级别分布，判断故障严重程度",
                 parse_hints={"extract": ["ERROR", "WARN", "count"]},
             ),
             SkillStep(
                 step_id="ch-error-detail",
                 title="查询近 30 分钟错误日志明细",
-                command_spec=_ch_query(detail_sql, namespace=ns),
+                command_spec=_clickhouse_query(detail_sql),
                 purpose="获取具体错误消息和发生时序，定位根因时间点",
                 depends_on=["ch-error-count"],
                 parse_hints={"extract": ["message", "timestamp", "level"]},
@@ -119,8 +95,9 @@ class ClickHouseLogQuerySkill(DiagnosticSkill):
             SkillStep(
                 step_id="ch-error-pattern",
                 title="聚合错误消息模式",
-                command_spec=_ch_query(pattern_sql, namespace=ns),
+                command_spec=_clickhouse_query(pattern_sql),
                 purpose="将相似错误归类，找出最高频错误模式",
+                # pattern 与 detail 都依赖 count，但彼此无依赖，可并行
                 depends_on=["ch-error-count"],
                 parse_hints={"extract": ["pattern", "count", "msg_pattern"]},
             ),

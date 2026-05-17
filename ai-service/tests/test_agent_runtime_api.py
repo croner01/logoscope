@@ -1148,6 +1148,81 @@ def test_create_ai_run_followup_mode_blocks_when_answer_declares_insufficient_ev
     assert run_finished_payload["blocked_reason"] == "evidence_incomplete"
 
 
+def test_create_ai_run_followup_mode_soft_missing_slots_not_blocked_in_progressive_gate(monkeypatch):
+    runtime_service = _build_runtime_service()
+    monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    monkeypatch.setenv("AI_RUNTIME_EVIDENCE_GATE_MODE", "progressive")
+    monkeypatch.setenv("AI_RUNTIME_MIN_FINAL_CONFIDENCE", "0.0")
+
+    async def _fake_run_follow_up_analysis_core(_request, event_callback=None):
+        if callable(event_callback):
+            await event_callback("token", {"text": "已完成关键观察。"})
+        return {
+            "analysis_session_id": "sess-followup-progressive-001",
+            "conversation_id": "conv-followup-progressive-001",
+            "analysis_method": "langchain",
+            "followup_engine": "langchain",
+            "answer": "初步证据完整，可继续执行优化验证。",
+            "references": [],
+            "actions": [{"id": "act-progressive-001", "title": "继续验证"}],
+            "action_observations": [],
+            "react_loop": {
+                "phase": "finalized",
+                "observe": {
+                    "coverage": 0.9,
+                    "evidence_coverage": 0.9,
+                    "confidence": 0.8,
+                    "final_confidence": 0.8,
+                    "missing_evidence_slots": ["action:tmpl-abc001"],
+                },
+                "replan": {"needed": False, "items": [], "next_actions": []},
+            },
+            "react_iterations": [],
+            "subgoals": [{"id": "sg-1", "title": "定位根因", "status": "done"}],
+            "reflection": {"gaps": []},
+            "thoughts": [],
+            "context_pills": [],
+        }
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _fake_run_follow_up_analysis_core)
+
+    async def _run():
+        created = await create_ai_run(
+            AIRunCreateRequest(
+                session_id="sess-followup-progressive-001",
+                question="继续分析 query-service 慢查询",
+                analysis_context={"analysis_type": "log", "service_name": "query-service"},
+                runtime_options={
+                    "mode": "followup_analysis",
+                    "conversation_id": "conv-followup-progressive-001",
+                    "history": [{"role": "user", "content": "继续分析 query-service 慢查询"}],
+                },
+            )
+        )
+        run_id = created["run"]["run_id"]
+        fetched = None
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+            fetched = await get_ai_run(run_id)
+            if fetched["run"]["status"] == "completed":
+                break
+        events = await get_ai_run_events(run_id, after_seq=0, limit=80)
+        return fetched, events
+
+    fetched, events = asyncio.run(_run())
+    assert fetched["run"]["status"] == "completed"
+    gate_decision = fetched["run"]["summary_json"].get("gate_decision") or {}
+    assert gate_decision.get("result") == "completed"
+    assert gate_decision.get("reason") == "ok"
+    metrics = gate_decision.get("metrics") or {}
+    assert metrics.get("evidence_slots_missing") is True
+    assert metrics.get("hard_evidence_slots_missing") is False
+    assert fetched["run"]["summary_json"].get("blocked_reason") in {None, ""}
+    run_finished_payload = next(item for item in events["events"] if item["event_type"] == "run_finished")["payload"]
+    assert run_finished_payload["status"] == "completed"
+    assert run_finished_payload.get("blocked_reason") in {None, ""}
+
+
 def test_create_ai_run_followup_mode_pauses_on_approval_required_observation(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
@@ -2933,7 +3008,7 @@ def test_execute_ai_run_command_skips_duplicate_attempt_after_failed_terminal(mo
         created = await create_ai_run(
             AIRunCreateRequest(
                 session_id="sess-cmd-dup-attempt-001",
-                question="同一 run 失败命令应避免重复执行",
+                question="同一 run 失败命令应允许重试",
                 analysis_context={"analysis_type": "log", "service_name": "query-service"},
             )
         )
@@ -2973,14 +3048,14 @@ def test_execute_ai_run_command_skips_duplicate_attempt_after_failed_terminal(mo
     first, second, events = asyncio.run(_run())
 
     assert first["status"] == "running"
-    assert second["status"] == "skipped_duplicate_attempt"
-    assert len(create_calls) == 1
+    assert second["status"] == "running"
+    assert len(create_calls) == 2
     duplicate_msgs = [
         str((item.get("payload") or {}).get("message") or "")
         for item in events["events"]
         if item.get("event_type") == "tool_call_skipped_duplicate"
     ]
-    assert any("同一 run 已尝试过该命令" in item for item in duplicate_msgs)
+    assert not any("同一 run 已尝试过该命令" in item for item in duplicate_msgs)
 
 
 def test_execute_ai_run_command_keeps_active_when_bridge_missing_terminal(monkeypatch):

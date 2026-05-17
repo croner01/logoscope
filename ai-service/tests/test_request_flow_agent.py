@@ -259,3 +259,36 @@ class TestRequestFlowAgent:
         second_round_queries = storage.logs_queries[first_query_count:]
         assert second_round_queries
         assert all("parseDateTime64BestEffortOrNull(toString(timestamp), 9, 'UTC')" in query for query in second_round_queries)
+
+    def test_prepare_analysis_input_supports_manual_context_window(self):
+        agent = RequestFlowAgent(MockStorageAdapter())
+        prepared = agent.prepare_analysis_input(
+            log_content="2026-03-14T06:40:00Z ERROR req-abc payment timeout",
+            service_name="api-gateway",
+            context={
+                "source_log_timestamp": "2026-03-14T06:40:00Z",
+                "pull_mode": "manual_context",
+                "manual_before": 0,
+                "manual_after": 0,
+            },
+        )
+
+        assert len(prepared.related_logs) == 1
+        assert prepared.related_logs[0]["id"] in {"log-1", "log-2"}
+
+    def test_prepare_analysis_input_marks_partial_integrity(self):
+        agent = RequestFlowAgent(MockStorageAdapter())
+        prepared = agent.prepare_analysis_input(
+            log_content="2026-03-14T06:40:00Z ERROR req-abc payment timeout",
+            service_name="api-gateway",
+            context={
+                "source_log_timestamp": "2026-03-14T06:40:00Z",
+                "expected_components": ["api-gateway", "payment-service", "mariadb"],
+                "allow_partial": False,
+            },
+        )
+
+        integrity = prepared.context.get("log_integrity", {})
+        assert integrity.get("partial") is True
+        assert "mariadb" in integrity.get("missing_components", [])
+        assert integrity.get("next_action") == "repull_required"

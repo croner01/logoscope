@@ -30,6 +30,7 @@ def _as_list(value: Any) -> List[Any]:
 class SkillContext:
     """Runtime context passed to a skill for step generation."""
 
+    # ── Core fields ──────────────────────────────────────────────────────────
     question: str = ""
     service_name: str = ""
     log_content: str = ""
@@ -40,20 +41,64 @@ class SkillContext:
     previous_observations: List[Dict[str, Any]] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    # ── Cross-component correlation fields (Phase 2) ──────────────────────────
+    # OpenStack X-Request-ID (req-xxxxxxxx-xxxx-...) or generic request_id
+    request_id: str = ""
+    # OpenStack specific req-xxx format, distinct from generic request_id
+    os_request_id: str = ""
+    # ISO timestamp of the triggering log entry
+    log_timestamp: str = ""
+    # Best available anchor kind: "trace_id" | "request_id" | "os_request_id" | "time_window"
+    correlation_anchor: str = ""
+    # Corresponding anchor value
+    correlation_anchor_value: str = ""
+    # Components identified as relevant from the triggering log
+    related_components: List[str] = field(default_factory=list)
+    # Structured data-flow produced by log_flow_analyzer (Phase 1)
+    data_flow: List[Dict[str, Any]] = field(default_factory=list)
+    # Evidence time-window boundaries (ISO strings) populated by Phase 1
+    evidence_window_start: str = ""
+    evidence_window_end: str = ""
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SkillContext":
         """Build from analysis_context dict."""
         safe = data if isinstance(data, dict) else {}
+
+        # Resolve the best correlation anchor
+        trace_id = _as_str(safe.get("trace_id"))
+        request_id = _as_str(safe.get("request_id") or safe.get("X-Request-ID", ""))
+        os_request_id = _as_str(safe.get("os_request_id") or safe.get("openstack_request_id", ""))
+
+        if trace_id:
+            anchor, anchor_value = "trace_id", trace_id
+        elif os_request_id:
+            anchor, anchor_value = "os_request_id", os_request_id
+        elif request_id:
+            anchor, anchor_value = "request_id", request_id
+        else:
+            anchor, anchor_value = "time_window", ""
+
         return cls(
             question=_as_str(safe.get("question")),
             service_name=_as_str(safe.get("service_name")),
             log_content=_as_str(safe.get("log_content") or safe.get("message", "")),
             log_level=_as_str(safe.get("log_level") or safe.get("level", "")),
             component_type=_as_str(safe.get("component_type")),
-            trace_id=_as_str(safe.get("trace_id")),
+            trace_id=trace_id,
             namespace=_as_str(safe.get("namespace"), "islap"),
             previous_observations=_as_list(safe.get("previous_observations")),
             extra=safe,
+            # correlation fields
+            request_id=request_id,
+            os_request_id=os_request_id,
+            log_timestamp=_as_str(safe.get("log_timestamp") or safe.get("timestamp", "")),
+            correlation_anchor=_as_str(safe.get("correlation_anchor")) or anchor,
+            correlation_anchor_value=_as_str(safe.get("correlation_anchor_value")) or anchor_value,
+            related_components=_as_list(safe.get("related_components")),
+            data_flow=_as_list(safe.get("data_flow")),
+            evidence_window_start=_as_str(safe.get("evidence_window_start", "")),
+            evidence_window_end=_as_str(safe.get("evidence_window_end", "")),
         )
 
     def combined_text(self) -> str:
