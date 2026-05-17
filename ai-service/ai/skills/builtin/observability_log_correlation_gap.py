@@ -3,55 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List, Tuple
+from typing import List, Tuple
 
 from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep
+from ai.skills.builtin._helpers import _as_str, _clickhouse_query, _escape_sql_string, _generic_exec
 from ai.skills.registry import register_skill
-
-
-def _as_str(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    return str(value).strip() if not isinstance(value, str) else value.strip()
-
-
-def _generic_exec(command: str, *, timeout_s: int = 20) -> dict:
-    return {
-        "tool": "generic_exec",
-        "args": {
-            "command": command,
-            "target_kind": "runtime_node",
-            "target_identity": "runtime:local",
-            "timeout_s": timeout_s,
-        },
-        "command": command,
-        "timeout_s": timeout_s,
-    }
-
-
-def _clickhouse_query(
-    sql: str,
-    *,
-    namespace: str = "islap",
-    database: str = "logs",
-    timeout_s: int = 45,
-) -> dict:
-    return {
-        "tool": "kubectl_clickhouse_query",
-        "args": {
-            "namespace": namespace,
-            "target_kind": "clickhouse_cluster",
-            "target_identity": f"database:{database}",
-            "query": sql,
-            "timeout_s": timeout_s,
-        },
-        "command": f"clickhouse-client --query {sql!r}",
-        "timeout_s": timeout_s,
-    }
-
-
-def _escape_sql_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 @register_skill
@@ -107,15 +63,16 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
         return "time_window", ""
 
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
-        ns = _as_str(context.namespace) or "islap"
         svc = _as_str(context.service_name) or "query-service"
+        ns = _as_str(context.namespace) or "islap"
         start, end = self._resolve_window(context)
         anchor_kind, anchor_value = self._resolve_anchor(context)
 
+        # FIX: kubectl logs -A (not kubectl -A logs) is the correct syntax
         log_window_command = (
-            f"kubectl -n {ns} logs -l app={svc} --since-time={start} --tail=200"
+            f"kubectl logs -A -l app={svc} --since-time={start} --tail=200"
             if start
-            else f"kubectl -n {ns} logs -l app={svc} --since=15m --tail=200"
+            else f"kubectl logs -A -l app={svc} --since=15m --tail=200"
         )
 
         where_clauses = []
@@ -137,10 +94,11 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
             "FORMAT PrettyCompact"
         )
 
+        # FIX: kubectl logs -A syntax
         query_service_command = (
-            f"kubectl -n {ns} logs -l app=query-service --since-time={start} --tail=200"
+            f"kubectl logs -A -l app=query-service --since-time={start} --tail=200"
             if start
-            else f"kubectl -n {ns} logs -l app=query-service --since=15m --tail=200"
+            else f"kubectl logs -A -l app=query-service --since=15m --tail=200"
         )
 
         anchor_title = "使用时间窗确认候选日志锚点"

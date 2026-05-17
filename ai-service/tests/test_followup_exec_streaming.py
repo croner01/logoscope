@@ -8,6 +8,7 @@ import pytest
 
 from ai.agent_runtime.exec_client import ExecServiceClientError
 from ai.followup_orchestration_helpers import (
+    _build_auto_exec_dedupe_key,
     _build_non_executable_command_templates,
     _build_structured_template_actions,
     _emit_followup_event,
@@ -381,6 +382,137 @@ def test_followup_readonly_auto_exec_stream_envelope_backfills_terminal_run(monk
     stream_updates = [payload for event_name, payload in events if event_name == "observation" and payload.get("stream") == "stdout"]
     assert stream_updates
     assert stream_updates[0]["text"] == "stream-envelope\n"
+
+
+def test_followup_readonly_auto_exec_recovers_after_stream_disconnect(monkeypatch):
+    monkeypatch.setenv("AI_FOLLOWUP_AUTO_EXEC_READONLY_ENABLED", "true")
+    monkeypatch.setenv("AI_FOLLOWUP_AUTO_EXEC_READONLY_MAX_ACTIONS", "1")
+    monkeypatch.setenv("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", "true")
+
+    events = []
+
+    async def _emit(event_name: str, payload: dict):
+        events.append((event_name, payload))
+
+    async def _fake_precheck_command(**_kwargs):
+        return {
+            "status": "ok",
+            "command": "echo stream-recover",
+            "command_type": "query",
+            "risk_level": "low",
+            "requires_write_permission": False,
+            "requires_elevation": False,
+            "dispatch_requires_template": False,
+            "dispatch_degraded": False,
+        }
+
+    async def _fake_create_command_run(**_kwargs):
+        return {"run": {"run_id": "cmdrun-stream-recover-001", "status": "running"}}
+
+    async def _fake_list_command_run_events(_run_id: str, after_seq: int = 0, limit: int = 200, timeout_seconds: int = 10):
+        _ = (after_seq, limit, timeout_seconds)
+        return {
+            "events": [
+                {
+                    "seq": 3,
+                    "event_type": "command_finished",
+                    "payload": {
+                        "command_run_id": "cmdrun-stream-recover-001",
+                        "status": "completed",
+                        "run": {
+                            "command_run_id": "cmdrun-stream-recover-001",
+                            "status": "completed",
+                            "exit_code": 0,
+                            "stdout": "stream-recover\n",
+                            "stderr": "",
+                            "duration_ms": 9,
+                            "timed_out": False,
+                        },
+                    },
+                }
+            ]
+        }
+
+    async def _fake_get_command_run(_run_id: str, timeout_seconds: int = 10):
+        _ = timeout_seconds
+        return {
+            "run": {
+                "run_id": "cmdrun-stream-recover-001",
+                "command_run_id": "cmdrun-stream-recover-001",
+                "status": "completed",
+                "exit_code": 0,
+                "stdout": "stream-recover\n",
+                "stderr": "",
+                "duration_ms": 9,
+                "timed_out": False,
+            }
+        }
+
+    def _fake_iter_command_run_stream(*_args, **_kwargs):
+        yield {
+            "event": "command_started",
+            "data": {
+                "command_run_id": "cmdrun-stream-recover-001",
+                "seq": 1,
+            },
+        }
+        yield {
+            "event": "command_output_delta",
+            "data": {
+                "command_run_id": "cmdrun-stream-recover-001",
+                "stream": "stdout",
+                "text": "stream-recover\n",
+                "seq": 2,
+            },
+        }
+        raise ExecServiceClientError("Response ended prematurely")
+
+    monkeypatch.setattr("ai.followup_orchestration_helpers.precheck_command", _fake_precheck_command)
+    monkeypatch.setattr("ai.followup_orchestration_helpers.create_command_run", _fake_create_command_run)
+    monkeypatch.setattr("ai.followup_orchestration_helpers.get_command_run", _fake_get_command_run)
+    monkeypatch.setattr(
+        "ai.followup_orchestration_helpers.list_command_run_events",
+        _fake_list_command_run_events,
+        raising=False,
+    )
+    monkeypatch.setattr("ai.followup_orchestration_helpers.iter_command_run_stream", _fake_iter_command_run_stream)
+
+    async def _run():
+        return await _run_followup_readonly_auto_exec(
+            session_id="sess-stream-recover-001",
+            message_id="msg-stream-recover-001",
+            actions=[
+                {
+                    "id": "act-stream-recover-001",
+                    "command": "echo stream-recover",
+                    "command_spec": {
+                        "tool": "generic_exec",
+                        "args": {
+                            "command_argv": ["echo", "stream-recover"],
+                            "target_kind": "runtime_node",
+                            "target_identity": "runtime:local",
+                            "timeout_s": 20,
+                        },
+                    },
+                    "command_type": "query",
+                    "risk_level": "low",
+                    "executable": True,
+                }
+            ],
+            run_blocking=None,
+            event_callback=_emit,
+            logger=None,
+        )
+
+    observations = asyncio.run(_run())
+    assert len(observations) == 1
+    assert observations[0]["status"] == "executed"
+    assert observations[0]["command_run_id"] == "cmdrun-stream-recover-001"
+    assert [payload["status"] for event_name, payload in events if event_name == "observation"] == [
+        "running",
+        "running",
+        "executed",
+    ]
 
 
 def test_followup_readonly_auto_exec_emits_failed_observation_when_stream_missing_terminal(monkeypatch):
@@ -937,6 +1069,81 @@ def test_followup_readonly_auto_exec_skips_already_executed_command(monkeypatch)
     assert observations[0]["evidence_reuse"] is True
 
 
+def test_followup_readonly_auto_exec_skips_equivalent_command_spec_key(monkeypatch):
+    monkeypatch.setenv("AI_FOLLOWUP_AUTO_EXEC_READONLY_ENABLED", "true")
+    monkeypatch.setenv("AI_FOLLOWUP_AUTO_EXEC_READONLY_MAX_ACTIONS", "1")
+    monkeypatch.setenv("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", "true")
+
+    async def _fake_precheck_command(**_kwargs):
+        return {
+            "status": "ok",
+            "command": "kubectl get pods -n islap",
+            "command_type": "query",
+            "risk_level": "low",
+            "requires_write_permission": False,
+            "requires_elevation": False,
+            "dispatch_requires_template": False,
+            "dispatch_degraded": False,
+        }
+
+    async def _fail_create_command_run(**_kwargs):
+        raise AssertionError("create_command_run should not be called for equivalent command_spec")
+
+    monkeypatch.setattr("ai.followup_orchestration_helpers.precheck_command", _fake_precheck_command)
+    monkeypatch.setattr("ai.followup_orchestration_helpers.create_command_run", _fail_create_command_run)
+
+    async def _run():
+        dedupe_key = _build_auto_exec_dedupe_key(
+            "kubectl get pods -n islap",
+            {
+                "tool": "generic_exec",
+                "args": {
+                    "command": "kubectl get pods -n islap",
+                    "command_argv": ["kubectl", "get", "pods", "-n", "islap"],
+                    "target_kind": "k8s_cluster",
+                    "target_identity": "namespace:islap",
+                    "timeout_s": 20,
+                },
+            },
+        )
+        executed = {dedupe_key}
+        observations = await _run_followup_readonly_auto_exec(
+            session_id="sess-stream-dup-spec-001",
+            message_id="msg-stream-dup-spec-001",
+            actions=[
+                {
+                    "id": "act-stream-dup-spec-001",
+                    "command": "kubectl get pods -n islap --request-timeout=5s",
+                    "command_spec": {
+                        "tool": "generic_exec",
+                        "args": {
+                            "command_argv": ["kubectl", "get", "pods", "-n", "islap"],
+                            "target_kind": "runtime_node",
+                            "target_identity": "runtime:local",
+                            "timeout_s": 5,
+                        },
+                    },
+                    "command_type": "query",
+                    "risk_level": "low",
+                    "executable": True,
+                }
+            ],
+            run_blocking=None,
+            executed_commands=executed,
+            prior_observations=[],
+            event_callback=None,
+            logger=None,
+        )
+        return observations
+
+    observations = asyncio.run(_run())
+
+    assert len(observations) == 1
+    assert observations[0]["status"] == "skipped"
+    assert observations[0]["reason_code"] == "duplicate_skipped"
+    assert "等价 command_spec" in str(observations[0]["message"])
+
+
 def test_select_followup_react_iteration_actions_does_not_retry_duplicate_skipped_with_valid_source():
     actions = [
         {
@@ -1305,7 +1512,7 @@ def test_followup_react_loop_summary_skips_low_trust_answer_command_template(mon
     ]
     merged_detail = "\n".join(summary_details)
     assert "app=que" not in merged_detail
-    assert "kubectl -n islap get pods --show-labels" in merged_detail
+    assert "kubectl get pods -A --show-labels" in merged_detail
 
 
 def test_followup_react_loop_promotes_structured_templates_to_auto_exec_candidates(monkeypatch):
@@ -1439,7 +1646,7 @@ def test_followup_react_loop_allows_low_signal_template_when_no_other_template(m
 
     result = asyncio.run(_run())
     assert captured_actions
-    assert any("kubectl -n islap get pods --show-labels" in str(item.get("command") or "") for item in captured_actions)
+    assert any("kubectl get pods -A --show-labels" in str(item.get("command") or "") for item in captured_actions)
     assert result["action_observations"]
 
 

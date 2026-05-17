@@ -49,6 +49,29 @@ EXEC_RUNTIME_HISTORY_CH_FAIL_OPEN=false
 5. 策略决策回放可通过 `decision_id` 关联 `run_id` 查询。
 6. `EXEC_POLICY_ALLOW_NON_ENFORCED_MODES=false` 保证生产配置下不会被误设为 `local/opa_shadow`。
 
+## OpenHands rollout 开关
+
+当 runtime v4 进入 OpenHands backend 灰度时，必须显式设置以下变量：
+
+```text
+AI_RUNTIME_V4_AGENT_BACKEND=openhands
+AI_RUNTIME_V4_OPENHANDS_ENABLED=true
+AI_RUNTIME_V4_OPENHANDS_HELPER_ENABLED=true
+AI_RUNTIME_V4_OPENHANDS_HELPER_PYTHON=/opt/openharness-venv/bin/python
+AI_RUNTIME_V4_OPENHANDS_HELPER_SCRIPT=/app/ai/runtime_v4/backend/openhands_helper.py
+```
+
+说明：
+
+1. 只设置 `AI_RUNTIME_V4_AGENT_BACKEND=openhands` 不会放行运行，后端应 fail-closed。
+2. helper 未开启时，OpenHands backend 仍走本地静态/provider fallback，不会真实调用 `openharness` 包。
+3. `openharness-ai` 依赖与 `ai-service` 主运行时冲突，因此必须安装在独立 `/opt/openharness-venv`，不能直接并入主 `/opt/venv`。
+4. 第一阶段仅允许 readonly backend 路径，不允许 OpenHands 成为审批真源。
+5. OpenHands helper 只输出受控工具意图，不直接执行命令。
+6. 高风险动作仍必须走现有 `approval_required -> resolve approval -> resume/replan` 链路。
+7. `/api/v2` 返回结构保持不变，变化仅体现在 `engine.inner=openhands-v1`。
+8. OpenHands backend 会复用现有 `ai.skills`，将 `DiagnosticSkill` 产生的 `SkillStep` 转换为 preview action；这些 action 应保留 `skill_name` 和 `step_id`。
+
 ## 一键 smoke
 
 执行：
@@ -56,6 +79,27 @@ EXEC_RUNTIME_HISTORY_CH_FAIL_OPEN=false
 ```bash
 scripts/ai-runtime-backend-smoke.sh
 ```
+
+如果要手工验证 OpenHands backend 灰度，先导出：
+
+```bash
+export AI_RUNTIME_V4_AGENT_BACKEND=openhands
+export AI_RUNTIME_V4_OPENHANDS_ENABLED=true
+export AI_RUNTIME_V4_OPENHANDS_HELPER_ENABLED=true
+```
+
+一键 smoke 可通过 `SMOKE_OPENHANDS=true` 打开 OpenHands 附加用例：
+
+```bash
+SMOKE_OPENHANDS=true scripts/ai-runtime-backend-smoke.sh
+```
+
+新增 OpenHands smoke 用例会验证：
+
+- 创建 OpenHands runtime v4 run 后 `engine.inner=openhands-v1`
+- `/api/v2/runs/{run_id}/actions` 返回 `planned` preview action
+- preview action 带 `skill_name / step_id`
+- 只传 `action_id` 调用 `/actions/command` 能进入现有执行/审批链路
 
 预期覆盖：
 
@@ -93,6 +137,27 @@ scripts/ai-runtime-manual-entry.sh create-run \
 ```
 
 脚本会把 `run_id / session_id / conversation_id` 写到本地状态文件，后续命令默认复用。
+
+### 1.1 创建 OpenHands runtime v4 run
+
+OpenHands backend 走 `/api/v2`，需要显式指定 `--api-version v2` 和 `--runtime-backend openhands`：
+
+```bash
+scripts/ai-runtime-manual-entry.sh create-run \
+  --api-version v2 \
+  --runtime-backend openhands \
+  --no-auto-exec-readonly \
+  --enable-skills \
+  --max-skills 1 \
+  --question "query-service query timeout and slow query"
+```
+
+预期：
+
+- `GET /api/v2/runs/{run_id}` 中 `engine.inner=openhands-v1`
+- run summary 中 `inner_backend.provider=openharness-subprocess`
+- run summary 中包含 `inner_backend.selected_skills`
+- `actions` 命令能看到 `planned` 状态的 preview action
 
 ### 2. 看实时事件流
 
@@ -132,6 +197,27 @@ scripts/ai-runtime-manual-entry.sh exec \
 - 返回 `elevation_required` 或 `confirmation_required`
 - run 进入 `waiting_approval`
 - events 中写入 `approval_required`
+
+### 4.1 查看并执行 OpenHands preview action
+
+查看 OpenHands backend 规划出的 actions：
+
+```bash
+scripts/ai-runtime-manual-entry.sh actions --limit 20
+```
+
+执行第一个 preview action：
+
+```bash
+scripts/ai-runtime-manual-entry.sh exec-action \
+  --action-id planned-preview-1
+```
+
+观察点：
+
+- `exec-action` 请求只传 `action_id`，后端应自动补齐 `command_spec`
+- 如果 preview action 是只读命令，应走现有受控执行路径
+- 如果 preview action 最终被判定为风险命令，应进入现有人工审批链路，而不是由 OpenHands 直接放行
 
 ### 5. 查看待审批项
 
@@ -198,6 +284,9 @@ PY
 3. `approval_required` 是否有明确结构化字段，不只是一段模糊自然语言。
 4. reject approval 后 run 是否稳定落到 `blocked/rejected` 语义。
 5. `max chars / policy reject` 是否能给前端提供明确 reason code 或至少稳定 reason text。
+6. 开启 OpenHands backend 后，`GET /api/v2/runs/{run_id}` 返回的 `engine.inner` 是否为 `openhands-v1`。
+7. OpenHands backend 规划出的 skills action 是否能在 `/api/v2/runs/{run_id}/actions` 中看到 `skill_name / step_id`。
+8. 只传 preview `action_id` 调用 `/api/v2/runs/{run_id}/actions/command` 时，是否仍走现有命令执行与审批链路。
 
 ## 当前边界
 

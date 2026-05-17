@@ -22,6 +22,7 @@ class RunCreateRequest(BaseModel):
     idempotency_key: str = ""
     client_deadline_ms: int = 0
     pipeline_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    runtime_backend: str = ""
 
 
 class ApprovalResolveRequest(BaseModel):

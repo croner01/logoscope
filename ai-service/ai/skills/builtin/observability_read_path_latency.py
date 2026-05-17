@@ -3,51 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import List
 
 from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep
+from ai.skills.builtin._helpers import _as_str, _clickhouse_query, _generic_exec
 from ai.skills.registry import register_skill
-
-
-def _as_str(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    return str(value).strip() if not isinstance(value, str) else value.strip()
-
-
-def _generic_exec(command: str, *, timeout_s: int = 20) -> dict:
-    return {
-        "tool": "generic_exec",
-        "args": {
-            "command": command,
-            "target_kind": "runtime_node",
-            "target_identity": "runtime:local",
-            "timeout_s": timeout_s,
-        },
-        "command": command,
-        "timeout_s": timeout_s,
-    }
-
-
-def _clickhouse_query(
-    sql: str,
-    *,
-    namespace: str = "islap",
-    database: str = "logs",
-    timeout_s: int = 45,
-) -> dict:
-    return {
-        "tool": "kubectl_clickhouse_query",
-        "args": {
-            "namespace": namespace,
-            "target_kind": "clickhouse_cluster",
-            "target_identity": f"database:{database}",
-            "query": sql,
-            "timeout_s": timeout_s,
-        },
-        "command": f"clickhouse-client --query {sql!r}",
-        "timeout_s": timeout_s,
-    }
 
 
 @register_skill
@@ -77,8 +37,8 @@ class ObservabilityReadPathLatencySkill(DiagnosticSkill):
     max_steps = 4
 
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
-        ns = _as_str(context.namespace) or "islap"
         svc = _as_str(context.service_name) or "query-service"
+        ns = _as_str(context.namespace) or "islap"
 
         query_log_sql = (
             "SELECT event_time, query_id, query_duration_ms, read_rows, read_bytes, memory_usage, exception_code, query "
@@ -102,8 +62,9 @@ class ObservabilityReadPathLatencySkill(DiagnosticSkill):
             SkillStep(
                 step_id="read-latency-log-tail",
                 title="拉取 query-service 读路径日志",
+                # FIX: kubectl logs -A (not kubectl -A logs) is the correct syntax
                 command_spec=_generic_exec(
-                    f"kubectl -n {ns} logs -l app={svc} --since=15m --tail=200",
+                    f"kubectl logs -A -l app={svc} --since=15m --tail=200",
                     timeout_s=20,
                 ),
                 purpose="确认超时、慢查询和预览/聚合接口的服务侧症状",

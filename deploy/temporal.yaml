@@ -58,6 +58,7 @@ spec:
       labels:
         app: temporal-postgresql
     spec:
+      terminationGracePeriodSeconds: 60
       containers:
       - name: postgres
         image: postgres:16-alpine
@@ -91,6 +92,15 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 10
+        startupProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -lc
+            - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 24
         livenessProbe:
           exec:
             command:
@@ -101,6 +111,13 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 3
           failureThreshold: 10
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -lc
+              - sleep 15
         resources:
           requests:
             cpu: 100m
@@ -151,6 +168,7 @@ spec:
       labels:
         app: temporal
     spec:
+      terminationGracePeriodSeconds: 90
       containers:
       - name: temporal
         image: temporalio/auto-setup:1.25.2
@@ -182,6 +200,12 @@ spec:
           value: "0.0.0.0"
         - name: LOG_LEVEL
           value: info
+        - name: SQL_MAX_CONNS
+          value: "40"
+        - name: SQL_MAX_IDLE_CONNS
+          value: "20"
+        - name: SQL_CONN_MAX_LIFETIME
+          value: "1h"
         ports:
         - containerPort: 7233
           name: grpc
@@ -194,6 +218,12 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 20
+        startupProbe:
+          tcpSocket:
+            port: 7233
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 24
         livenessProbe:
           tcpSocket:
             port: 7233
@@ -201,6 +231,13 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 3
           failureThreshold: 10
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -lc
+              - sleep 15
         resources:
           requests:
             cpu: 200m

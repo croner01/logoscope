@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
       - name: exec-service
-        image: localhost:5000/logoscope/exec-service:latest
+        image: localhost:5000/logoscope/exec-service:20260409
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8095
@@ -126,9 +126,9 @@ spec:
         - name: EXEC_EXECUTOR_TEMPLATE__HOST_SSH_MUTATING
           value: ""
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_READONLY
-          value: ""
+          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_MUTATING
-          value: ""
+          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
         resources:
           limits:
             memory: 512Mi

@@ -65,7 +65,7 @@ spec:
       serviceAccountName: ai-service
       containers:
       - name: ai-service
-        image: localhost:5000/logoscope/ai-service:latest
+        image: localhost:5000/logoscope/ai-service:openharness-20260516
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8090
@@ -198,6 +198,22 @@ spec:
           value: "temporal_required"
         - name: AI_RUNTIME_V4_INNER_ENGINE
           value: "langgraph_required"
+        - name: AI_RUNTIME_V4_AGENT_BACKEND
+          value: "openhands"
+        - name: AI_RUNTIME_V4_OPENHANDS_ENABLED
+          value: "true"
+        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_ENABLED
+          value: "true"
+        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_PYTHON
+          value: "/opt/openharness-venv/bin/python"
+        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_SCRIPT
+          value: "/app/ai/runtime_v4/backend/openhands_helper.py"
+        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_TIMEOUT_SECONDS
+          value: "90"
+        - name: AI_RUNTIME_V4_OPENHANDS_MODEL
+          value: "deepseek-chat"
+        - name: AI_RUNTIME_V4_OPENHANDS_BASE_URL
+          value: "https://api.deepseek.com/v1"
         - name: AI_RUNTIME_V4_TEMPORAL_ADDRESS
           value: "temporal-frontend:7233"
         - name: AI_RUNTIME_V4_TEMPORAL_NAMESPACE

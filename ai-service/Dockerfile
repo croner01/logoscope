@@ -11,6 +11,10 @@ RUN python -m venv /opt/venv
 COPY ai-service/requirements-runtime.txt /app/ai-service/requirements-runtime.txt
 RUN pip install  --prefer-binary -r /app/ai-service/requirements-runtime.txt
 
+RUN python -m venv /opt/openharness-venv
+COPY ai-service/requirements-openharness.txt /app/ai-service/requirements-openharness.txt
+RUN /opt/openharness-venv/bin/pip install --prefer-binary -r /app/ai-service/requirements-openharness.txt
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -32,6 +36,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/openharness-venv /opt/openharness-venv
 
 COPY shared_src/ /app/shared_lib/
 RUN ln -s /app/shared_lib /app/shared_lib/shared_src

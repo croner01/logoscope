@@ -1,6 +1,7 @@
 """Tests for API v2 runtime endpoints."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -79,6 +80,258 @@ def test_v2_create_and_get_thread():
     assert fetched["thread"]["session_id"] == "sess-v2-001"
 
 
+def test_v2_run_snapshot_reports_openhands_inner_engine(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        created = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-oh-001",
+                conversation_id="conv-oh-001",
+                title="OpenHands backend check",
+            )
+        )
+        result = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="检查 query-service timeout",
+                runtime_backend="openhands",
+            ),
+        )
+        snapshot = await get_run_snapshot(result["run"]["run_id"])
+        return result, snapshot
+
+    result, snapshot = asyncio.run(_run())
+    assert result["run"]["engine"]["inner"] == "openhands-v1"
+    assert snapshot["run"]["engine"]["inner"] == "openhands-v1"
+    inner_backend = snapshot["run"]["summary"]["inner_backend"]
+    assert inner_backend["backend"] == "openhands-v1"
+    assert inner_backend["mode"] == "readonly"
+    assert inner_backend["tool_call_count"] == 1
+    assert inner_backend["tool_calls_preview"][0]["tool_name"] == "command.exec"
+
+
+def test_v2_idempotent_reuse_preserves_openhands_inner_engine(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        created = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-oh-idem-001",
+                conversation_id="conv-oh-idem-001",
+                title="OpenHands idempotency check",
+            )
+        )
+        first = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="检查 query-service timeout",
+                runtime_backend="openhands",
+                idempotency_key="idem-openhands-001",
+            ),
+        )
+        second = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="检查 query-service timeout",
+                runtime_backend="openhands",
+                idempotency_key="idem-openhands-001",
+            ),
+        )
+        return first, second
+
+    first, second = asyncio.run(_run())
+    assert first["run"]["engine"]["inner"] == "openhands-v1"
+    assert second["idempotent_reused"] is True
+    assert second["run"]["engine"]["inner"] == "openhands-v1"
+
+
+def test_v2_openhands_backend_emits_planning_preview_events(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        created = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-oh-evt-001",
+                conversation_id="conv-oh-evt-001",
+                title="OpenHands event check",
+            )
+        )
+        result = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="检查 query-service timeout",
+                runtime_backend="openhands",
+            ),
+        )
+        events = await get_run_events(result["run"]["run_id"], after_seq=0, limit=50)
+        return result, events
+
+    result, events = asyncio.run(_run())
+    assert result["run"]["engine"]["inner"] == "openhands-v1"
+    event_types = [item["event_type"] for item in events["events"]]
+    assert "reasoning_step" in event_types
+    assert "reasoning_summary_delta" in event_types
+    preview = [item for item in events["events"] if item["event_type"] == "reasoning_summary_delta"]
+    assert any("openhands-v1" in str(item["payload"].get("text", "")) for item in preview)
+
+
+def test_v2_openhands_provider_thoughts_flow_into_preview_events(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    class _Backend:
+        def backend_name(self):
+            return "openhands-v1"
+
+        def run(self, request):
+            return SimpleNamespace(  # type: ignore[name-defined]
+                inner_engine="openhands-v1",
+                payload={
+                    "mode": "approval_gated",
+                    "thoughts": [
+                        "先确认 query-service 是否普遍超时",
+                        "再检查 clickhouse query_log",
+                    ],
+                    "tool_calls": [
+                        {
+                            "action_id": "oh-tool-1",
+                            "tool_name": "command.exec",
+                            "command": "kubectl -n islap get pods",
+                            "purpose": "collect cluster inventory",
+                            "title": "列出 pods",
+                            "command_spec": {
+                                "tool": "generic_exec",
+                                "args": {
+                                    "command": "kubectl -n islap get pods",
+                                    "target_kind": "k8s_cluster",
+                                    "target_identity": "namespace:islap",
+                                    "timeout_s": 20,
+                                },
+                            },
+                        }
+                    ],
+                },
+            )
+
+    async def _run():
+        created = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-oh-thought-001",
+                conversation_id="conv-oh-thought-001",
+                title="OpenHands provider thought check",
+            )
+        )
+        from ai.runtime_v4.adapter.orchestration_bridge import RuntimeV4OrchestrationBridge
+        from ai.runtime_v4.store import get_runtime_v4_thread_store
+        from ai.runtime_v4.temporal.client import get_temporal_outer_client
+        from ai.runtime_v4 import reset_runtime_v4_bridge
+        import ai.runtime_v4 as runtime_v4_module
+
+        reset_runtime_v4_bridge()
+        runtime_v4_module._runtime_v4_bridge = RuntimeV4OrchestrationBridge(  # noqa: SLF001
+            temporal_client=get_temporal_outer_client(),
+            thread_store=get_runtime_v4_thread_store(),
+            runtime_backend=_Backend(),
+        )
+
+        result = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="检查 query-service timeout",
+                runtime_backend="openhands",
+            ),
+        )
+        events = await get_run_events(result["run"]["run_id"], after_seq=0, limit=50)
+        snapshot = await get_run_snapshot(result["run"]["run_id"])
+        return result, events, snapshot
+
+    result, events, snapshot = asyncio.run(_run())
+    assert result["run"]["engine"]["inner"] == "openhands-v1"
+    preview = [item for item in events["events"] if item["event_type"] == "reasoning_summary_delta"]
+    preview_texts = [str(item["payload"].get("text", "")) for item in preview]
+    assert any("先确认 query-service 是否普遍超时" in text for text in preview_texts)
+    assert any("再检查 clickhouse query_log" in text for text in preview_texts)
+    inner_backend = snapshot["run"]["summary"]["inner_backend"]
+    assert inner_backend["tool_calls_preview"][0]["action_id"] == "oh-tool-1"
+
+
+def test_v2_list_run_actions_falls_back_to_openhands_preview(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        created = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-oh-act-001",
+                conversation_id="conv-oh-act-001",
+                title="OpenHands actions check",
+            )
+        )
+        result = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="检查 query-service timeout",
+                runtime_backend="openhands",
+            ),
+        )
+        actions_payload = await list_run_actions(result["run"]["run_id"], limit=20)
+        return actions_payload
+
+    actions_payload = asyncio.run(_run())
+    assert actions_payload["actions"]
+    first = actions_payload["actions"][0]
+    assert first["action_id"] == "planned-preview-1"
+    assert first["status"] == "planned"
+    assert first["reason_code"] == "inner_backend_preview"
+    assert first["command"].startswith("kubectl -n islap get pods")
+
+
+def test_v2_openhands_skill_preview_actions_preserve_skill_metadata(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        created = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-oh-skill-act-001",
+                conversation_id="conv-oh-skill-act-001",
+                title="OpenHands skill actions check",
+            )
+        )
+        result = await create_thread_run(
+            created["thread"]["thread_id"],
+            RunCreateRequest(
+                question="query-service query timeout and slow query",
+                analysis_context={
+                    "service_name": "query-service",
+                    "component_type": "query",
+                    "namespace": "islap",
+                },
+                runtime_options={
+                    "auto_exec_readonly": False,
+                    "enable_skills": True,
+                    "max_skills": 1,
+                },
+                runtime_backend="openhands",
+            ),
+        )
+        actions_payload = await list_run_actions(result["run"]["run_id"], limit=20)
+        return actions_payload
+
+    actions_payload = asyncio.run(_run())
+    assert actions_payload["actions"]
+    first = actions_payload["actions"][0]
+    assert first["status"] == "planned"
+    assert first["reason_code"] == "inner_backend_preview"
+    assert first["skill_name"]
+    assert first["step_id"]
+    assert first["action_id"] == "planned-preview-1"
+
+
 def test_v2_targets_register_get_list_and_resolve():
     async def _run():
         registered = await register_target(
@@ -89,6 +342,11 @@ def test_v2_targets_register_get_list_and_resolve():
                 display_name="ISLAP Cluster",
                 description="生产前验证集群",
                 capabilities=["read_logs", "restart_workload"],
+                metadata={
+                    "cluster_id": "islap-prod",
+                    "risk_tier": "medium",
+                    "preferred_executor_profiles": ["kubectl"],
+                },
                 updated_by="qa",
                 reason="bootstrap",
             )
@@ -1116,6 +1374,112 @@ def test_v2_command_action_requires_command_or_command_spec():
     error = asyncio.run(_run())
     assert error.status_code == 400
     assert error.detail == "command_spec is required"
+
+
+def test_v2_command_action_resolves_openhands_preview_action_id(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        thread_payload = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-v2-command-004",
+                conversation_id="conv-v2-command-004",
+                title="v2 command action preview execute",
+            )
+        )
+        thread_id = thread_payload["thread"]["thread_id"]
+        run_created = await create_thread_run(
+            thread_id,
+            RunCreateRequest(
+                question="执行 OpenHands 规划动作",
+                runtime_backend="openhands",
+            ),
+        )
+        run_id = run_created["run"]["run_id"]
+
+        async def _fake_execute_command(_self, *, run_id, request_payload):
+            assert run_id
+            assert request_payload["action_id"] == "planned-preview-1"
+            assert request_payload["command"] == "kubectl -n islap get pods"
+            assert request_payload["purpose"] == "bootstrap readonly cluster inventory"
+            assert request_payload["title"] == "OpenHands 工具调用"
+            assert request_payload["confirmed"] is False
+            assert request_payload["elevated"] is False
+            payload_spec = request_payload["command_spec"]
+            assert payload_spec["tool"] == "generic_exec"
+            assert payload_spec["args"]["command"] == "kubectl -n islap get pods"
+            assert payload_spec["args"]["target_kind"] == "k8s_cluster"
+            assert payload_spec["args"]["target_identity"] == "namespace:islap"
+            return {
+                "status": "completed",
+                "tool_call_id": "tool-v2-004",
+                "run": {
+                    "run_id": run_id,
+                    "status": "running",
+                },
+            }
+
+        monkeypatch.setattr(
+            "ai.runtime_v4.adapter.orchestration_bridge.RuntimeV4OrchestrationBridge.execute_command",
+            _fake_execute_command,
+        )
+
+        return await execute_run_command_action(
+            run_id,
+            CommandActionRequest(
+                action_id="planned-preview-1",
+                purpose="",
+                title="",
+                command="",
+                command_spec={},
+                confirmed=False,
+                elevated=False,
+            ),
+        )
+
+    result = asyncio.run(_run())
+    assert result["status"] == "completed"
+    assert result["tool_call_id"] == "tool-v2-004"
+
+
+def test_v2_command_action_rejects_unknown_openhands_preview_action_id(monkeypatch):
+    monkeypatch.setenv("AI_RUNTIME_V4_OPENHANDS_ENABLED", "true")
+    reset_runtime_v4_bridge()
+
+    async def _run():
+        thread_payload = await create_thread(
+            ThreadCreateRequest(
+                session_id="sess-v2-command-005",
+                conversation_id="conv-v2-command-005",
+                title="v2 command action preview missing",
+            )
+        )
+        thread_id = thread_payload["thread"]["thread_id"]
+        run_created = await create_thread_run(
+            thread_id,
+            RunCreateRequest(
+                question="执行不存在的 OpenHands 规划动作",
+                runtime_backend="openhands",
+            ),
+        )
+        run_id = run_created["run"]["run_id"]
+        with pytest.raises(HTTPException) as exc_info:
+            await execute_run_command_action(
+                run_id,
+                CommandActionRequest(
+                    action_id="planned-preview-99",
+                    purpose="",
+                    title="",
+                    command="",
+                    command_spec={},
+                ),
+            )
+        return exc_info.value
+
+    error = asyncio.run(_run())
+    assert error.status_code == 404
+    assert error.detail == "preview action not found"
 
 
 def test_v2_get_run_events_default_visibility_hides_repair_noise(_reset_v4_state):
