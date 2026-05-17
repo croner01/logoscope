@@ -543,6 +543,25 @@ def _find_duplicate_question_turn(
     return latest_match
 
 
+def _extract_success_commands_from_assistant_message(message: Dict[str, Any]) -> List[str]:
+    metadata = message.get("metadata") if isinstance(message, dict) else {}
+    commands: List[str] = []
+    if not isinstance(metadata, dict):
+        return commands
+    action_observations = metadata.get("action_observations") if isinstance(metadata.get("action_observations"), list) else []
+    for item in action_observations:
+        payload = item if isinstance(item, dict) else {}
+        status = _as_str(payload.get("status")).strip().lower()
+        if status != "executed":
+            continue
+        if int(_as_float(payload.get("exit_code"), 1)) != 0:
+            continue
+        command = _normalize_followup_command_line(_as_str(payload.get("command")))
+        if command and command not in commands:
+            commands.append(command)
+    return commands
+
+
 def _normalize_diagnosis_contract(raw: Any) -> Dict[str, Any]:
     safe = raw if isinstance(raw, dict) else {}
 
@@ -731,6 +750,23 @@ def _answer_declares_evidence_insufficient(text: Any) -> bool:
     if not safe_text:
         return False
     return any(token in safe_text for token in _EVIDENCE_INSUFFICIENT_HINTS)
+
+
+def _runtime_evidence_gate_mode() -> str:
+    """运行态证据门禁模式。strict: 缺任意槽位即阻断；progressive: 仅硬槽位阻断。"""
+    raw = _as_str(os.getenv("AI_RUNTIME_EVIDENCE_GATE_MODE"), "progressive").strip().lower()
+    if raw in {"strict", "progressive"}:
+        return raw
+    return "progressive"
+
+
+def _is_hard_evidence_slot(slot_id: Any) -> bool:
+    """
+    判定是否为硬阻断证据槽位。
+    约定：`hard:<slot>` 前缀为硬槽位；其余 action 模板槽位默认为软缺失（不直接阻断）。
+    """
+    text = _as_str(slot_id).strip().lower()
+    return bool(text) and text.startswith("hard:")
 
 
 def _soften_low_evidence_diagnosis_text(
@@ -1769,6 +1805,35 @@ async def _run_followup_runtime_task(
         for item in _as_list(summary_payload.get("action_observations"))
         if isinstance(item, dict)
     ]
+    # Propagate last command execution result as an observation if not already present.
+    # The approval flow runs commands via execute_command_tool → _bridge_command_run,
+    # which stores results in last_command_* fields but NOT in action_observations.
+    # Without this, _build_structured_template_actions cannot detect failed commands
+    # and would regenerate the same template on resume.
+    last_command_raw = _normalize_followup_command_line(
+        _as_str(summary_payload.get("last_command")).strip()
+    )
+    if last_command_raw and not any(
+        _normalize_followup_command_line(_as_str(o.get("command"))).strip() == last_command_raw
+        for o in previous_action_observations
+    ):
+        last_status = _as_str(summary_payload.get("last_command_status")).lower()
+        last_exit_code = int(_as_float(summary_payload.get("last_command_exit_code"), 0))
+        last_timed_out = bool(summary_payload.get("last_command_timed_out"))
+        last_action_id = _as_str(summary_payload.get("last_action_id")).strip()
+        obs_status = last_status
+        if last_timed_out:
+            obs_status = "timed_out"
+        last_error_detail = _as_str(summary_payload.get("last_command_error_detail")).strip()
+        previous_action_observations.append({
+            "action_id": last_action_id or "",
+            "command": last_command_raw,
+            "status": obs_status,
+            "exit_code": last_exit_code,
+            "timed_out": last_timed_out,
+            "auto_executed": False,
+            "message": last_error_detail,
+        })
     runtime_service._update_run_summary(  # noqa: SLF001
         run,
         followup_runtime_worker="running",
@@ -1966,13 +2031,19 @@ async def _run_followup_runtime_task(
             if slot_id and slot_id not in missing_evidence_slots:
                 missing_evidence_slots.append(slot_id)
         evidence_slots_missing = len(missing_evidence_slots) > 0
-        coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        hard_missing_evidence_slots = [slot for slot in missing_evidence_slots if _is_hard_evidence_slot(slot)]
+        hard_evidence_slots_missing = len(hard_missing_evidence_slots) > 0
+        evidence_gate_mode = _runtime_evidence_gate_mode()
+        if evidence_gate_mode == "strict":
+            coverage_insufficient = coverage_insufficient or evidence_slots_missing
+        else:
+            coverage_insufficient = coverage_insufficient or hard_evidence_slots_missing
         evidence_incomplete = (
             has_needs_data_subgoal
             or coverage_insufficient
             or confidence_insufficient
             or answer_declares_insufficient
-            or evidence_slots_missing
+            or hard_evidence_slots_missing
         )
         def _compact_blocked_reason_detail(value: Any, fallback: str = "") -> str:
             text = _as_str(value).strip() or fallback
@@ -2043,6 +2114,7 @@ async def _run_followup_runtime_task(
                 "final_confidence": final_confidence_value,
                 "needs_data_subgoal": has_needs_data_subgoal,
                 "evidence_slots_missing": evidence_slots_missing,
+                "hard_evidence_slots_missing": hard_evidence_slots_missing,
                 "coverage_insufficient": coverage_insufficient,
                 "confidence_insufficient": confidence_insufficient,
                 "answer_declares_insufficient": answer_declares_insufficient,
@@ -2057,6 +2129,7 @@ async def _run_followup_runtime_task(
                 "min_final_confidence": min_final_confidence,
             },
             "missing_evidence_slots": missing_evidence_slots,
+            "hard_missing_evidence_slots": hard_missing_evidence_slots,
             "gate_conflict": gate_conflict,
             "gate_conflict_reasons": gate_conflict_reasons,
         }
@@ -2072,7 +2145,11 @@ async def _run_followup_runtime_task(
             "approval_required": runtime_state.get("approval_required", []),
             "react_loop": assistant_metadata["react_loop"],
             "answer_preview": str(result.get("answer") or "")[:400],
-            "executed_commands": result.get("executed_commands") if isinstance(result.get("executed_commands"), list) else previous_executed_commands,
+            "executed_commands": [
+                item
+                for item in _as_list(result.get("executed_commands"))
+                if _as_str(item).strip() and not _as_str(item).strip().startswith("dedupe::")
+            ] if isinstance(result.get("executed_commands"), list) else previous_executed_commands,
             "diagnosis_status": diagnosis_status,
             "fault_summary": fault_summary,
             "missing_evidence_slots": missing_evidence_slots,
@@ -3399,6 +3476,10 @@ class LLMAnalyzeRequest(BaseModel):
     use_llm: bool = True
     enable_agent: bool = True
     enable_web_search: bool = False
+    pull_mode: str = "auto_correlation"
+    manual_before: int = 10
+    manual_after: int = 10
+    allow_partial: bool = False
 
 
 class LLMTraceAnalyzeRequest(BaseModel):
@@ -4098,6 +4179,10 @@ async def analyze_log_llm(request: LLMAnalyzeRequest) -> Dict[str, Any]:
         safe_context = dict(request.context or {})
         if request.enable_web_search:
             safe_context["enable_web_search"] = True
+        safe_context.setdefault("pull_mode", _as_str(request.pull_mode, "auto_correlation").strip().lower())
+        safe_context.setdefault("manual_before", max(0, int(request.manual_before)))
+        safe_context.setdefault("manual_after", max(0, int(request.manual_after)))
+        safe_context.setdefault("allow_partial", bool(request.allow_partial))
 
         prepared_input = request.log_content
         prepared_context = safe_context
@@ -6003,6 +6088,24 @@ async def _run_follow_up_analysis_core(
             history=compacted_history if isinstance(compacted_history, list) else history,
             question=safe_question,
         )
+        if duplicate_question_turn:
+            assistant_message = (
+                duplicate_question_turn.get("assistant_message")
+                if isinstance(duplicate_question_turn.get("assistant_message"), dict)
+                else {}
+            )
+            dedupe_commands = _extract_success_commands_from_assistant_message(assistant_message)
+            if dedupe_commands:
+                existing_runtime_commands = [
+                    _normalize_followup_command_line(item)
+                    for item in _as_list(analysis_context.get("_runtime_executed_commands"))
+                    if _normalize_followup_command_line(item)
+                ]
+                merged_runtime_commands = existing_runtime_commands[:]
+                for command in dedupe_commands:
+                    if command not in merged_runtime_commands:
+                        merged_runtime_commands.append(command)
+                analysis_context["_runtime_executed_commands"] = merged_runtime_commands[-300:]
 
     long_term_memory_timeout = False
     await _emit_followup_event(event_callback, "plan", {"stage": "long_term_memory"}, logger=logger)
@@ -6552,7 +6655,13 @@ async def _run_follow_up_analysis_core(
         "long_term_memory_timeout": long_term_memory_timeout,
         "react_memory_timeout": react_memory_timeout,
         "answer_generation_timeout": answer_generation_timeout,
-        "executed_commands": sorted(executed_commands_set),
+        "executed_commands": sorted(
+            [
+                item
+                for item in executed_commands_set
+                if _as_str(item).strip() and not _as_str(item).strip().startswith("dedupe::")
+            ]
+        ),
     }
 
 
@@ -6812,3 +6921,194 @@ async def health_check():
         "llm_model": os.getenv("LLM_MODEL", "gpt-4"),
         "followup_engine": _resolve_followup_engine(),
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 5 & 6: Remediation Plan API endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+class VerifyRemediationRequest(BaseModel):
+    verified_by: str = "human"
+    verification_notes: str = ""
+    verification_result: str = "verified_correct"
+
+
+class AuthorizeAutoFixRequest(BaseModel):
+    authorized_by: str
+    confirmation: str = ""  # free-text confirmation from operator
+
+
+@router.get("/remediation/pending-verification")
+async def list_pending_verification():
+    """
+    GET /api/v1/ai/remediation/pending-verification
+
+    Returns all auto-captured remediation plans that are awaiting human verification.
+    These are cases with source='auto_diagnostic' and verification_result='pending_human_verification'.
+    """
+    try:
+        from ai.similar_cases import get_case_store
+        store = get_case_store()
+        pending = [
+            {
+                "case_id": c.id,
+                "summary": c.summary,
+                "service_name": c.service_name,
+                "error_category": c.problem_type,
+                "created_at": c.created_at,
+                "run_id": (c.context or {}).get("run_id", ""),
+                "remediation_steps": c.manual_remediation_steps,
+                "tags": c.tags,
+            }
+            for c in store._cases.values()
+            if not c.is_deleted
+            and c.source == "auto_diagnostic"
+            and c.verification_result == "pending_human_verification"
+        ]
+        return {"status": "ok", "count": len(pending), "items": pending}
+    except Exception as exc:
+        logger.error("list_pending_verification error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/remediation/{case_id}/verify")
+async def verify_remediation_plan(case_id: str, body: VerifyRemediationRequest):
+    """
+    POST /api/v1/ai/remediation/{case_id}/verify
+
+    Human operator confirms the AI-generated remediation plan is correct.
+    Sets verification_result and increments knowledge_version.
+    """
+    try:
+        from ai.similar_cases import get_case_store, mark_case_verified
+        store = get_case_store()
+        updated = mark_case_verified(
+            store,
+            case_id,
+            verified_by=body.verified_by,
+            verification_notes=body.verification_notes,
+            verification_result=body.verification_result,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail=f"Case {case_id!r} not found")
+        return {
+            "status": "ok",
+            "case_id": case_id,
+            "verification_result": updated.verification_result,
+            "knowledge_version": updated.knowledge_version,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("verify_remediation_plan error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/remediation/{case_id}/authorize-auto-fix")
+async def authorize_auto_fix(case_id: str, body: AuthorizeAutoFixRequest):
+    """
+    POST /api/v1/ai/remediation/{case_id}/authorize-auto-fix
+
+    Grant explicit human authorization for the AI to auto-execute this
+    remediation plan in the future when a matching fault is detected.
+
+    Requires the plan to be human-verified first.
+    """
+    try:
+        from ai.similar_cases import RemediationPlan, get_case_store
+        store = get_case_store()
+        case = store.get_case(case_id)
+        if not case:
+            raise HTTPException(status_code=404, detail=f"Case {case_id!r} not found")
+
+        plan_dict = (case.context or {}).get("remediation_plan")
+        if not isinstance(plan_dict, dict):
+            raise HTTPException(status_code=400, detail="Case has no remediation plan")
+
+        plan = RemediationPlan.from_dict(plan_dict)
+        if not plan.human_verified:
+            raise HTTPException(
+                status_code=400,
+                detail="Plan must be human-verified before auto-fix authorization",
+            )
+
+        # Update plan authorization
+        plan.auto_fix_authorized = True
+        plan.authorized_by = body.authorized_by
+        plan.authorized_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        # Persist back
+        from ai.similar_cases import Case
+        updated_context = dict(case.context or {})
+        updated_context["remediation_plan"] = plan.to_dict()
+        updated_context["auto_fix_authorized_by"] = body.authorized_by
+        updated_case = Case(**case.to_dict())
+        updated_case.context = updated_context
+        updated_case.updated_at = plan.authorized_at
+        updated_case.last_editor = body.authorized_by
+        store.add_case(updated_case, persist=True, sync_clickhouse=True)
+
+        return {
+            "status": "ok",
+            "case_id": case_id,
+            "plan_id": plan.plan_id,
+            "auto_fix_authorized": True,
+            "authorized_by": body.authorized_by,
+            "authorized_at": plan.authorized_at,
+            "message": "Auto-fix authorization granted. Future matching faults may be auto-remediated.",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("authorize_auto_fix error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/remediation/auto-fix-history")
+async def get_auto_fix_history(
+    limit: int = Query(default=20, ge=1, le=100),
+    service: Optional[str] = Query(default=None),
+):
+    """
+    GET /api/v1/ai/remediation/auto-fix-history
+
+    Returns the history of auto-fix-authorized remediation plans,
+    optionally filtered by service name.
+    """
+    try:
+        from ai.similar_cases import RemediationPlan, get_case_store
+        store = get_case_store()
+        results = []
+        for case in store._cases.values():
+            if case.is_deleted:
+                continue
+            if service and case.service_name.lower() != service.lower():
+                continue
+            plan_dict = (case.context or {}).get("remediation_plan")
+            if not isinstance(plan_dict, dict):
+                continue
+            plan = RemediationPlan.from_dict(plan_dict)
+            if not plan.auto_fix_authorized:
+                continue
+            results.append({
+                "case_id": case.id,
+                "plan_id": plan.plan_id,
+                "service": plan.service,
+                "error_category": plan.error_category,
+                "fault_fingerprint": plan.fault_fingerprint[:16] + "...",
+                "human_verified": plan.human_verified,
+                "auto_fix_authorized": plan.auto_fix_authorized,
+                "authorized_by": plan.authorized_by,
+                "authorized_at": plan.authorized_at,
+                "execution_count": plan.execution_count,
+                "last_executed_at": plan.last_executed_at,
+                "overall_risk": plan.overall_risk,
+                "step_count": len(plan.steps),
+            })
+
+        # Sort by authorized_at desc
+        results.sort(key=lambda x: x.get("authorized_at") or "", reverse=True)
+        return {"status": "ok", "count": len(results), "items": results[:limit]}
+    except Exception as exc:
+        logger.error("get_auto_fix_history error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

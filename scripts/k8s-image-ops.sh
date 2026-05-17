@@ -85,7 +85,7 @@ build_one() {
 
   echo "[INFO] docker build ${image} (${service}/)"
 
-  cd /root/logoscope && docker build -t "$image"  -f "${service}/Dockerfile" .
+  cd "$PROJECT_ROOT" && docker build -t "$image" -f "${service}/Dockerfile" .
 }
 
 push_one() {

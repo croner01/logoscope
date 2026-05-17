@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import time
@@ -17,6 +18,7 @@ from ai.agent_runtime.exec_client import (
     create_command_run,
     get_command_run,
     iter_command_run_stream,
+    list_command_run_events,
     precheck_command,
 )
 from ai.followup_command import (
@@ -60,6 +62,28 @@ def _as_text(value: Any, default: str = "") -> str:
 
 def _as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
+
+
+def _build_auto_exec_dedupe_key(command: str, command_spec: Optional[Dict[str, Any]]) -> str:
+    normalized_command = _normalize_followup_command_line(command)
+    safe_spec = normalize_followup_command_spec(command_spec)
+    if not normalized_command and not safe_spec:
+        return ""
+    args = safe_spec.get("args") if isinstance(safe_spec.get("args"), dict) else {}
+    stable_args = dict(args)
+    for key in ("timeout_s",):
+        stable_args.pop(key, None)
+    stable_spec = {
+        "tool": _as_str(safe_spec.get("tool")).strip().lower(),
+        "target_kind": _as_str(safe_spec.get("target_kind") or stable_args.get("target_kind")).strip().lower(),
+        "target_identity": _as_str(safe_spec.get("target_identity") or stable_args.get("target_identity")).strip(),
+        "args": stable_args,
+    }
+    dedupe_payload = {
+        "command": normalized_command,
+        "spec": stable_spec,
+    }
+    return f"dedupe::{json.dumps(dedupe_payload, ensure_ascii=False, sort_keys=True)}"
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -148,25 +172,23 @@ def _resolve_followup_evidence_window(
 
 def _build_k8s_logs_evidence_command(
     *,
-    namespace: str,
     service_name: str,
     window_start_iso: str = "",
 ) -> str:
     target_service = _as_str(service_name).strip() or "query-service"
     if window_start_iso:
-        return f"kubectl -n {namespace} logs -l app={target_service} --since-time={window_start_iso} --tail=200"
-    return f"kubectl -n {namespace} logs -l app={target_service} --since=15m --tail=200"
+        return f"kubectl -A logs -l app={target_service} --since-time={window_start_iso} --tail=200"
+    return f"kubectl -A logs -l app={target_service} --since=15m --tail=200"
 
 
 def _build_clickhouse_query_log_evidence_command(
     *,
-    namespace: str,
     window_start_iso: str = "",
     window_end_iso: str = "",
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT event_time,query_id,exception_code,exception,query "
             "FROM system.query_log "
             f"WHERE event_time >= toDateTime64('{window_start_iso}', 9, 'UTC') "
@@ -174,7 +196,7 @@ def _build_clickhouse_query_log_evidence_command(
             "ORDER BY event_time DESC LIMIT 20\""
         )
     return (
-        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT event_time,query_id,exception_code,exception,query "
         "FROM system.query_log "
         "WHERE event_time >= now() - INTERVAL 15 MINUTE "
@@ -184,13 +206,12 @@ def _build_clickhouse_query_log_evidence_command(
 
 def _build_clickhouse_processes_evidence_command(
     *,
-    namespace: str,
     window_start_iso: str = "",
     window_end_iso: str = "",
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT "
             f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
             f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
@@ -198,7 +219,7 @@ def _build_clickhouse_processes_evidence_command(
             "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
         )
     return (
-        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
         "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
     )
@@ -206,13 +227,12 @@ def _build_clickhouse_processes_evidence_command(
 
 def _build_clickhouse_metrics_evidence_command(
     *,
-    namespace: str,
     window_start_iso: str = "",
     window_end_iso: str = "",
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT "
             f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
             f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
@@ -221,7 +241,7 @@ def _build_clickhouse_metrics_evidence_command(
             "ORDER BY metric\""
         )
     return (
-        f"kubectl -n {namespace} exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT now() AS collected_at, metric, value FROM system.metrics "
         "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
         "ORDER BY metric\""
@@ -386,7 +406,6 @@ def _build_non_executable_command_templates(
     templates: List[str] = []
     seen: set[str] = set()
     context_payload = analysis_context if isinstance(analysis_context, dict) else {}
-    namespace = _as_str(context_payload.get("namespace"), "islap") or "islap"
     service_name = _as_str(context_payload.get("service_name")).strip()
     trace_id = _as_str(context_payload.get("trace_id")).strip()
     evidence_window = _resolve_followup_evidence_window(context_payload)
@@ -404,7 +423,6 @@ def _build_non_executable_command_templates(
         if service_name:
             _append(
                 _build_k8s_logs_evidence_command(
-                    namespace=namespace,
                     service_name=service_name,
                     window_start_iso=window_start_iso,
                 )
@@ -412,7 +430,6 @@ def _build_non_executable_command_templates(
         elif trace_id:
             _append(
                 _build_k8s_logs_evidence_command(
-                    namespace=namespace,
                     service_name="query-service",
                     window_start_iso=window_start_iso,
                 )
@@ -446,7 +463,6 @@ def _build_non_executable_command_templates(
         if any(token in text_blob for token in ["进程", "process", "running query", "长时间运行"]):
             _append(
                 _build_clickhouse_processes_evidence_command(
-                    namespace=namespace,
                     window_start_iso=window_start_iso,
                     window_end_iso=window_end_iso,
                 )
@@ -455,7 +471,6 @@ def _build_non_executable_command_templates(
         if any(token in text_blob for token in ["指标", "metric", "merge", "mutation", "后台任务"]):
             _append(
                 _build_clickhouse_metrics_evidence_command(
-                    namespace=namespace,
                     window_start_iso=window_start_iso,
                     window_end_iso=window_end_iso,
                 )
@@ -464,22 +479,21 @@ def _build_non_executable_command_templates(
         if any(token in text_blob for token in ["clickhouse", "慢查询", "锁", "sql", "query_log", "code:184"]):
             _append(
                 _build_clickhouse_query_log_evidence_command(
-                    namespace=namespace,
                     window_start_iso=window_start_iso,
                     window_end_iso=window_end_iso,
                 )
             )
             continue
         if any(token in text_blob for token in ["连接池", "pool", "timeout", "配置"]):
-            _append(f"kubectl -n {namespace} describe pod -l app={service_name or 'query-service'}")
+            _append(f"kubectl -A describe pod -l app={service_name or 'query-service'}")
             continue
         if any(token in text_blob for token in ["cpu", "内存", "网络", "资源"]):
-            _append(f"kubectl -n {namespace} top pod -l app={service_name or 'query-service'}")
+            _append(f"kubectl -A top pod -l app={service_name or 'query-service'} --no-headers | head -20")
 
     if not templates:
         _append_context_defaults()
     if not templates:
-        _append(f"kubectl -n {namespace} get pods --show-labels")
+        _append("kubectl get pods -A --show-labels")
     return templates[:safe_limit]
 
 
@@ -487,7 +501,7 @@ def _is_low_signal_template_command(command: str) -> bool:
     safe_command = _normalize_followup_command_line(command).strip().lower()
     if not safe_command:
         return True
-    if re.match(r"^kubectl\s+-n\s+[a-z0-9-]+\s+get\s+pods\s+--show-labels$", safe_command):
+    if re.match(r"^kubectl\s+get\s+pods\s+(-A|-a)\s+--show-labels$", safe_command):
         return True
     return False
 
@@ -504,6 +518,7 @@ def _build_structured_template_actions(
     *,
     actions: List[Dict[str, Any]],
     analysis_context: Optional[Dict[str, Any]] = None,
+    action_observations: Optional[List[Dict[str, Any]]] = None,
     max_items: int = 2,
 ) -> List[Dict[str, Any]]:
     templates = _build_non_executable_command_templates(
@@ -513,6 +528,23 @@ def _build_structured_template_actions(
     )
     if not templates:
         return []
+
+    failed_commands: set[str] = set()
+    for obs in _as_list(action_observations):
+        if not isinstance(obs, dict):
+            continue
+        status = _as_str(obs.get("status")).lower()
+        command = _normalize_followup_command_line(_as_str(obs.get("command"))).strip()
+        if not command:
+            continue
+        is_failed = (
+            (status == "executed" and int(_as_float(obs.get("exit_code"), 0)) != 0)
+            or status == "failed"
+            or status == "timed_out"
+        )
+        if is_failed:
+            failed_commands.add(command)
+
     normalized_templates = [
         _normalize_non_executable_template_command(item)
         for item in templates
@@ -561,6 +593,8 @@ def _build_structured_template_actions(
         if _is_low_signal_template_command(normalized_command) and not allow_low_signal_fallback:
             continue
         if normalized_command in seen_commands:
+            continue
+        if normalized_command in failed_commands:
             continue
         compiled = compile_followup_command_spec(
             {
@@ -1006,6 +1040,16 @@ async def _stream_followup_exec_runtime(
     logger: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     final_observation: Optional[Dict[str, Any]] = None
+    last_seq = 0
+
+    def _update_last_seq(payload: Dict[str, Any]) -> None:
+        nonlocal last_seq
+        safe_payload = payload if isinstance(payload, dict) else {}
+        seq_value = safe_payload.get("seq")
+        try:
+            last_seq = max(last_seq, int(seq_value or 0))
+        except Exception:
+            return
 
     async def _recover_terminal_observation() -> Optional[Dict[str, Any]]:
         try:
@@ -1026,10 +1070,46 @@ async def _stream_followup_exec_runtime(
             return None
         return None
 
+    async def _recover_terminal_from_events() -> Optional[Dict[str, Any]]:
+        nonlocal final_observation
+        try:
+            events_payload = await list_command_run_events(
+                exec_run_id,
+                after_seq=last_seq,
+                limit=5000,
+                timeout_seconds=10,
+            )
+        except ExecServiceClientError:
+            return None
+
+        for event in _as_list(events_payload.get("events") if isinstance(events_payload, dict) else []):
+            if not isinstance(event, dict):
+                continue
+            _update_last_seq(event)
+            await _handle_event(
+                {
+                    "event": _as_str(event.get("event_type")),
+                    "data": event,
+                }
+            )
+            if isinstance(final_observation, dict):
+                return final_observation
+        return None
+
+    async def _recover_terminal_result() -> Optional[Dict[str, Any]]:
+        if not isinstance(final_observation, dict):
+            recovered = await _recover_terminal_from_events()
+            if isinstance(recovered, dict):
+                return recovered
+        if not isinstance(final_observation, dict):
+            return await _recover_terminal_observation()
+        return final_observation
+
     async def _handle_event(item: Dict[str, Any]) -> None:
         nonlocal final_observation
         event_name = _as_str(item.get("event"))
         event_payload = item.get("data") if isinstance(item.get("data"), dict) else {}
+        _update_last_seq(event_payload)
         observation = _build_followup_exec_stream_observation(
             session_id=session_id,
             message_id=message_id,
@@ -1046,11 +1126,14 @@ async def _stream_followup_exec_runtime(
         await _emit_followup_event(event_callback, "observation", observation, logger=logger)
 
     if os.environ.get("PYTEST_CURRENT_TEST") is not None:
-        for item in iter_command_run_stream(exec_run_id, after_seq=0):
-            if isinstance(item, dict):
-                await _handle_event(item)
+        try:
+            for item in iter_command_run_stream(exec_run_id, after_seq=0):
+                if isinstance(item, dict):
+                    await _handle_event(item)
+        except ExecServiceClientError:
+            pass
         if not isinstance(final_observation, dict):
-            final_observation = await _recover_terminal_observation()
+            final_observation = await _recover_terminal_result()
         return final_observation
 
     loop = asyncio.get_running_loop()
@@ -1083,6 +1166,10 @@ async def _stream_followup_exec_runtime(
             if not isinstance(item, dict):
                 continue
             if _as_str(item.get("event")).lower() == "stream_error":
+                if not isinstance(final_observation, dict):
+                    final_observation = await _recover_terminal_result()
+                if isinstance(final_observation, dict):
+                    break
                 detail = _as_str((item.get("data") or {}).get("detail"), "exec-service stream failed")
                 raise ExecServiceClientError(detail)
             await _handle_event(item)
@@ -1090,7 +1177,7 @@ async def _stream_followup_exec_runtime(
         await producer_task
 
     if not isinstance(final_observation, dict):
-        final_observation = await _recover_terminal_observation()
+        final_observation = await _recover_terminal_result()
 
     return final_observation
 
@@ -1282,6 +1369,7 @@ async def _run_followup_readonly_auto_exec(
         normalized_command = _normalize_followup_command_line(_as_str(safe_precheck.get("command"), raw_command))
         if not normalized_command:
             normalized_command = raw_command
+        dedupe_key = _build_auto_exec_dedupe_key(normalized_command, effective_command_spec)
         if normalized_command in executed_set:
             reused_observation = _resolve_latest_success_observation(
                 command=normalized_command,
@@ -1294,6 +1382,25 @@ async def _run_followup_readonly_auto_exec(
                 action_id=action_id,
                 command=normalized_command,
                 reason="同一 run 已执行过该命令，跳过重复执行。",
+                reason_code="duplicate_skipped",
+                reused_command_run_id=reused_command_run_id,
+                reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
+            )
+            observations.append(observation)
+            await _emit_followup_event(event_callback, "observation", observation, logger=logger)
+            continue
+        if dedupe_key and dedupe_key in executed_set:
+            reused_observation = _resolve_latest_success_observation(
+                command=normalized_command,
+                observations=safe_prior_observations + observations,
+            )
+            reused_command_run_id = _as_str((reused_observation or {}).get("command_run_id")).strip()
+            observation = _build_followup_auto_exec_skip_observation(
+                session_id=session_id,
+                message_id=message_id,
+                action_id=action_id,
+                command=normalized_command,
+                reason="同一 run 已存在等价 command_spec 结果，跳过重复执行。",
                 reason_code="duplicate_skipped",
                 reused_command_run_id=reused_command_run_id,
                 reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
@@ -1499,6 +1606,8 @@ async def _run_followup_readonly_auto_exec(
                     and int(_as_float(execution_payload.get("exit_code"), 0)) == 0
                 ):
                     executed_set.add(normalized_command)
+                    if dedupe_key:
+                        executed_set.add(dedupe_key)
                 observations.append(execution_payload)
                 continue
 
@@ -1518,6 +1627,8 @@ async def _run_followup_readonly_auto_exec(
                     and int(_as_float(execution_payload.get("exit_code"), 0)) == 0
                 ):
                     executed_set.add(normalized_command)
+                    if dedupe_key:
+                        executed_set.add(dedupe_key)
                 observations.append(execution_payload)
                 await _emit_followup_event(event_callback, "observation", execution_payload, logger=logger)
                 continue
@@ -1649,6 +1760,17 @@ def _select_followup_react_iteration_actions(
                         should_retry = bool(source_observation.get("output_truncated"))
         if not should_retry:
             continue
+        # 模板命令执行失败后不再重试（如 toolbox-gateway 返回 500），
+        # 避免同一命令反复进入审批循环。应转入重规划重新思考。
+        if should_retry and observation is not None:
+            obs_status = _as_str(observation.get("status")).lower()
+            obs_exit = int(_as_float(observation.get("exit_code"), 0))
+            if _as_str(action_dict.get("source")).strip().lower() == "template_command" and (
+                (obs_status == "executed" and obs_exit != 0)
+                or obs_status == "failed"
+                or obs_status == "timed_out"
+            ):
+                continue
         if command_failures.get(command, 0) > max(0, int(retry_per_command)):
             continue
         seen_commands.add(command)
@@ -1764,6 +1886,7 @@ async def _run_followup_auto_exec_react_loop(
             template_actions = _build_structured_template_actions(
                 actions=working_actions,
                 analysis_context=analysis_context,
+                action_observations=all_observations,
                 max_items=max(1, _resolve_followup_auto_exec_max_actions()),
             )
             if template_actions:

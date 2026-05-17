@@ -3,51 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import List
 
 from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep
+from ai.skills.builtin._helpers import _as_str, _clickhouse_query, _generic_exec
 from ai.skills.registry import register_skill
-
-
-def _as_str(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    return str(value).strip() if not isinstance(value, str) else value.strip()
-
-
-def _generic_exec(command: str, *, timeout_s: int = 30) -> dict:
-    return {
-        "tool": "generic_exec",
-        "args": {
-            "command": command,
-            "target_kind": "runtime_node",
-            "target_identity": "runtime:local",
-            "timeout_s": timeout_s,
-        },
-        "command": command,
-        "timeout_s": timeout_s,
-    }
-
-
-def _clickhouse_query(
-    sql: str,
-    *,
-    namespace: str = "islap",
-    database: str = "logs",
-    timeout_s: int = 45,
-) -> dict:
-    return {
-        "tool": "kubectl_clickhouse_query",
-        "args": {
-            "namespace": namespace,
-            "target_kind": "clickhouse_cluster",
-            "target_identity": f"database:{database}",
-            "query": sql,
-            "timeout_s": timeout_s,
-        },
-        "command": f"clickhouse-client --query {sql!r}",
-        "timeout_s": timeout_s,
-    }
 
 
 @register_skill
@@ -67,17 +27,16 @@ class RuntimeDiagnosisOrchestratorSkill(DiagnosticSkill):
     )
     applicable_components = ["clickhouse", "database", "k8s", "service", "log", "query", "runtime"]
     trigger_patterns = [
+        # FIX: 收紧 trigger_patterns，避免"排查|诊断"触发所有场景
         re.compile(r"clickhouse", re.IGNORECASE),
         re.compile(r"slow.*query", re.IGNORECASE),
         re.compile(r"query.*log", re.IGNORECASE),
         re.compile(r"system\.tables", re.IGNORECASE),
         re.compile(r"code[:= ]?184", re.IGNORECASE),
-        re.compile(r"慢查询"),
-        re.compile(r"证据不足"),
-        re.compile(r"缺证据"),
+        re.compile(r"慢查询.*clickhouse|clickhouse.*慢查询"),
+        re.compile(r"证据不足.*replan|replan.*证据不足"),
         re.compile(r"replan|重规划", re.IGNORECASE),
         re.compile(r"blocked|阻断|阻塞", re.IGNORECASE),
-        re.compile(r"排查|诊断"),
     ]
     risk_level = "low"
     max_steps = 4
@@ -92,7 +51,7 @@ class RuntimeDiagnosisOrchestratorSkill(DiagnosticSkill):
                 step_id="runtime-log-tail",
                 title="拉取服务日志证据",
                 command_spec=_generic_exec(
-                    f"kubectl -n {ns} logs {label_flag} --since=15m --tail=200".strip(),
+                    f"kubectl logs -n {ns} {label_flag} --since=15m --tail=200".strip(),
                     timeout_s=20,
                 ),
                 purpose="补齐服务侧错误日志与慢查询告警上下文",

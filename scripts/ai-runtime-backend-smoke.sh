@@ -20,13 +20,20 @@ Coverage:
   4) mutating command either enters approval or is denied by execution-plane gate
   5) reject approval follows configured strategy (replan or terminate)
   6) exec precheck returns explicit max-chars rejection (no local fallback)
+  7) optional OpenHands create run contract
+  8) optional OpenHands preview actions contract
+  9) optional OpenHands preview action execution path
 
 Env vars:
   NAMESPACE    Kubernetes namespace (default: islap)
   ARTIFACT_DIR Report dir (default: /root/logoscope/reports/ai-runtime-backend-smoke)
+  SMOKE_OPENHANDS Run optional OpenHands backend checks (default: false)
 
 Example:
   scripts/ai-runtime-backend-smoke.sh
+
+OpenHands example:
+  SMOKE_OPENHANDS=true scripts/ai-runtime-backend-smoke.sh
 EOF
 }
 
@@ -60,6 +67,7 @@ PAYLOAD_JSON="$(
 kubectl -n "$NAMESPACE" exec "$AI_POD" -c ai-service -- /bin/sh -lc "
 export SMOKE_RUN_ID='${RUN_ID}'
 export SMOKE_NAMESPACE='${NAMESPACE}'
+export SMOKE_OPENHANDS='${SMOKE_OPENHANDS:-false}'
 python - <<'PY'
 import json
 import os
@@ -77,9 +85,11 @@ BASE_AI_V2 = f'{BASE_API}/api/v2'
 BASE_EXEC = 'http://exec-service:8095/api/v1/exec'
 SMOKE_RUN_ID = os.getenv('SMOKE_RUN_ID', 'ai-runtime-backend-smoke')
 NAMESPACE = os.getenv('SMOKE_NAMESPACE', 'islap')
+SMOKE_OPENHANDS = str(os.getenv('SMOKE_OPENHANDS') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 CONVERSATION_ID = f'conv-{SMOKE_RUN_ID}'
 SESSION_ID = f'sess-{SMOKE_RUN_ID}'
 QUESTION = '后端 smoke：验证 AI runtime create/events/stream/approval/reject 关键链路'
+OPENHANDS_QUESTION = 'query-service query timeout and slow query'
 MUTATING_COMMAND = f'kubectl -n {NAMESPACE} rollout restart deployment/definitely-not-exist'
 LONG_COMMAND = 'kubectl get pod ' + ('x' * 400)
 
@@ -187,6 +197,30 @@ def create_runtime_run():
             'runtime_options': {
                 'conversation_id': CONVERSATION_ID,
             },
+        },
+        timeout=30,
+    )
+
+
+def create_openhands_runtime_run():
+    return request_json(
+        'POST',
+        f'{BASE_AI_V2}/threads/{urllib.parse.quote(thread_id)}/runs',
+        {
+            'question': OPENHANDS_QUESTION,
+            'analysis_context': {
+                'analysis_type': 'log',
+                'service_name': 'query-service',
+                'component_type': 'query',
+                'namespace': NAMESPACE,
+            },
+            'runtime_options': {
+                'conversation_id': CONVERSATION_ID,
+                'auto_exec_readonly': False,
+                'enable_skills': True,
+                'max_skills': 1,
+            },
+            'runtime_backend': 'openhands',
         },
         timeout=30,
     )
@@ -523,6 +557,104 @@ record(
     },
 )
 
+openhands_run_id = ''
+openhands_action_id = ''
+openhands_action_exec_status = 0
+openhands_action_exec_data = {}
+if SMOKE_OPENHANDS:
+    openhands_status, openhands_data = create_openhands_runtime_run()
+    openhands_run = openhands_data.get('run', {}) if isinstance(openhands_data, dict) else {}
+    openhands_run_id = str(openhands_run.get('run_id') or '')
+    openhands_engine = openhands_run.get('engine') if isinstance(openhands_run.get('engine'), dict) else {}
+    openhands_summary = openhands_run.get('summary') if isinstance(openhands_run.get('summary'), dict) else {}
+    openhands_inner_backend = openhands_summary.get('inner_backend') if isinstance(openhands_summary.get('inner_backend'), dict) else {}
+    record(
+        'case7_openhands_create_run_contract',
+        openhands_status == 200
+        and openhands_run_id.startswith('run-')
+        and str(openhands_engine.get('inner') or '') == 'openhands-v1'
+        and str(openhands_inner_backend.get('backend') or '') == 'openhands-v1',
+        {
+            'http_status': openhands_status,
+            'run': openhands_run,
+        },
+    )
+
+    openhands_actions_status, openhands_actions_data = request_json(
+        'GET',
+        f'{BASE_AI_V2}/runs/{urllib.parse.quote(openhands_run_id)}/actions?limit=20',
+    )
+    openhands_actions = openhands_actions_data.get('actions') if isinstance(openhands_actions_data, dict) else []
+    if not isinstance(openhands_actions, list):
+        openhands_actions = []
+    first_openhands_action = openhands_actions[0] if openhands_actions else {}
+    openhands_action_id = str(first_openhands_action.get('action_id') or '')
+    record(
+        'case8_openhands_preview_actions_contract',
+        openhands_actions_status == 200
+        and bool(openhands_action_id)
+        and str(first_openhands_action.get('status') or '') == 'planned'
+        and str(first_openhands_action.get('reason_code') or '') == 'inner_backend_preview'
+        and bool(str(first_openhands_action.get('skill_name') or ''))
+        and bool(str(first_openhands_action.get('step_id') or '')),
+        {
+            'http_status': openhands_actions_status,
+            'actions': openhands_actions[:3],
+        },
+    )
+
+    if openhands_action_id:
+        openhands_action_exec_status, openhands_action_exec_data = request_json(
+            'POST',
+            f'{BASE_AI_V2}/runs/{urllib.parse.quote(openhands_run_id)}/actions/command',
+            {
+                'action_id': openhands_action_id,
+                'purpose': '',
+                'title': '',
+                'command': '',
+                'command_spec': {},
+                'confirmed': False,
+                'elevated': False,
+                'timeout_seconds': 20,
+            },
+            timeout=45,
+        )
+    openhands_action_exec_result = str(openhands_action_exec_data.get('status') or '')
+    record(
+        'case9_openhands_preview_action_exec_path',
+        openhands_action_exec_status == 200
+        and openhands_action_exec_result in {
+            'completed',
+            'running',
+            'permission_required',
+            'confirmation_required',
+            'elevation_required',
+            'waiting_user_input',
+            'blocked',
+        },
+        {
+            'http_status': openhands_action_exec_status,
+            'action_id': openhands_action_id,
+            'response': openhands_action_exec_data,
+        },
+    )
+else:
+    record(
+        'case7_openhands_create_run_contract',
+        True,
+        {'skipped': True, 'reason': 'set SMOKE_OPENHANDS=true to enable'},
+    )
+    record(
+        'case8_openhands_preview_actions_contract',
+        True,
+        {'skipped': True, 'reason': 'set SMOKE_OPENHANDS=true to enable'},
+    )
+    record(
+        'case9_openhands_preview_action_exec_path',
+        True,
+        {'skipped': True, 'reason': 'set SMOKE_OPENHANDS=true to enable'},
+    )
+
 overall = all(item['passed'] for item in cases)
 print(json.dumps({
     'run_id': SMOKE_RUN_ID,
@@ -531,6 +663,9 @@ print(json.dumps({
     'target_service': 'ai-service',
     'runtime_run_id': run_id,
     'command_run_id': command_run_id,
+    'openhands_enabled': SMOKE_OPENHANDS,
+    'openhands_run_id': openhands_run_id,
+    'openhands_action_id': openhands_action_id,
     'runtime_session_id': session_id,
     'overall_passed': overall,
     'cases': cases,

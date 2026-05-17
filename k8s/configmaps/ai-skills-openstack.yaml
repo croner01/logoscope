@@ -1,0 +1,144 @@
+---
+# ai-skills-openstack ConfigMap
+# OpenStack-specific diagnostic skills.
+#
+# Usage:
+#   kubectl apply -f k8s/configmaps/ai-skills-openstack.yaml
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-skills-openstack
+  namespace: islap
+  labels:
+    app: ai-service
+    component: skills
+    tier: openstack
+data:
+  nova-diagnostics.yaml: |
+    name: nova_instance_diagnostics
+    display_name: "Nova 实例诊断"
+    description: "诊断 OpenStack Nova 实例创建失败、调度失败、Live-migration 故障等问题"
+    applicable_components:
+      - nova
+      - nova-api
+      - nova-compute
+      - nova-scheduler
+      - nova-conductor
+    trigger_patterns:
+      - "nova.*error"
+      - "nova.*fail"
+      - "instance.*fail"
+      - "schedule.*fail"
+      - "no valid host"
+      - "live.*migration"
+      - "compute.*unavailable"
+    risk_level: low
+    steps:
+      - step_id: nova-api-logs
+        title: "检查 nova-api 最近错误日志"
+        tool: generic_exec
+        command: "kubectl logs -n {namespace} -l app=nova-api --tail=100 --prefix 2>&1 | grep -i 'error\\|warn\\|fail' | tail -n 50"
+        purpose: "获取 nova-api 组件的近期错误，定位 API 层故障"
+        timeout_s: 20
+
+      - step_id: nova-scheduler-logs
+        title: "检查 nova-scheduler 调度日志"
+        tool: generic_exec
+        command: "kubectl logs -n {namespace} -l app=nova-scheduler --tail=80 --prefix 2>&1 | grep -i 'error\\|no valid host\\|filter' | tail -n 40"
+        purpose: "识别调度失败原因：资源不足、过滤器拒绝等"
+        timeout_s: 20
+        depends_on:
+          - nova-api-logs
+
+      - step_id: nova-ch-errors
+        title: "ClickHouse 查询 Nova 近期错误"
+        tool: kubectl_clickhouse_query
+        query: >
+          SELECT timestamp, service_name, level, message
+          FROM logs.events
+          WHERE service_name LIKE 'nova%'
+          AND level IN ('ERROR', 'WARN', 'FATAL')
+          AND timestamp >= now() - INTERVAL 30 MINUTE
+          ORDER BY timestamp DESC LIMIT 50
+          FORMAT PrettyCompact
+        purpose: "从日志库查询 nova 组件全局错误分布"
+        timeout_s: 45
+        depends_on:
+          - nova-api-logs
+
+  neutron-diagnostics.yaml: |
+    name: neutron_network_diagnostics
+    display_name: "Neutron 网络诊断"
+    description: "诊断 OpenStack Neutron 网络创建失败、L3 Agent 故障、安全组问题"
+    applicable_components:
+      - neutron
+      - neutron-api
+      - neutron-server
+      - neutron-l3-agent
+      - neutron-dhcp-agent
+    trigger_patterns:
+      - "neutron.*error"
+      - "neutron.*fail"
+      - "network.*fail"
+      - "port.*error"
+      - "l3.*agent"
+      - "dhcp.*fail"
+      - "security.*group.*fail"
+    risk_level: low
+    steps:
+      - step_id: neutron-server-logs
+        title: "检查 neutron-server 最近错误"
+        tool: generic_exec
+        command: "kubectl logs -n {namespace} -l app=neutron-server --tail=100 --prefix 2>&1 | grep -i 'error\\|warn\\|fail' | tail -n 50"
+        purpose: "获取 Neutron 服务端错误，识别网络 API 层故障"
+        timeout_s: 20
+
+      - step_id: neutron-l3-logs
+        title: "检查 L3 Agent 日志"
+        tool: generic_exec
+        command: "kubectl logs -n {namespace} -l app=neutron-l3-agent --tail=80 --prefix 2>&1 | grep -i 'error\\|warn' | tail -n 40"
+        purpose: "检查路由器和浮动 IP 相关故障"
+        timeout_s: 20
+        depends_on:
+          - neutron-server-logs
+
+  keystone-diagnostics.yaml: |
+    name: keystone_auth_diagnostics
+    display_name: "Keystone 认证诊断"
+    description: "诊断 OpenStack Keystone token 失效、认证失败、用户/项目查找失败"
+    applicable_components:
+      - keystone
+      - keystone-api
+    trigger_patterns:
+      - "keystone.*error"
+      - "auth.*fail"
+      - "token.*invalid"
+      - "token.*expired"
+      - "unauthorized"
+      - "could not find.*project"
+      - "could not find.*user"
+    risk_level: low
+    steps:
+      - step_id: keystone-api-logs
+        title: "检查 keystone-api 认证失败日志"
+        tool: generic_exec
+        command: "kubectl logs -n {namespace} -l app=keystone-api --tail=100 --prefix 2>&1 | grep -i 'error\\|warn\\|unauthorized\\|invalid.*token' | tail -n 50"
+        purpose: "定位认证失败的具体原因"
+        timeout_s: 20
+
+      - step_id: keystone-ch-auth-errors
+        title: "ClickHouse 统计 Keystone 认证错误"
+        tool: kubectl_clickhouse_query
+        query: >
+          SELECT timestamp, message
+          FROM logs.events
+          WHERE service_name LIKE 'keystone%'
+          AND level = 'ERROR'
+          AND timestamp >= now() - INTERVAL 30 MINUTE
+          ORDER BY timestamp DESC LIMIT 30
+          FORMAT PrettyCompact
+        purpose: "全量查询 Keystone 近期认证错误"
+        timeout_s: 45
+        depends_on:
+          - keystone-api-logs

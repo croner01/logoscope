@@ -1,0 +1,38 @@
+---
+# ai-skills-custom ConfigMap — placeholder for operator-defined skills
+# Operators add skills here without modifying the ai-service image.
+# The configmap_loader hot-reloads this file every 30 seconds.
+#
+# Example skill template:
+#
+#   name: my-custom-service-diagnostics
+#   display_name: "My Service 诊断"
+#   description: "诊断 my-service 常见故障"
+#   applicable_components:
+#     - my-service
+#   trigger_patterns:
+#     - "my-service.*error"
+#   risk_level: low
+#   steps:
+#     - step_id: my-step-1
+#       title: "检查 my-service 日志"
+#       tool: generic_exec
+#       command: "kubectl logs -n {namespace} -l app={service} --tail=100"
+#       purpose: "获取最新日志"
+#       timeout_s: 20
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-skills-custom
+  namespace: islap
+  labels:
+    app: ai-service
+    component: skills
+    tier: custom
+data:
+  # Add your custom skill YAML files here.
+  # Each key becomes a filename under /etc/ai-skills/custom/
+  placeholder.yaml: |
+    # This file is intentionally empty.
+    # Replace or extend with your custom skills.

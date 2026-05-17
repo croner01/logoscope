@@ -17,6 +17,7 @@ from typing import Any, Dict
 NAMESPACE = os.getenv("NAMESPACE", "islap")
 STATE_FILE = Path(os.getenv("STATE_FILE", "/tmp/ai-runtime-manual-entry-state.json"))
 BASE_AI = "http://127.0.0.1:8090/api/v1/ai"
+BASE_AI_V2 = "http://127.0.0.1:8090/api/v2"
 BASE_EXEC = "http://exec-service:8095/api/v1/exec"
 
 POD_HTTP_CLIENT = r"""
@@ -206,6 +207,42 @@ def cmd_create_run(args: argparse.Namespace) -> None:
     if args.mode == "followup_runtime":
         analysis_context["runtime_mode"] = "followup_runtime"
         analysis_context["agent_mode"] = "followup_analysis_runtime"
+    if str(getattr(args, "api_version", "v1")) == "v2":
+        thread_payload = {
+            "session_id": args.session_id or "",
+            "conversation_id": conversation_id,
+            "title": args.title or args.question,
+        }
+        thread_response = request_json(f"{BASE_AI_V2}/threads", "POST", thread_payload)
+        thread = thread_response.get("thread") or {}
+        thread_id = str(thread.get("thread_id") or "").strip()
+        if not thread_id:
+            fail("failed to create v2 thread")
+        runtime_options = {
+            "conversation_id": conversation_id,
+            "auto_exec_readonly": bool(args.auto_exec_readonly),
+            "enable_skills": bool(args.enable_skills),
+            "max_skills": int(args.max_skills),
+        }
+        run_payload = {
+            "question": args.question,
+            "analysis_context": analysis_context,
+            "runtime_options": runtime_options,
+            "runtime_backend": str(args.runtime_backend or "").strip(),
+        }
+        response = request_json(f"{BASE_AI_V2}/threads/{thread_id}/runs", "POST", run_payload)
+        run_payload_response = response.get("run") or {}
+        save_state(
+            {
+                "run_id": str(run_payload_response.get("run_id") or ""),
+                "thread_id": thread_id,
+                "session_id": str(thread.get("session_id") or args.session_id or ""),
+                "conversation_id": conversation_id,
+                "assistant_message_id": str(run_payload_response.get("assistant_message_id") or ""),
+            }
+        )
+        print_json(response)
+        return
     payload = {
         "session_id": args.session_id or "",
         "question": args.question,
@@ -245,6 +282,12 @@ def cmd_run(args: argparse.Namespace) -> None:
     print_json(payload)
 
 
+def cmd_actions(args: argparse.Namespace) -> None:
+    run_id = resolve_run_id(args.run_id)
+    payload = request_json(f"{BASE_AI_V2}/runs/{run_id}/actions?limit={int(args.limit)}")
+    print_json(payload)
+
+
 def cmd_exec(args: argparse.Namespace) -> None:
     run_id = resolve_run_id(args.run_id)
     purpose = str(args.purpose or "").strip() or str(args.title or "").strip() or str(args.command or "").strip()
@@ -258,6 +301,23 @@ def cmd_exec(args: argparse.Namespace) -> None:
         "timeout_seconds": int(args.timeout_seconds),
     }
     response = request_json(f"{BASE_AI}/runs/{run_id}/commands", "POST", payload)
+    print_json(response)
+
+
+def cmd_exec_action(args: argparse.Namespace) -> None:
+    run_id = resolve_run_id(args.run_id)
+    payload = {
+        "action_id": args.action_id,
+        "purpose": "",
+        "title": "",
+        "command": "",
+        "command_spec": {},
+        "confirmed": bool(args.confirmed),
+        "elevated": bool(args.elevated),
+        "approval_token": str(args.approval_token or ""),
+        "timeout_seconds": int(args.timeout_seconds),
+    }
+    response = request_json(f"{BASE_AI_V2}/runs/{run_id}/actions/command", "POST", payload)
     print_json(response)
 
 
@@ -315,7 +375,13 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--service", default="query-service")
     create_parser.add_argument("--session-id", default="")
     create_parser.add_argument("--conversation-id", default="")
+    create_parser.add_argument("--title", default="")
     create_parser.add_argument("--mode", choices=["passive", "followup_runtime"], default="passive")
+    create_parser.add_argument("--api-version", choices=["v1", "v2"], default="v1")
+    create_parser.add_argument("--runtime-backend", default="")
+    create_parser.add_argument("--auto-exec-readonly", action=argparse.BooleanOptionalAction, default=True)
+    create_parser.add_argument("--enable-skills", action=argparse.BooleanOptionalAction, default=True)
+    create_parser.add_argument("--max-skills", type=int, default=3)
     create_parser.set_defaults(func=cmd_create_run)
 
     stream_parser = subparsers.add_parser("stream", help="Tail canonical SSE events for a run")
@@ -333,6 +399,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--run-id", default="")
     run_parser.set_defaults(func=cmd_run)
 
+    actions_parser = subparsers.add_parser("actions", help="Show v2 runtime actions for a run")
+    actions_parser.add_argument("--run-id", default="")
+    actions_parser.add_argument("--limit", type=int, default=20)
+    actions_parser.set_defaults(func=cmd_actions)
+
     exec_parser = subparsers.add_parser("exec", help="Execute a command inside a run")
     exec_parser.add_argument("--run-id", default="")
     exec_parser.add_argument("--command", required=True)
@@ -342,6 +413,15 @@ def build_parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("--elevated", action="store_true")
     exec_parser.add_argument("--timeout-seconds", type=int, default=20)
     exec_parser.set_defaults(func=cmd_exec)
+
+    exec_action_parser = subparsers.add_parser("exec-action", help="Execute a v2 action by action_id")
+    exec_action_parser.add_argument("--run-id", default="")
+    exec_action_parser.add_argument("--action-id", required=True)
+    exec_action_parser.add_argument("--confirmed", action="store_true")
+    exec_action_parser.add_argument("--elevated", action="store_true")
+    exec_action_parser.add_argument("--approval-token", default="")
+    exec_action_parser.add_argument("--timeout-seconds", type=int, default=20)
+    exec_action_parser.set_defaults(func=cmd_exec_action)
 
     latest_parser = subparsers.add_parser("latest-approval", help="Print latest pending approval")
     latest_parser.add_argument("--run-id", default="")
