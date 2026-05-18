@@ -62,9 +62,10 @@ class ObservabilityReadPathLatencySkill(DiagnosticSkill):
             SkillStep(
                 step_id="read-latency-log-tail",
                 title="拉取 query-service 读路径日志",
-                # FIX: kubectl logs -A (not kubectl -A logs) is the correct syntax
+                # kubectl logs does not support -A, resolve namespace dynamically
                 command_spec=_generic_exec(
-                    f"kubectl logs -A -l app={svc} --since=15m --tail=200",
+                    f"ns=$(kubectl get pods -A -l app={svc} -o jsonpath='{{.items[0].metadata.namespace}}' 2>/dev/null); "
+                    f"kubectl logs -n \"${{ns:-islap}}\" -l app={svc} --since=15m --tail=200",
                     timeout_s=20,
                 ),
                 purpose="确认超时、慢查询和预览/聚合接口的服务侧症状",

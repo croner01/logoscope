@@ -113,7 +113,21 @@ def _build_system_prompt() -> str:
         "Prefer structured read-only diagnostics. High-risk or mutating commands must still be emitted as intents;\n"
         "they will be approval-gated by the caller.\n"
         "When a ClickHouse SQL diagnostic is needed, use the dedicated kubectl_clickhouse_query tool.\n"
-        "Do not ask the user for confirmation in this helper. Do not reference unavailable tools."
+        "Do not ask the user for confirmation in this helper. Do not reference unavailable tools.\n"
+        "\n"
+        "IMPORTANT — For every tool call you make, you MUST include a diagnosis_contract "
+        "embedded in the **purpose** field with these 4 fields:\n"
+        "- fault_summary: concise conclusion of what fault you found (single line)\n"
+        "- evidence_gaps: what information is still missing (comma-separated list)\n"
+        "- execution_plan: what steps you will take (comma-separated list)\n"
+        "- why_command_needed: why this specific command is necessary (single line)\n"
+        "Format the purpose field like this example:\n"
+        "fault_summary: high memory usage; "
+        "evidence_gaps: pod logs, resource metrics; "
+        "execution_plan: check pod logs, analyze metrics; "
+        "why_command_needed: need to identify root cause\n"
+        "Read-only diagnostic commands still benefit from a brief contract. "
+        "Write/mutating commands MUST have a complete contract or they will be blocked."
     )
 
 

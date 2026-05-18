@@ -176,9 +176,11 @@ def _build_k8s_logs_evidence_command(
     window_start_iso: str = "",
 ) -> str:
     target_service = _as_str(service_name).strip() or "query-service"
+    # kubectl logs does NOT support --all-namespaces/-A, so resolve namespace dynamically
+    ns_resolve = "$(kubectl get pods -A -l app=%s -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)" % target_service
     if window_start_iso:
-        return f"kubectl -A logs -l app={target_service} --since-time={window_start_iso} --tail=200"
-    return f"kubectl -A logs -l app={target_service} --since=15m --tail=200"
+        return f"kubectl logs -n {ns_resolve} -l app={target_service} --since-time={window_start_iso} --tail=200"
+    return f"kubectl logs -n {ns_resolve} -l app={target_service} --since=15m --tail=200"
 
 
 def _build_clickhouse_query_log_evidence_command(
@@ -188,7 +190,7 @@ def _build_clickhouse_query_log_evidence_command(
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -n islap exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT event_time,query_id,exception_code,exception,query "
             "FROM system.query_log "
             f"WHERE event_time >= toDateTime64('{window_start_iso}', 9, 'UTC') "
@@ -196,7 +198,7 @@ def _build_clickhouse_query_log_evidence_command(
             "ORDER BY event_time DESC LIMIT 20\""
         )
     return (
-        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -n islap exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT event_time,query_id,exception_code,exception,query "
         "FROM system.query_log "
         "WHERE event_time >= now() - INTERVAL 15 MINUTE "
@@ -211,7 +213,7 @@ def _build_clickhouse_processes_evidence_command(
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -n islap exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT "
             f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
             f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
@@ -219,7 +221,7 @@ def _build_clickhouse_processes_evidence_command(
             "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
         )
     return (
-        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -n islap exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT now() AS collected_at, query_id, elapsed, read_rows, read_bytes, memory_usage, query "
         "FROM system.processes ORDER BY elapsed DESC LIMIT 20\""
     )
@@ -232,7 +234,7 @@ def _build_clickhouse_metrics_evidence_command(
 ) -> str:
     if window_start_iso and window_end_iso:
         return (
-            "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
+            "kubectl -n islap exec deploy/clickhouse -- clickhouse-client --query "
             "\"SELECT "
             f"toDateTime64('{window_start_iso}', 9, 'UTC') AS evidence_window_start, "
             f"toDateTime64('{window_end_iso}', 9, 'UTC') AS evidence_window_end, "
@@ -241,7 +243,7 @@ def _build_clickhouse_metrics_evidence_command(
             "ORDER BY metric\""
         )
     return (
-        "kubectl -A exec deploy/clickhouse -- clickhouse-client --query "
+        "kubectl -n islap exec deploy/clickhouse -- clickhouse-client --query "
         "\"SELECT now() AS collected_at, metric, value FROM system.metrics "
         "WHERE metric IN ('Query','Merge','BackgroundMergesAndMutationsPoolTask','DelayedInserts') "
         "ORDER BY metric\""

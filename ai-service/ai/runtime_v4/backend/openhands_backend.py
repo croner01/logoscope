@@ -91,6 +91,35 @@ def _select_skill_steps(request: RuntimeBackendRequest) -> tuple[List[str], List
     return selected_names, tool_calls
 
 
+def _try_extract_diagnosis_contract_from_purpose(purpose: str, title: str = "") -> Dict[str, Any]:
+    """Parse diagnosis_contract fields from provider tool call purpose/title text."""
+    combined = f"{purpose}\n{title}"
+    if not combined.strip():
+        return {}
+    contract: Dict[str, Any] = {}
+    for line in combined.splitlines():
+        normalized = line.strip()
+        if not normalized:
+            continue
+        for sep in (":", "："):
+            if sep not in normalized:
+                continue
+            key_raw, value_raw = normalized.split(sep, 1)
+            key = key_raw.strip().lower()
+            value = value_raw.strip()
+            if not value:
+                continue
+            if key in {"fault_summary", "fault"}:
+                contract["fault_summary"] = value
+            elif key in {"why_command_needed", "why"}:
+                contract["why_command_needed"] = value
+            elif key in {"evidence_gaps", "gaps"}:
+                contract["evidence_gaps"] = [i.strip() for i in value.split(",") if i.strip()]
+            elif key in {"execution_plan", "plan"}:
+                contract["execution_plan"] = [i.strip() for i in value.split(",") if i.strip()]
+    return contract
+
+
 def _map_provider_tool_call(
     *,
     run_id: str,
@@ -111,13 +140,21 @@ def _map_provider_tool_call(
             180,
         ),
     )
+    purpose = _as_str(safe_item.get("purpose") or "OpenHands requested command")
+    title = _as_str(safe_item.get("title") or "OpenHands 工具调用")
+    # Extract diagnosis_contract from purpose/title if present
+    contract = _try_extract_diagnosis_contract_from_purpose(purpose, title)
+    existing_contract = _as_dict(safe_item.get("diagnosis_contract"))
+    if existing_contract:
+        contract = {**contract, **existing_contract}
+
     if _as_str(safe_item.get("tool_name")).strip() == "command.exec" and safe_command_spec:
         mapped = {
             "run_id": _as_str(run_id),
             "tool_name": "command.exec",
             "command": _as_str(safe_item.get("command")).strip(),
-            "purpose": _as_str(safe_item.get("purpose") or "OpenHands requested command"),
-            "title": _as_str(safe_item.get("title") or "OpenHands 工具调用"),
+            "purpose": purpose,
+            "title": title,
             "timeout_seconds": timeout_seconds,
             "command_spec": safe_command_spec,
             "confirmed": False,
@@ -134,6 +171,8 @@ def _map_provider_tool_call(
                 or safe_item
             ),
         )
+    if contract:
+        mapped["diagnosis_contract"] = contract
     for key in ("action_id", "skill_name", "step_id"):
         value = _as_str(safe_item.get(key)).strip()
         if value:

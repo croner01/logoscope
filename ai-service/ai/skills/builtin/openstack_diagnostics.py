@@ -35,10 +35,11 @@ class OpenStackDiagnosticsSkill(DiagnosticSkill):
             SkillStep(
                 step_id="openstack-nova-log",
                 title="查找并拉取 Nova 关键日志",
-                # FIX: kubectl logs -A (not kubectl -A logs) is the correct syntax
+                # Resolve namespace dynamically — kubectl logs does not support -A
                 command_spec=_generic_exec(
-                    "kubectl logs -A -l app=nova-api --since=20m --tail=200 2>/dev/null || "
-                    "kubectl logs -A -l 'app in (nova-api,api)' --since=20m --tail=200",
+                    "ns=$(kubectl get pods -A -l app=nova-api -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null); "
+                    "kubectl logs -n \"${ns:-default}\" -l app=nova-api --since=20m --tail=200 2>/dev/null || "
+                    "kubectl logs -n \"${ns:-default}\" -l 'app in (nova-api,api)' --since=20m --tail=200",
                     timeout_s=25,
                 ),
                 purpose="定位实例创建/调度失败的关键报错，自动跨命名空间查找 Nova Pod",
@@ -47,8 +48,9 @@ class OpenStackDiagnosticsSkill(DiagnosticSkill):
                 step_id="openstack-neutron-log",
                 title="拉取 Neutron 关键日志（跨命名空间）",
                 command_spec=_generic_exec(
-                    "kubectl logs -A -l app=neutron-server --since=20m --tail=200 2>/dev/null || "
-                    "kubectl logs -A -l 'app in (neutron-server,neutron)' --since=20m --tail=200",
+                    "ns=$(kubectl get pods -A -l app=neutron-server -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null); "
+                    "kubectl logs -n \"${ns:-default}\" -l app=neutron-server --since=20m --tail=200 2>/dev/null || "
+                    "kubectl logs -n \"${ns:-default}\" -l 'app in (neutron-server,neutron)' --since=20m --tail=200",
                     timeout_s=25,
                 ),
                 purpose="定位网络不通、端口绑定失败、租户网络异常",
@@ -58,8 +60,9 @@ class OpenStackDiagnosticsSkill(DiagnosticSkill):
                 step_id="openstack-cinder-log",
                 title="拉取 Cinder 关键日志（跨命名空间）",
                 command_spec=_generic_exec(
-                    "kubectl logs -A -l app=cinder-volume --since=20m --tail=200 2>/dev/null || "
-                    "kubectl logs -A -l 'app in (cinder-volume,cinder)' --since=20m --tail=200",
+                    "ns=$(kubectl get pods -A -l app=cinder-volume -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null); "
+                    "kubectl logs -n \"${ns:-default}\" -l app=cinder-volume --since=20m --tail=200 2>/dev/null || "
+                    "kubectl logs -n \"${ns:-default}\" -l 'app in (cinder-volume,cinder)' --since=20m --tail=200",
                     timeout_s=25,
                 ),
                 purpose="定位卷挂载失败、存储后端连接异常",

@@ -261,10 +261,10 @@ def _build_alternative_action(
         cleaned = original_command
         # Remove --tail=N from describe (only valid for logs)
         cleaned = re.sub(r"--tail=\d+", "", cleaned)
-        # Fix -A position: move before the resource type
-        cleaned = re.sub(r"kubectl\s+-A\s+(\w+)", r"kubectl \1 -A", cleaned)
-        # Fix logs -l order
-        cleaned = re.sub(r"kubectl\s+-A\s+logs", "kubectl logs -A", cleaned)
+        # Replace -A with -n <ns> for commands that don't support --all-namespaces
+        cleaned = re.sub(r"kubectl\s+-A\s+(logs|exec)", rf"kubectl \1 -n {ns}", cleaned)
+        # Fix -A position: move after verb for commands that do support --all-namespaces
+        cleaned = re.sub(r"kubectl\s+-A\s+(get|top|describe|delete|apply|rollout)", r"kubectl \1 -A", cleaned)
         alt_command = cleaned.strip()
 
     elif failure_category == "connection_failure":

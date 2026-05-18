@@ -875,7 +875,7 @@ def test_build_followup_react_loop_suggests_templates_for_non_executable_manual_
     assert int(loop["plan"].get("spec_blocked_actions") or 0) >= 2
     next_actions = [str(item) for item in loop["replan"]["next_actions"]]
     assert any("可直接执行（已生成 command_spec）" in item for item in next_actions)
-    assert any("kubectl -A logs -l app=query-service" in item for item in next_actions)
+    assert any("kubectl logs -n " in item and "app=query-service" in item for item in next_actions)
     assert all("deploy/temporal" not in item for item in next_actions)
     assert all("deploy/postgresql" not in item for item in next_actions)
 

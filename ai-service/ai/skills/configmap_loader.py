@@ -26,7 +26,7 @@ YAML skill format (one per file, or multiple skills in a list):
       - step_id: custom-step-1
         title: "查询 foo-service 错误日志"
         tool: generic_exec
-        command: "kubectl logs -n islap -l app=foo-service --tail=100 -A"
+        command: "kubectl logs -n islap -l app=foo-service --tail=100"
         purpose: "获取最近错误日志"
         timeout_s: 20
       - step_id: custom-step-2

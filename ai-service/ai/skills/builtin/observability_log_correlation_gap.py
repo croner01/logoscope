@@ -68,11 +68,12 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
         start, end = self._resolve_window(context)
         anchor_kind, anchor_value = self._resolve_anchor(context)
 
-        # FIX: kubectl logs -A (not kubectl -A logs) is the correct syntax
+        # kubectl logs does not support -A, resolve namespace dynamically
+        ns_resolve = "$(kubectl get pods -A -l app=%s -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo islap)" % svc
         log_window_command = (
-            f"kubectl logs -A -l app={svc} --since-time={start} --tail=200"
+            f"kubectl logs -n {ns_resolve} -l app={svc} --since-time={start} --tail=200"
             if start
-            else f"kubectl logs -A -l app={svc} --since=15m --tail=200"
+            else f"kubectl logs -n {ns_resolve} -l app={svc} --since=15m --tail=200"
         )
 
         where_clauses = []
@@ -94,11 +95,12 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
             "FORMAT PrettyCompact"
         )
 
-        # FIX: kubectl logs -A syntax
+        # kubectl logs does not support -A, resolve namespace dynamically
+        qs_ns_resolve = "$(kubectl get pods -A -l app=query-service -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo islap)"
         query_service_command = (
-            f"kubectl logs -A -l app=query-service --since-time={start} --tail=200"
+            f"kubectl logs -n {qs_ns_resolve} -l app=query-service --since-time={start} --tail=200"
             if start
-            else f"kubectl logs -A -l app=query-service --since=15m --tail=200"
+            else f"kubectl logs -n {qs_ns_resolve} -l app=query-service --since=15m --tail=200"
         )
 
         anchor_title = "使用时间窗确认候选日志锚点"
