@@ -671,6 +671,46 @@ def test_build_command_spec_self_repair_payload_fixes_selector_namespace_glue():
     assert str(args.get("command") or "") == "kubectl get pods -l app=query-service -n islap"
 
 
+def test_detect_glued_clickhouse_keyword_catches_keyword_surrounded_by_word_chars():
+    """hourFROMgraph → FROM is glued between word chars, \\b at end would miss this."""
+    from ai.followup_command_spec import _detect_glued_clickhouse_keyword
+
+    result = _detect_glued_clickhouse_keyword(
+        "SELECT graph_hourFROMgraph_metric AS value FROM metrics"
+    )
+    assert result, "FROM should be detected as glued keyword"
+    assert result == "from"
+
+
+def test_detect_glued_clickhouse_keyword_catches_keyword_preceded_by_word_char():
+    """otel_logsWHERE level → WHERE preceded by word char (glued before), followed by space."""
+    from ai.followup_command_spec import _detect_glued_clickhouse_keyword
+
+    result = _detect_glued_clickhouse_keyword(
+        "SELECT id FROM logs.otel_logsWHERE level='error' LIMIT 5"
+    )
+    assert result, "WHERE should be detected as glued keyword"
+    assert result == "where"
+
+
+def test_detect_glued_clickhouse_keyword_passes_normal_query():
+    """Normal query with proper spacing should not trigger false positive."""
+    from ai.followup_command_spec import _detect_glued_clickhouse_keyword
+
+    result = _detect_glued_clickhouse_keyword(
+        "SELECT id FROM logs.otel_logs WHERE level = 'error' LIMIT 5"
+    )
+    assert not result, "Normal query should not trigger detection"
+
+
+def test_detect_glued_clickhouse_keyword_catches_multi_glued():
+    """Multiple keywords glued between word chars."""
+    from ai.followup_command_spec import _detect_glued_clickhouse_keyword
+
+    result = _detect_glued_clickhouse_keyword(
+        "SELECTparent.service_nameASsource_service FROM logs.tracesPREWHERE timestamp>now()-INTERVAL1HOUR"
+    )
+    assert result, "Glued query should be detected"
 def test_build_command_spec_self_repair_payload_fixes_selector_namespace_glue_without_namespace_flag():
     payload = build_command_spec_self_repair_payload(
         reason="suspicious_selector_namespace_glue",

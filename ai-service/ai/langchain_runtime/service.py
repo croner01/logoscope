@@ -14,6 +14,7 @@ from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT, build_followup_
 from ai.langchain_runtime.schemas import StructuredAnswer
 from ai.langchain_runtime.tools import collect_tool_observations
 from ai.followup_command_spec import compile_followup_command_spec, normalize_followup_command_spec
+from ai.followup_planning_helpers import _resolve_followup_evidence_window
 from ai.llm_stream_helpers import collect_chat_response
 
 try:
@@ -722,6 +723,7 @@ def _build_format_instructions() -> str:
             "actions_contract_note": (
                 "action 为描述；默认应输出 command_spec（结构化命令）；若命中已注册技能，可输出 skill_name 由系统自动展开。"
                 "command 为 display_only 兼容字段，不参与执行。"
+                "重要：必须使用「事件时间窗」中给出的具体时间戳生成 kubectl logs --since-time= 和 ClickHouse WHERE 时间条件，禁止使用 --since=15m 或 now() - INTERVAL。"
             ),
             "actions_schema": [
                 {
@@ -734,50 +736,50 @@ def _build_format_instructions() -> str:
                 },
                 {
                     "priority": 1,
-                    "title": "string",
-                    "action": "string",
+                    "title": "拉取服务日志（使用事件时间窗）",
+                    "action": "拉取 query-service 在故障时间窗内的日志",
+                    "command_spec": {
+                        "tool": "generic_exec",
+                        "args": {
+                            "command": "kubectl logs -n islap -l app=query-service --since-time=2025-03-27T05:16:12Z --tail=200",
+                            "target_kind": "k8s_cluster",
+                            "target_identity": "namespace:islap",
+                            "timeout_s": 30,
+                        },
+                    },
+                    "command": "display_only",
+                    "command_type": "query",
+                    "risk_level": "low",
+                    "executable": True,
+                    "requires_write_permission": False,
+                    "requires_elevation": False,
+                    "requires_confirmation": True,
+                    "expected_outcome": "返回故障时间窗内服务日志",
+                    "reason": "使用事件时间窗避免查到最后15分钟无关日志",
+                },
+                {
+                    "priority": 1,
+                    "title": "查询 ClickHouse 慢查询（使用事件时间窗）",
+                    "action": "查询故障时间窗内慢查询",
                     "command_spec": {
                         "tool": "kubectl_clickhouse_query",
                         "args": {
                             "namespace": "islap",
                             "target_kind": "clickhouse_cluster",
                             "target_identity": "database:logs",
-                            "query": "SELECT ...",
+                            "query": "SELECT event_time,query_id,exception_code,exception,query FROM system.query_log WHERE event_time >= toDateTime64('2025-03-27T05:00:00Z',9,'UTC') AND event_time <= toDateTime64('2025-03-27T05:30:00Z',9,'UTC') ORDER BY event_time DESC LIMIT 20",
                             "timeout_s": 60,
                         },
                     },
                     "command": "display_only",
-                    "command_type": "query|repair|unknown",
-                    "risk_level": "low|high",
+                    "command_type": "query",
+                    "risk_level": "low",
                     "executable": True,
                     "requires_write_permission": False,
                     "requires_elevation": False,
                     "requires_confirmation": True,
-                    "expected_outcome": "string",
-                    "reason": "string",
-                },
-                {
-                    "priority": 1,
-                    "title": "string",
-                    "action": "string",
-                    "command_spec": {
-                        "tool": "generic_exec",
-                        "args": {
-                            "command": "kubectl -n islap get pods -l app=query-service --tail=50",
-                            "target_kind": "k8s_cluster",
-                            "target_identity": "namespace:islap",
-                            "timeout_s": 60,
-                        },
-                    },
-                    "command": "display_only",
-                    "command_type": "query|repair|unknown",
-                    "risk_level": "low|high",
-                    "executable": True,
-                    "requires_write_permission": False,
-                    "requires_elevation": False,
-                    "requires_confirmation": True,
-                    "expected_outcome": "string",
-                    "reason": "string",
+                    "expected_outcome": "返回故障时间窗慢查询列表",
+                    "reason": "使用具体时间范围而非 now() - INTERVAL",
                 },
             ],
             "verification": ["string"],
@@ -808,6 +810,14 @@ def _should_stream_raw_tokens() -> bool:
     return _as_bool(os.getenv("AI_FOLLOWUP_LANGCHAIN_STREAM_RAW_TOKENS"), False)
 
 
+def _resolve_evidence_window_for_prompt(analysis_context: Dict[str, Any]) -> Dict[str, str]:
+    """从 analysis_context 解析证据时间窗，返回 {start_iso, end_iso}。"""
+    window = _resolve_followup_evidence_window(analysis_context)
+    if isinstance(window, dict):
+        return {"start_iso": str(window.get("start_iso", "") or ""), "end_iso": str(window.get("end_iso", "") or "")}
+    return {"start_iso": "", "end_iso": ""}
+
+
 def _build_followup_prompt_payload(
     *,
     question: str,
@@ -820,6 +830,23 @@ def _build_followup_prompt_payload(
     tool_observations: Dict[str, Any],
     references: List[Dict[str, str]],
 ) -> Dict[str, Any]:
+    # 从 analysis_context 解析证据时间窗，让 LLM 生成命令时使用准确时间戳而非 --since=15m
+    raw_window = _resolve_evidence_window_for_prompt(analysis_context)
+    if raw_window["start_iso"] and raw_window["end_iso"]:
+        evidence_window_hint = (
+            f"事件开始: {raw_window['start_iso']}\n"
+            f"事件结束: {raw_window['end_iso']}\n"
+            f"说明：生成 kubectl logs 命令时必须使用 --since-time= 而非 --since=15m；"
+            f"生成 ClickHouse 查询时必须在 WHERE 中使用具体时间条件而非 now() - INTERVAL。"
+        )
+    elif raw_window["start_iso"]:
+        evidence_window_hint = (
+            f"事件参考时间: {raw_window['start_iso']}\n"
+            f"说明：生成 kubectl logs 命令时必须使用 --since-time= 而非 --since=15m。"
+        )
+    else:
+        evidence_window_hint = "暂未获取到精确事件时间，请从问题/日志中自行提取时间戳生成带具体时间条件的命令。"
+
     return {
         "question": question,
         "analysis_context": analysis_context,
@@ -830,6 +857,7 @@ def _build_followup_prompt_payload(
         "reflection_json": json.dumps(reflection, ensure_ascii=False),
         "tool_observations_json": json.dumps(tool_observations, ensure_ascii=False),
         "references_json": json.dumps(references, ensure_ascii=False),
+        "evidence_window_hint": evidence_window_hint,
         "format_instructions": _build_format_instructions(),
     }
 

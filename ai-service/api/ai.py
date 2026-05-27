@@ -5998,6 +5998,8 @@ async def _run_follow_up_analysis_core(
     deadline_ts = time.perf_counter() + float(timeout_profile["request_deadline_seconds"])
     safe_question = _mask_sensitive_text(question)
     analysis_context = _mask_sensitive_payload(request.analysis_context or {})
+    if safe_question and not analysis_context.get("question"):
+        analysis_context["question"] = safe_question
     runtime_lab_mode = _is_ai_runtime_lab_mode(analysis_context=analysis_context)
     show_thought = bool(getattr(request, "show_thought", False))
     thought_timeline: List[Dict[str, Any]] = []

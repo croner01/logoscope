@@ -444,9 +444,9 @@ def _detect_glued_clickhouse_keyword(query_text: str) -> str:
         if re.search(rf"(?i)\b{keyword}(?=[A-Za-z0-9_(])", normalized):
             return keyword.lower()
     for keyword in _SQL_KEYWORDS_REQUIRE_SPACE_BEFORE:
-        pattern = rf"(?i)(?<=[A-Za-z0-9\)]){keyword}\b"
+        pattern = rf"(?i)(?<=[A-Za-z0-9\)]){keyword}"
         if keyword == "WHERE":
-            pattern = rf"(?i)(?<=[A-Za-z0-9\)])(?<!PRE)WHERE\b"
+            pattern = rf"(?i)(?<=[A-Za-z0-9\)])(?<!PRE)WHERE"
         if re.search(pattern, normalized):
             return keyword.lower()
     if re.search(r"(?<=[A-Za-z0-9_\)])AS(?=[A-Za-z_])", normalized):
@@ -468,9 +468,9 @@ def _repair_clickhouse_query_spacing_for_suggestion(query_text: str) -> str:
     for keyword in _SQL_KEYWORDS_REQUIRE_SPACE_AFTER:
         repaired = re.sub(rf"(?i)\b{keyword}(?=[A-Za-z0-9_(])", f"{keyword} ", repaired)
     for keyword in _SQL_KEYWORDS_REQUIRE_SPACE_BEFORE:
-        pattern = rf"(?i)(?<=[A-Za-z0-9\)]){keyword}\b"
+        pattern = rf"(?i)(?<=[A-Za-z0-9\)]){keyword}"
         if keyword == "WHERE":
-            pattern = rf"(?i)(?<=[A-Za-z0-9\)])(?<!PRE)WHERE\b"
+            pattern = rf"(?i)(?<=[A-Za-z0-9\)])(?<!PRE)WHERE"
         repaired = re.sub(pattern, f" {keyword}", repaired)
     repaired = re.sub(r"(?<=[A-Za-z0-9_\)])AS(?=[A-Za-z_])", " AS ", repaired)
     repaired = re.sub(r"(?<=[a-z0-9_\)])as(?=[a-z_])", " as ", repaired)

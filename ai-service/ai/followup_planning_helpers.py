@@ -157,6 +157,39 @@ def _extract_command_from_hint_line(text: str) -> str:
     return re.sub(r"(?i)\bclickhouse\s+-client\b", "clickhouse-client", normalized)
 
 
+# Regex for extracting timestamps from free-text log lines/question text.
+# Matches ISO-like patterns: YYYY-MM-DD HH:MM:SS[.frac][Z|±HH:MM]
+_TIMESTAMP_REGEX = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+def _extract_timestamp_from_text(value: Any) -> Optional[datetime]:
+    """Try to extract the first ISO-like timestamp from free text (question, log line, etc.).
+
+    This serves as a fallback when the analysis context does not carry
+    an explicit anchor-timestamp field (source_log_timestamp, etc.).
+    """
+    raw = _as_str(value).strip()
+    if not raw:
+        return None
+    match = _TIMESTAMP_REGEX.search(raw)
+    if not match:
+        return None
+    candidate = match.group(0).replace(" ", "T")
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    if len(candidate) >= 5 and candidate[-5] in {"+", "-"} and candidate[-3] != ":":
+        candidate = candidate[:-2] + ":" + candidate[-2:]
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _parse_optional_iso_datetime(value: Any) -> Optional[datetime]:
     text = _as_str(value).strip()
     if not text:
@@ -220,7 +253,16 @@ def _resolve_followup_evidence_window(
             anchor_dt = parsed
             break
     if anchor_dt is None:
-        return {}
+        # 兜底：从问题文本中提取时间戳（日志行首的时间戳）
+        text_fallback = _extract_timestamp_from_text(
+            context_payload.get("question")
+            or context_payload.get("input_text")
+            or context_payload.get("log_content")
+        )
+        if text_fallback is not None:
+            anchor_dt = text_fallback
+        else:
+            return {}
 
     raw_minutes = int(_as_float(context_payload.get("request_flow_window_minutes"), default_minutes))
     window_minutes = max(1, min(120, raw_minutes))
@@ -1074,6 +1116,24 @@ def _build_followup_actions(
             }
         )
 
+    # 事后处理：用证据窗口替换 LLM 生成的 kubectl logs --since=15m 为 --since-time=
+    if safe_analysis_context:
+        evidence_window = _resolve_followup_evidence_window(safe_analysis_context)
+        window_start_iso = _as_str(evidence_window.get("start_iso")).strip()
+        if window_start_iso:
+            _since_re = re.compile(r"--since=15m\b")
+            for action in actions:
+                raw_cmd = action.get("command")
+                if isinstance(raw_cmd, str) and "kubectl logs" in raw_cmd:
+                    action["command"] = _since_re.sub(f"--since-time={window_start_iso}", raw_cmd)
+                cmd_spec = action.get("command_spec")
+                if isinstance(cmd_spec, dict):
+                    spec_cmd = (cmd_spec.get("args") or {}).get("command")
+                    if isinstance(spec_cmd, str) and "kubectl logs" in spec_cmd:
+                        cmd_spec.setdefault("args", {})["command"] = _since_re.sub(
+                            f"--since-time={window_start_iso}", spec_cmd
+                        )
+
     return actions[:safe_max_items]
 
 
@@ -1638,6 +1698,7 @@ def _build_followup_react_loop(
     spec_blocked_ratio = round(spec_blocked_total / max(plan_total, 1), 2) if plan_total > 0 else 0.0
     planning_blocked = (
         plan_total > 0
+        and executable_total <= 0
         and spec_blocked_total > 0
         and spec_blocked_ratio >= 0.5
         and observed_executable_actions <= 0

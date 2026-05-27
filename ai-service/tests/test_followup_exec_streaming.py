@@ -1130,9 +1130,14 @@ def test_followup_readonly_auto_exec_skips_equivalent_command_spec_key(monkeypat
             ],
             run_blocking=None,
             executed_commands=executed,
-            prior_observations=[],
-            event_callback=None,
-            logger=None,
+            prior_observations=[
+                {
+                    "status": "executed",
+                    "exit_code": 0,
+                    "command": "kubectl get pods -n islap",
+                    "reason_code": "",
+                }
+            ],
         )
         return observations
 
@@ -1712,3 +1717,30 @@ def test_followup_readonly_auto_exec_requires_permission_for_write_commands_even
     assert observations[0]["requires_write_permission"] is True
     assert observations[0]["requires_elevation"] is True
     assert observations[0]["command_spec_present"] is True
+
+
+def test_select_followup_react_iteration_actions_dedup_case_insensitive():
+    """相同命令不同大小写应该被 dedup 机制识别为同一命令。"""
+    actions = [
+        {
+            "id": "act-ci-001",
+            "command": "kubectl exec clickhouse -- query \"SELECT x AS y FROM t\"",
+            "command_type": "query",
+            "executable": True,
+        },
+        {
+            "id": "act-ci-002",
+            "command": "kubectl exec clickhouse -- query \"SELECT x as y from t\"",
+            "command_type": "query",
+            "executable": True,
+        },
+    ]
+    selected = _select_followup_react_iteration_actions(
+        actions=actions,
+        action_observations=[],
+        retry_per_command=1,
+    )
+    selected_commands = [str((item or {}).get("command") or "") for item in selected]
+    assert len(selected_commands) == 1, (
+        f"Expected 1 unique command, got {len(selected_commands)}: {selected_commands}"
+    )

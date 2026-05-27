@@ -852,13 +852,13 @@ def _resolve_latest_success_observation(
     command: str,
     observations: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    command_key = _normalize_followup_command_match_key(command)
+    command_key = _normalize_followup_command_match_key(command).lower()
     if not command_key:
         return None
     latest: Optional[Dict[str, Any]] = None
     for item in _as_list(observations):
         obs = item if isinstance(item, dict) else {}
-        if _normalize_followup_command_match_key(_as_str(obs.get("command"))) != command_key:
+        if _normalize_followup_command_match_key(_as_str(obs.get("command"))).lower() != command_key:
             continue
         status = _as_str(obs.get("status")).strip().lower()
         exit_code = int(_as_float(obs.get("exit_code"), 0))
@@ -1377,39 +1377,48 @@ async def _run_followup_readonly_auto_exec(
                 command=normalized_command,
                 observations=safe_prior_observations + observations,
             )
-            reused_command_run_id = _as_str((reused_observation or {}).get("command_run_id")).strip()
-            observation = _build_followup_auto_exec_skip_observation(
-                session_id=session_id,
-                message_id=message_id,
-                action_id=action_id,
-                command=normalized_command,
-                reason="同一 run 已执行过该命令，跳过重复执行。",
-                reason_code="duplicate_skipped",
-                reused_command_run_id=reused_command_run_id,
-                reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
-            )
-            observations.append(observation)
-            await _emit_followup_event(event_callback, "observation", observation, logger=logger)
-            continue
+            if reused_observation is None:
+                # 命令在 executed_set 但无实际成功执行记录（如来自历史会话的摘要），
+                # 从 executed_set 移除允许重新执行，避免 react 循环中无限 duplicate_skipped。
+                executed_set.discard(normalized_command)
+            else:
+                reused_command_run_id = _as_str(reused_observation.get("command_run_id")).strip()
+                observation = _build_followup_auto_exec_skip_observation(
+                    session_id=session_id,
+                    message_id=message_id,
+                    action_id=action_id,
+                    command=normalized_command,
+                    reason="同一 run 已执行过该命令，跳过重复执行。",
+                    reason_code="duplicate_skipped",
+                    reused_command_run_id=reused_command_run_id,
+                    reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
+                )
+                observations.append(observation)
+                await _emit_followup_event(event_callback, "observation", observation, logger=logger)
+                continue
         if dedupe_key and dedupe_key in executed_set:
             reused_observation = _resolve_latest_success_observation(
                 command=normalized_command,
                 observations=safe_prior_observations + observations,
             )
-            reused_command_run_id = _as_str((reused_observation or {}).get("command_run_id")).strip()
-            observation = _build_followup_auto_exec_skip_observation(
-                session_id=session_id,
-                message_id=message_id,
-                action_id=action_id,
-                command=normalized_command,
-                reason="同一 run 已存在等价 command_spec 结果，跳过重复执行。",
-                reason_code="duplicate_skipped",
-                reused_command_run_id=reused_command_run_id,
-                reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
-            )
-            observations.append(observation)
-            await _emit_followup_event(event_callback, "observation", observation, logger=logger)
-            continue
+            if reused_observation is None:
+                # dedupe_key 匹配但无实际成功执行记录：移除 allow 重新执行。
+                executed_set.discard(dedupe_key)
+            else:
+                reused_command_run_id = _as_str(reused_observation.get("command_run_id")).strip()
+                observation = _build_followup_auto_exec_skip_observation(
+                    session_id=session_id,
+                    message_id=message_id,
+                    action_id=action_id,
+                    command=normalized_command,
+                    reason="同一 run 已存在等价 command_spec 结果，跳过重复执行。",
+                    reason_code="duplicate_skipped",
+                    reused_command_run_id=reused_command_run_id,
+                    reused_evidence_ids=[reused_command_run_id] if reused_command_run_id else [],
+                )
+                observations.append(observation)
+                await _emit_followup_event(event_callback, "observation", observation, logger=logger)
+                continue
         if normalized_command != raw_command and normalized_command in seen_commands:
             continue
         seen_commands.add(normalized_command)
@@ -1677,7 +1686,7 @@ def _latest_observation_maps(action_observations: List[Dict[str, Any]]) -> tuple
         if action_id:
             by_action_id[action_id] = item
         if command:
-            by_command[command] = item
+            by_command[command.lower()] = item
     return by_action_id, by_command
 
 
@@ -1686,23 +1695,23 @@ def _count_command_failures(action_observations: List[Dict[str, Any]]) -> Dict[s
     for item in _as_list(action_observations):
         if not isinstance(item, dict):
             continue
-        command = _normalize_followup_command_line(_as_str(item.get("command")))
-        if not command:
+        cmd_key = _normalize_followup_command_line(_as_str(item.get("command"))).lower()
+        if not cmd_key:
             continue
         status = _as_str(item.get("status")).lower()
         if status == "executed":
             exit_code = int(_as_float(item.get("exit_code"), 0))
             if exit_code == 0 and not bool(item.get("output_truncated")):
                 continue
-            counts[command] = counts.get(command, 0) + 1
+            counts[cmd_key] = counts.get(cmd_key, 0) + 1
             continue
         if status == "failed":
-            counts[command] = counts.get(command, 0) + 1
+            counts[cmd_key] = counts.get(cmd_key, 0) + 1
             continue
         if status == "skipped":
             reason_code = _as_str(item.get("reason_code")).strip().lower()
             if reason_code in {"backend_unready"}:
-                counts[command] = counts.get(command, 0) + 1
+                counts[cmd_key] = counts.get(cmd_key, 0) + 1
     return counts
 
 
@@ -1735,10 +1744,13 @@ def _select_followup_react_iteration_actions(
         if _as_str(action_dict.get("command_type")).lower() != "query":
             continue
         command = _normalize_followup_command_line(_as_str(action_dict.get("command")))
-        if not command or command in seen_commands:
+        if not command:
+            continue
+        cmd_key = command.lower()
+        if cmd_key in seen_commands:
             continue
         action_id = _as_str(action_dict.get("id"))
-        observation = by_action_id.get(action_id) or by_command.get(command)
+        observation = by_action_id.get(action_id) or by_command.get(cmd_key)
         should_retry = False
         if observation is None:
             should_retry = True
@@ -1773,9 +1785,9 @@ def _select_followup_react_iteration_actions(
                 or obs_status == "timed_out"
             ):
                 continue
-        if command_failures.get(command, 0) > max(0, int(retry_per_command)):
+        if command_failures.get(cmd_key, 0) > max(0, int(retry_per_command)):
             continue
-        seen_commands.add(command)
+        seen_commands.add(cmd_key)
         selected.append(action_dict)
 
     return selected
