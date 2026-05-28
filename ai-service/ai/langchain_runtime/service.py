@@ -449,6 +449,8 @@ async def _extract_commands_from_nl(
     nl_text: str,
     original_question: str,
     timeout_seconds: int,
+    namespace: str = "islap",
+    service_name: str = "",
 ) -> Optional[List[Dict[str, Any]]]:
     """
     从 LLM 返回的自然语言文本中提取可执行诊断命令。
@@ -459,6 +461,8 @@ async def _extract_commands_from_nl(
     extraction_prompt = NL_COMMAND_EXTRACTION_PROMPT.format(
         nl_text=nl_text[:4000],
         original_question=original_question[:500],
+        namespace=namespace,
+        service_name=service_name,
     )
 
     try:
@@ -1118,11 +1122,15 @@ async def run_followup_langchain(
             # === Phase 2: NL 命令提取 ===
             if structured is None and not _looks_like_json_payload(answer_text):
                 try:
+                    nl_namespace = _as_str(analysis_context.get("namespace")) or "islap"
+                    nl_service_name = _as_str(analysis_context.get("service_name"))
                     nl_actions = await _extract_commands_from_nl(
                         llm_service=llm_service,
                         nl_text=answer_text,
                         original_question=question,
                         timeout_seconds=max(5, int(llm_timeout_seconds * 0.4)),
+                        namespace=nl_namespace,
+                        service_name=nl_service_name,
                     )
                 except Exception:
                     logger.warning("NL command extraction failed", exc_info=True)

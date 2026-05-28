@@ -65,7 +65,7 @@ spec:
       serviceAccountName: ai-service
       containers:
       - name: ai-service
-        image: localhost:5000/logoscope/ai-service:openharness-20260516
+        image: localhost:5000/logoscope/ai-service:phase2-test
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8090
@@ -184,8 +184,10 @@ spec:
           value: ""
         - name: AI_FOLLOWUP_WEB_SEARCH_TIMEOUT_SECONDS
           value: "6"
-        - name: AI_FOLLOWUP_LLM_TIMEOUT_SECONDS
-          value: "90"
+        - name: AI_FOLLOWUP_LLM_TOTAL_TIMEOUT_SECONDS
+          value: "160"
+        - name: AI_FOLLOWUP_LLM_FIRST_TOKEN_TIMEOUT_SECONDS
+          value: "45"
         - name: AI_FOLLOWUP_COMMAND_EXEC_ENABLED
           value: "true"
         - name: AI_FOLLOWUP_COMMAND_WRITE_ENABLED
