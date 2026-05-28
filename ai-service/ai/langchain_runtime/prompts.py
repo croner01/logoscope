@@ -108,3 +108,22 @@ def build_followup_prompt(payload: Dict[str, Any]) -> str:
 
     template = PromptTemplate.from_template(FOLLOWUP_USER_TEMPLATE)
     return template.format(**safe_payload)
+
+
+NL_COMMAND_EXTRACTION_PROMPT = """你是一个 SRE 诊断命令提取器。以下是一段 AI 对可观测性问题的自然语言分析文本，请从中提取可用于进一步诊断的命令。
+
+要求：
+1. 只基于文本中明确提到的命令，不编造
+2. 输出 JSON 数组，每个元素包含：
+   - title: 命令的简短标题
+   - action: 动作描述
+   - command_spec: {"tool": "generic_exec", "args": {"command": "...", "target_kind": "k8s_cluster", "target_identity": "namespace:islap", "timeout_s": 30}}
+   - expected_outcome: 预期结果
+3. 文本中没有明确命令时返回 []
+4. 不要包含任何非 JSON 内容
+
+分析文本：
+{nl_text}
+
+原始问题：
+{original_question}"""
