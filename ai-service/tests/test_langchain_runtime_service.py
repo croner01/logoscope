@@ -521,3 +521,125 @@ def test_run_followup_langchain_retry_on_non_json():
     assert len(result.get("actions") or []) == 1
     assert result["actions"][0]["command_spec"]["tool"] == "generic_exec"
     assert result["actions"][0]["executable"] is True
+
+
+class _NLCommandExtractionMockLLM:
+    """主调用返回 NL，Phase 1 重试返回 NL，NL 提取返回合法 JSON actions。"""
+
+    def __init__(self):
+        self.call_count = 0
+        self.extraction_inputs = []
+
+    async def chat(self, message, context=None, **kwargs):
+        return '{"conclusion":"fallback","summary":"fallback","actions":[]}'
+
+    async def chat_stream(self, message, context=None, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            yield "这个问题需要先查看 query-service 的日志。建议使用 kubectl logs 命令。"
+        elif self.call_count == 2:
+            yield "还需要进一步确认问题，建议查看详细的错误信息。"
+        elif self.call_count == 3:
+            self.extraction_inputs.append(str(message))
+            yield (
+                '[{"title":"查看日志","action":"kubectl logs",'
+                '"command_spec":{"tool":"generic_exec","args":{'
+                '"command":"kubectl logs deploy/query-service -n islap --tail=20",'
+                '"target_kind":"k8s_cluster","target_identity":"namespace:islap","timeout_s":30'
+                '}},'
+                '"expected_outcome":"确认是否持续报错"}]'
+            )
+
+
+class _NLExtractionEmptyMockLLM:
+    """主调用返回 NL，NL 提取返回空数组。"""
+
+    def __init__(self):
+        self.call_count = 0
+
+    async def chat(self, message, context=None, **kwargs):
+        return '{"conclusion":"fallback","summary":"fallback","actions":[]}'
+
+    async def chat_stream(self, message, context=None, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            yield "这个问题需要进一步排查。"
+        elif self.call_count == 2:
+            yield "需要先查看日志才能确定问题。"
+        elif self.call_count == 3:
+            yield "[]"
+        else:
+            yield ""
+
+
+class _NLExtractionFailMockLLM:
+    """主调用返回 NL，NL 提取调用抛出异常。"""
+
+    def __init__(self):
+        self.call_count = 0
+
+    async def chat(self, message, context=None, **kwargs):
+        return '{"conclusion":"fallback","summary":"fallback","actions":[]}'
+
+    async def chat_stream(self, message, context=None, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            yield "这个问题需要先看日志。"
+        elif self.call_count == 2:
+            yield "需要进一步排查原因。"
+        elif self.call_count == 3:
+            raise RuntimeError("NL extraction mock failure")
+        else:
+            yield ""
+
+
+def test_run_followup_langchain_nl_extraction_success():
+    """NL 提取成功时，actions 包含提取的命令。"""
+    llm = _NLCommandExtractionMockLLM()
+
+    async def _run():
+        return await run_followup_langchain(
+            **_build_runtime_kwargs(llm),
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert llm.call_count == 3  # 主调用 + retry + NL 提取
+    assert result["analysis_method"] == "langchain"
+    assert len(result.get("actions") or []) == 1
+    assert result["actions"][0]["command_spec"]["tool"] == "generic_exec"
+
+
+def test_run_followup_langchain_nl_extraction_empty():
+    """NL 提取返回空数组时，走原有 fallback 路径。"""
+    llm = _NLExtractionEmptyMockLLM()
+
+    async def _run():
+        return await run_followup_langchain(
+            **_build_runtime_kwargs(llm),
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["analysis_method"] == "langchain"
+    # NL 提取返回空，fallback 返回原始 NL 文本
+    assert "需要先查看日志" in result["answer"]
+
+
+def test_run_followup_langchain_nl_extraction_exception():
+    """NL 提取异常时，走原有 fallback 路径。"""
+    llm = _NLExtractionFailMockLLM()
+
+    async def _run():
+        return await run_followup_langchain(
+            **_build_runtime_kwargs(llm),
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["analysis_method"] == "langchain"
+    # 异常被捕获，fallback 返回原始 NL 文本
+    assert "需要进一步排查原因" in result["answer"]
