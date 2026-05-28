@@ -183,6 +183,7 @@ class LLMConfig:
     cache_ttl: int = 3600  # 1 hour
     cache_max_entries: int = 2048
     rate_limit: int = 60  # requests per minute
+    response_format: Optional[Dict[str, Any]] = None  # {"type": "json_object"} etc.
 
 
 @dataclass
@@ -828,21 +829,25 @@ class LLMService:
         self,
         message: str,
         context: Dict[str, Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> str:
         """通用对话"""
         system_prompt = "你是一个专业的可观测性和日志分析助手。"
-        
+
         prompt = message
         if context:
             prompt = f"上下文信息:\n{json.dumps(context, ensure_ascii=False)}\n\n{message}"
 
-        response = await self._provider.generate(prompt, system_prompt)
+        response = await self._provider.generate(
+            prompt, system_prompt, response_format=response_format or self.config.response_format,
+        )
         return response.content
 
     async def chat_stream(
         self,
         message: str,
         context: Dict[str, Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[str]:
         """通用对话（流式）。"""
         system_prompt = "你是一个专业的可观测性和日志分析助手。"
@@ -851,7 +856,9 @@ class LLMService:
         if context:
             prompt = f"上下文信息:\n{json.dumps(context, ensure_ascii=False)}\n\n{message}"
 
-        async for chunk in self._provider.generate_stream(prompt, system_prompt):
+        async for chunk in self._provider.generate_stream(
+            prompt, system_prompt, response_format=response_format or self.config.response_format,
+        ):
             text = str(chunk or "")
             if text:
                 yield text
