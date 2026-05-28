@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ai.langchain_runtime.memory import build_memory_context
 from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT, build_followup_prompt
-from ai.langchain_runtime.schemas import StructuredAnswer
+from ai.langchain_runtime.schemas import ActionItem, StructuredAnswer
 from ai.langchain_runtime.tools import collect_tool_observations
 from ai.followup_command_spec import compile_followup_command_spec, normalize_followup_command_spec
 from ai.followup_planning_helpers import _resolve_followup_evidence_window
@@ -441,6 +441,74 @@ def _looks_like_json_payload(raw: str) -> bool:
     if text.startswith("```") and ("{" in text[:120] or "[" in text[:120]):
         return True
     return False
+
+
+async def _extract_commands_from_nl(
+    *,
+    llm_service: Any,
+    nl_text: str,
+    original_question: str,
+    timeout_seconds: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    从 LLM 返回的自然语言文本中提取可执行诊断命令。
+    返回 list[dict]（可直接用于构建 ActionItem）或 None。
+    """
+    from ai.langchain_runtime.prompts import NL_COMMAND_EXTRACTION_PROMPT
+
+    extraction_prompt = NL_COMMAND_EXTRACTION_PROMPT.format(
+        nl_text=nl_text[:4000],
+        original_question=original_question[:500],
+    )
+
+    try:
+        result = await collect_chat_response(
+            llm_service=llm_service,
+            message=extraction_prompt,
+            context={"engine": "langchain_nl_extraction"},
+            total_timeout_seconds=timeout_seconds,
+            first_token_timeout_seconds=max(1, timeout_seconds // 2),
+            on_token=None,
+        )
+    except Exception:
+        logger.warning("NL extraction LLM call failed", exc_info=True)
+        return None
+
+    raw = _as_str(result).strip()
+    if not raw:
+        return None
+    if raw.startswith("```"):
+        # 去掉可能的 markdown 代码块标记
+        raw = raw.strip("`").strip()
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+
+    try:
+        entries = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("NL extraction result is not valid JSON")
+        return None
+
+    if not isinstance(entries, list) or not entries:
+        return None
+
+    # 转换为 ActionItem 兼容的 dict 列表
+    actions = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        command_spec = entry.get("command_spec") or {}
+        action = {
+            "priority": int(entry.get("priority", 1)),
+            "title": entry.get("title", ""),
+            "action": entry.get("action", ""),
+            "command_spec": command_spec,
+            "expected_outcome": entry.get("expected_outcome", ""),
+        }
+        if command_spec.get("command") or (command_spec.get("args") or {}).get("command"):
+            actions.append(action)
+
+    return actions if actions else None
 
 
 def _sanitize_json_like_answer(raw: str) -> Dict[str, Any]:
@@ -1046,6 +1114,26 @@ async def run_followup_langchain(
                         structured = _parse_structured_answer(answer_text)
                 except Exception:
                     logger.warning("LLM format retry failed, using original response", exc_info=True)
+
+            # === Phase 2: NL 命令提取 ===
+            if structured is None and not _looks_like_json_payload(answer_text):
+                try:
+                    nl_actions = await _extract_commands_from_nl(
+                        llm_service=llm_service,
+                        nl_text=answer_text,
+                        original_question=question,
+                        timeout_seconds=max(5, int(llm_timeout_seconds * 0.4)),
+                    )
+                except Exception:
+                    logger.warning("NL command extraction failed", exc_info=True)
+                    nl_actions = None
+
+                if nl_actions:
+                    structured = StructuredAnswer(
+                        conclusion="从自然语言分析中提取诊断命令",
+                        summary="LLM 返回了自然语言分析，已提取可执行命令",
+                        actions=[ActionItem(**a) for a in nl_actions],
+                    )
 
             if structured is None:
                 if _looks_like_json_payload(answer_text):
