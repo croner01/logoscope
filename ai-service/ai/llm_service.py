@@ -317,12 +317,16 @@ class OpenAIProvider(BaseLLMProvider):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
-            response = await client.chat.completions.create(
+            create_kwargs = dict(
                 model=kwargs.get("model", self.config.model),
                 messages=messages,
                 max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
                 temperature=kwargs.get("temperature", self.config.temperature),
             )
+            response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
+            response = await client.chat.completions.create(**create_kwargs)
 
             content = response.choices[0].message.content
             latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -361,13 +365,17 @@ class OpenAIProvider(BaseLLMProvider):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-            stream = await client.chat.completions.create(
+            create_kwargs = dict(
                 model=kwargs.get("model", self.config.model),
                 messages=messages,
                 max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
                 temperature=kwargs.get("temperature", self.config.temperature),
                 stream=True,
             )
+            response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
+            stream = await client.chat.completions.create(**create_kwargs)
             async for event in stream:
                 try:
                     delta = event.choices[0].delta.content
@@ -587,13 +595,17 @@ class LocalModelProvider(BaseLLMProvider):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-            stream = await client.chat.completions.create(
+            create_kwargs = dict(
                 model=kwargs.get("model", self.config.model),
                 messages=messages,
                 max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
                 temperature=kwargs.get("temperature", self.config.temperature),
                 stream=True,
             )
+            response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
+            stream = await client.chat.completions.create(**create_kwargs)
             async for event in stream:
                 try:
                     delta = event.choices[0].delta.content
