@@ -974,6 +974,9 @@ async def run_followup_langchain(
     prompt = build_followup_prompt(prompt_payload)
     message = f"{FOLLOWUP_SYSTEM_PROMPT}\n\n{prompt}"
 
+    llm_provider_name = getattr(llm_service, 'config', None) and getattr(llm_service.config, 'provider', None)
+    use_json_response_format = llm_provider_name in ('deepseek', 'openai', 'local')
+
     llm_timeout_fallback = False
     raw_token_stream_enabled = _should_stream_raw_tokens()
     try:
@@ -997,6 +1000,7 @@ async def run_followup_langchain(
             total_timeout_seconds=max(5, int(llm_timeout_seconds)),
             first_token_timeout_seconds=max(1, int(llm_first_token_timeout_seconds)),
             on_token=stream_token_callback if raw_token_stream_enabled else None,
+            response_format={"type": "json_object"} if use_json_response_format else None,
         )
         answer_text = _as_str(result)
         if not answer_text:
@@ -1004,40 +1008,80 @@ async def run_followup_langchain(
 
         structured = _parse_structured_answer(answer_text)
         if structured is None:
-            if _looks_like_json_payload(answer_text):
-                sanitized = _sanitize_json_like_answer(answer_text)
-                safe_answer = _as_str(sanitized.get("answer")).strip() or fallback_builder(
-                    question,
-                    analysis_context,
-                    fallback_reason="llm_structured_parse_failed",
-                    reflection=reflection,
+            # === Retry: only when response is not JSON-like (format issue, not content issue) ===
+            if not _looks_like_json_payload(answer_text):
+                retry_message = (
+                    f"{message}\n\n"
+                    "【格式纠正】你之前的回答没有使用要求的 JSON 格式。"
+                    "请严格按照输出格式要求重新生成，只输出合法 JSON，不要多余文字。\n"
+                    "之前的回答（仅供参考，不要重复）：\n"
+                    f"{answer_text[:2000]}"
                 )
-                safe_missing = [
-                    _as_str(item).strip()
-                    for item in _as_list(sanitized.get("missing_evidence"))
-                    if _as_str(item).strip()
-                ]
-                safe_summary = (
-                    _as_str(sanitized.get("analysis_summary")).strip()
-                    or (safe_answer.splitlines()[0][:280] if safe_answer else "")
-                )
+                try:
+                    retry_result = await collect_chat_response(
+                        llm_service=llm_service,
+                        message=retry_message,
+                        context={
+                            "engine": "langchain",
+                            "token_budget": token_budget,
+                            "token_warning": token_warning,
+                            "analysis_context": analysis_context,
+                            "conversation_history": compacted_history[-10:],
+                            "conversation_summary": compacted_summary,
+                            "long_term_memory": long_term_memory,
+                            "references": references,
+                            "subgoals": subgoals,
+                            "reflection": reflection,
+                            "tool_observations": tool_observations,
+                            "raw_token_stream_enabled": False,
+                        },
+                        total_timeout_seconds=max(5, int(llm_timeout_seconds)),
+                        first_token_timeout_seconds=max(1, int(llm_first_token_timeout_seconds)),
+                        on_token=None,
+                        response_format={"type": "json_object"} if use_json_response_format else None,
+                    )
+                    retry_text = _as_str(retry_result)
+                    if retry_text:
+                        answer_text = retry_text
+                        structured = _parse_structured_answer(answer_text)
+                except Exception:
+                    logger.warning("LLM format retry failed, using original response", exc_info=True)
+
+            if structured is None:
+                if _looks_like_json_payload(answer_text):
+                    sanitized = _sanitize_json_like_answer(answer_text)
+                    safe_answer = _as_str(sanitized.get("answer")).strip() or fallback_builder(
+                        question,
+                        analysis_context,
+                        fallback_reason="llm_structured_parse_failed",
+                        reflection=reflection,
+                    )
+                    safe_missing = [
+                        _as_str(item).strip()
+                        for item in _as_list(sanitized.get("missing_evidence"))
+                        if _as_str(item).strip()
+                    ]
+                    safe_summary = (
+                        _as_str(sanitized.get("analysis_summary")).strip()
+                        or (safe_answer.splitlines()[0][:280] if safe_answer else "")
+                    )
+                    return {
+                        "answer": safe_answer,
+                        "analysis_method": "langchain",
+                        "llm_timeout_fallback": False,
+                        "actions": [],
+                        "missing_evidence": safe_missing,
+                        "analysis_summary": safe_summary,
+                    }
+                summary_seed = answer_text.strip().splitlines()[0][:280] if answer_text.strip() else ""
                 return {
-                    "answer": safe_answer,
+                    "answer": answer_text,
                     "analysis_method": "langchain",
                     "llm_timeout_fallback": False,
                     "actions": [],
-                    "missing_evidence": safe_missing,
-                    "analysis_summary": safe_summary,
+                    "missing_evidence": [],
+                    "analysis_summary": summary_seed,
                 }
-            summary_seed = answer_text.strip().splitlines()[0][:280] if answer_text.strip() else ""
-            return {
-                "answer": answer_text,
-                "analysis_method": "langchain",
-                "llm_timeout_fallback": False,
-                "actions": [],
-                "missing_evidence": [],
-                "analysis_summary": summary_seed,
-            }
         missing_evidence = [
             _as_str(item).strip()
             for item in _as_list(structured.missing_evidence)

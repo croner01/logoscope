@@ -472,3 +472,52 @@ def test_run_followup_langchain_prompt_injects_project_knowledge_section(monkeyp
     assert "## 项目知识（Project Knowledge）" in message
     assert "query-service 是主读路径" in message
     assert "log ingest -> clickhouse -> query-service" in message
+
+
+class _RetryLLMService:
+    """Returns non-JSON on first call, valid JSON on retry."""
+
+    def __init__(self):
+        self.call_count = 0
+        self.messages = []
+
+    async def chat(self, message, context=None, **kwargs):
+        return '{"conclusion":"fallback","summary":"fallback","actions":[]}'
+
+    async def chat_stream(self, message, context=None, **kwargs):
+        self.call_count += 1
+        self.messages.append(str(message))
+        if self.call_count == 1:
+            yield "这个问题需要先查看 query-service 的日志来确认错误详情。建议使用 kubectl logs 命令。"
+        else:
+            yield (
+                '{"conclusion":"query-service 需要检查连接池",'
+                '"actions":[{"priority":1,"title":"查看日志","action":"查看日志",'
+                '"command_spec":{"tool":"generic_exec",'
+                '"args":{"command":"kubectl logs deploy/query-service -n islap --tail=20",'
+                '"target_kind":"k8s_cluster","target_identity":"namespace:islap","timeout_s":30}},'
+                '"expected_outcome":"确认是否持续报错","executable":true}],'
+                '"summary":"优先确认错误是否持续"}'
+            )
+
+
+def test_run_followup_langchain_retry_on_non_json():
+    """当 LLM 返回非 JSON 内容时触发重试，重试成功则返回结构化结果。"""
+    llm_service = _RetryLLMService()
+
+    async def _run():
+        return await run_followup_langchain(
+            **_build_runtime_kwargs(llm_service),
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["analysis_method"] == "langchain"
+    assert llm_service.call_count == 2
+    assert len(llm_service.messages) == 2
+    assert "【格式纠正】" in llm_service.messages[1]
+    assert "结论：" in result["answer"]
+    assert len(result.get("actions") or []) == 1
+    assert result["actions"][0]["command_spec"]["tool"] == "generic_exec"
+    assert result["actions"][0]["executable"] is True
