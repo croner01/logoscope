@@ -4,7 +4,7 @@ LLM chat streaming helpers.
 
 import asyncio
 import inspect
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 def _as_str(value: Any, default: str = "") -> str:
@@ -26,6 +26,7 @@ async def collect_chat_response(
     total_timeout_seconds: int,
     first_token_timeout_seconds: int,
     on_token: Optional[Callable[[str], Any]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Collect full chat response and optionally forward stream chunks.
@@ -38,16 +39,16 @@ async def collect_chat_response(
     if not callable(stream_fn):
         return _as_str(
             await asyncio.wait_for(
-                llm_service.chat(message=message, context=context),
+                llm_service.chat(message=message, context=context, response_format=response_format),
                 timeout=safe_total_timeout,
             )
         )
 
-    stream_obj = stream_fn(message=message, context=context)
+    stream_obj = stream_fn(message=message, context=context, response_format=response_format)
     if not hasattr(stream_obj, "__aiter__"):
         return _as_str(
             await asyncio.wait_for(
-                llm_service.chat(message=message, context=context),
+                llm_service.chat(message=message, context=context, response_format=response_format),
                 timeout=safe_total_timeout,
             )
         )
@@ -90,7 +91,7 @@ async def collect_chat_response(
         remaining = max(1, safe_total_timeout - elapsed)
         return _as_str(
             await asyncio.wait_for(
-                llm_service.chat(message=message, context=context),
+                llm_service.chat(message=message, context=context, response_format=response_format),
                 timeout=remaining,
             )
         )

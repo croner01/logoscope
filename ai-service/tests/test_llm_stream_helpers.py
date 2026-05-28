@@ -14,20 +14,20 @@ class _BrokenAfterFirstChunkLLM:
     def __init__(self):
         self.chat_calls = 0
 
-    async def chat(self, message, context=None):
+    async def chat(self, message, context=None, **kwargs):
         self.chat_calls += 1
         return "fallback-answer"
 
-    async def chat_stream(self, message, context=None):
+    async def chat_stream(self, message, context=None, **kwargs):
         yield "first-"
         raise RuntimeError("stream broken")
 
 
 class _SlowStreamLLM:
-    async def chat(self, message, context=None):
+    async def chat(self, message, context=None, **kwargs):
         return "fallback-answer"
 
-    async def chat_stream(self, message, context=None):
+    async def chat_stream(self, message, context=None, **kwargs):
         await asyncio.sleep(3.2)
         yield "a"
         await asyncio.sleep(4.5)
@@ -38,11 +38,11 @@ class _FailFastStreamLLM:
     def __init__(self):
         self.chat_calls = 0
 
-    async def chat(self, message, context=None):
+    async def chat(self, message, context=None, **kwargs):
         self.chat_calls += 1
         return "fallback-answer"
 
-    async def chat_stream(self, message, context=None):
+    async def chat_stream(self, message, context=None, **kwargs):
         raise RuntimeError("no stream")
         yield  # pragma: no cover
 

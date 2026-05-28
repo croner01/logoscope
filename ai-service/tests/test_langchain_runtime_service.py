@@ -20,11 +20,11 @@ class DummyStreamingLLM:
     def __init__(self, chunks):
         self._chunks = chunks
 
-    async def chat_stream(self, message, context=None):
+    async def chat_stream(self, message, context=None, **kwargs):
         for chunk in self._chunks:
             yield chunk
 
-    async def chat(self, message, context=None):
+    async def chat(self, message, context=None, **kwargs):
         return "".join(self._chunks)
 
 
