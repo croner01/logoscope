@@ -1551,7 +1551,7 @@ def test_followup_react_loop_promotes_structured_templates_to_auto_exec_candidat
             actions=[
                 {
                     "id": "act-manual-template",
-                    "title": "查询ClickHouse慢查询日志",
+                    "title": "分析ClickHouse慢查询",
                     "purpose": "获取失败查询样本",
                     "command": "",
                     "command_type": "unknown",

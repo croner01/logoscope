@@ -1707,6 +1707,24 @@ def _build_followup_react_loop(
             expected_signal = slot_info.get("expected_signal", "")
             if not expected_signal:
                 continue
+
+            # 专有提取：namespace 类型槽位从 kubectl get pods -A 输出中提取
+            if "namespace" in expected_signal.lower():
+                for obs in safe_observations:
+                    if not isinstance(obs, dict):
+                        continue
+                    ns = _extract_namespace_from_observations([obs])
+                    if ns:
+                        slot_info["status"] = "cross_filled"
+                        slot_info["evidence_quality"] = "cross_ns"
+                        slot_info["signal_match"] = True
+                        slot_info["signal_match_reason"] = f"cross_propagation:extracted_namespace={ns}"
+                        slot_info["source_obs_id"] = _as_str(obs.get("command_run_id"))
+                        propagation_hits += 1
+                        break
+                if slot_info.get("status") == "cross_filled":
+                    continue
+
             for obs in safe_observations:
                 if not isinstance(obs, dict):
                     continue

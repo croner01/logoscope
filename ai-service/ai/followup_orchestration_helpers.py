@@ -1929,6 +1929,28 @@ async def _run_followup_auto_exec_react_loop(
                         logger=logger,
                     )
             else:
+                # 证据未收敛且无可用动作时，尝试 LLM replan 生成新动作
+                if active_evidence_gaps and llm_replan_callback is not None:
+                    remaining = _loop_deadline - time.perf_counter()
+                    if remaining >= 15.0:
+                        try:
+                            new_actions = await llm_replan_callback(
+                                original_question=_as_str(analysis_context.get("question", "")) if analysis_context else "",
+                                analysis_context=analysis_context,
+                                all_observations=all_observations,
+                                executed_commands=executed_commands or set(),
+                                current_evidence_gaps=active_evidence_gaps,
+                                remaining_iterations=max_iterations - iteration,
+                                remaining_timeout=remaining - 5.0,
+                                event_callback=event_callback,
+                                logger=logger,
+                            )
+                        except Exception as exc:
+                            logger and logger.warning("LLM replan callback failed at empty iteration: %s", exc)
+                            new_actions = None
+                        if new_actions:
+                            working_actions.extend(new_actions)
+                            continue
                 break
 
         pre_summary_parts: List[str] = []
