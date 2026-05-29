@@ -2123,3 +2123,63 @@ def _extract_namespace_from_observations(
             if app and namespace and app not in mapping:
                 mapping[app] = namespace
     return mapping
+
+
+def _build_llm_replan_context(
+    *,
+    original_question: str,
+    analysis_context: Optional[Dict[str, Any]] = None,
+    all_observations: List[Dict[str, Any]],
+    executed_commands: set[str],
+    current_evidence_gaps: List[str],
+    remaining_iterations: int,
+    remaining_timeout: float,
+) -> str:
+    """构建 LLM 重规划上下文，摘要已执行命令和发现，避免 LLM 重复推断。"""
+    ctx = analysis_context or {}
+    parts: List[str] = []
+
+    # 已执行命令摘要
+    cmd_summaries: List[str] = []
+    seen_cmds: set[str] = set()
+    for obs in all_observations:
+        if not isinstance(obs, dict):
+            continue
+        cmd = _as_str(obs.get("command")).strip()
+        if not cmd or cmd in seen_cmds:
+            continue
+        seen_cmds.add(cmd)
+        stdout = _as_str(obs.get("stdout")).strip()
+        findings = []
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("NAMESPACE") or stripped.startswith("NAME"):
+                continue
+            if len(stripped) < 10:
+                continue
+            findings.append(stripped[:180])
+        summary = cmd
+        if findings:
+            summary += f" → 发现: {'; '.join(findings[:3])}"
+        if _as_str(obs.get("status")) == "executed" and int(_as_float(obs.get("exit_code"), 0)) == 0:
+            summary += " (成功)"
+        else:
+            summary += f" (状态: {_as_str(obs.get('status'))})"
+        cmd_summaries.append(summary)
+
+    if cmd_summaries:
+        parts.append("【上轮执行摘要】\n已执行命令:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(cmd_summaries)))
+
+    discovered = _extract_namespace_from_observations(all_observations)
+    if discovered:
+        ns_lines = [f"  - {app} → namespace={ns}" for app, ns in discovered.items()]
+        parts.append("【已发现的环境信息】\n" + "\n".join(ns_lines))
+        parts.append("注意：以上 namespace 已经确定，后续命令可以直接使用 -n <namespace> 参数，不需要重新发现。")
+
+    if current_evidence_gaps:
+        parts.append("【仍需查明的证据缺口】\n" + "\n".join(f"  {i+1}. {g[:200]}" for i, g in enumerate(current_evidence_gaps)))
+
+    budget = f"【预算】\n剩余迭代: {max(0, remaining_iterations)} 轮, 剩余时间: {max(0, int(remaining_timeout))}s。请聚焦核心诊断步骤。"
+    parts.append(budget)
+
+    return "\n\n".join(parts)

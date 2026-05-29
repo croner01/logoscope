@@ -1294,3 +1294,51 @@ def test_deterministic_propagation_no_hit_when_no_matching_observation():
     ]
     loop = _build_followup_react_loop(actions=actions, action_observations=observations)
     assert loop["observe"].get("propagation_hits", 0) == 0
+
+
+# ── Task 3: _build_llm_replan_context ──────────────────────
+
+
+def test_build_llm_replan_context_includes_command_summaries():
+    from ai.followup_planning_helpers import _build_llm_replan_context
+
+    context = _build_llm_replan_context(
+        original_question="确认temporal服务是否正常",
+        analysis_context={"namespace": "islap"},
+        all_observations=[
+            {
+                "command": "kubectl get pods -A -l app=temporal",
+                "stdout": (
+                    "NAMESPACE   NAME    READY   STATUS\n"
+                    "default     temporal-xxx   1/1     Running\n"
+                ),
+                "status": "executed",
+                "exit_code": 0,
+            }
+        ],
+        executed_commands={"kubectl get pods -A -l app=temporal"},
+        current_evidence_gaps=["需要确认temporal日志中是否有连接错误"],
+        remaining_iterations=2,
+        remaining_timeout=25.0,
+    )
+    assert "kubectl get pods -A -l app=temporal" in context
+    assert "temporal-xxx" in context
+    assert "Running" in context
+    assert "连接错误" in context
+
+
+def test_build_llm_replan_context_contains_evidence_gaps():
+    from ai.followup_planning_helpers import _build_llm_replan_context
+
+    context = _build_llm_replan_context(
+        original_question="clickhouse 是否正常",
+        analysis_context={},
+        all_observations=[],
+        executed_commands=set(),
+        current_evidence_gaps=["需要查看clickhouse日志"],
+        remaining_iterations=1,
+        remaining_timeout=10.0,
+    )
+    assert "clickhouse日志" in context
+    assert "剩余迭代: 1 轮" in context
+    assert "10s" in context
