@@ -46,6 +46,7 @@ from ai.followup_prompt_helpers import (
 from ai.followup_planning_helpers import (
     _append_followup_react_summary,
     _build_followup_actions,
+    _build_followup_llm_replan_context,
     _build_followup_react_loop,
     _build_followup_subgoals,
     _prioritize_followup_actions_with_react_memory,
@@ -6427,6 +6428,72 @@ async def _run_follow_up_analysis_core(
         for item in _as_list(analysis_context.get("_runtime_prior_action_observations"))
         if isinstance(item, dict)
     ]
+
+    _replan_llm_timeout = max(10, int(float(timeout_profile["llm_total_timeout_seconds"]) * 0.6))
+
+    async def _llm_replan_callback(
+        *,
+        original_question: str,
+        analysis_context: Optional[Dict[str, Any]],
+        all_observations: List[Dict[str, Any]],
+        executed_commands: set[str],
+        current_evidence_gaps: List[str],
+        remaining_iterations: int,
+        remaining_timeout: float,
+        event_callback: Optional[Any] = None,
+        logger: Optional[Any] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """LLM 重规划回调：使用执行上下文调用大模型生成新动作。"""
+        replan_context = _build_followup_llm_replan_context(
+            original_question=original_question,
+            analysis_context=analysis_context,
+            all_observations=all_observations,
+            executed_commands=executed_commands,
+            current_evidence_gaps=current_evidence_gaps,
+            remaining_iterations=remaining_iterations,
+            remaining_timeout=remaining_timeout,
+        )
+        augmented_context = dict(analysis_context) if analysis_context else {}
+        augmented_context["_llm_replan_context"] = replan_context
+        try:
+            replan_llm_service = get_llm_service()
+        except Exception as exc:
+            logger and logger.warning("LLM replan: failed to get llm service: %s", exc)
+            return None
+        try:
+            replan_bundle = await asyncio.wait_for(
+                run_followup_langchain(
+                    question=f"[重规划] {original_question[:200]}",
+                    analysis_context=augmented_context,
+                    compacted_history=[],
+                    compacted_summary="",
+                    references=[],
+                    subgoals=[],
+                    reflection={},
+                    long_term_memory={"enabled": False, "hits": 0, "summary": "", "items": []},
+                    llm_enabled=llm_enabled,
+                    llm_requested=True,
+                    token_budget=min(token_budget, 4000),
+                    token_warning=False,
+                    llm_timeout_seconds=_replan_llm_timeout,
+                    llm_first_token_timeout_seconds=20,
+                    llm_service=replan_llm_service,
+                    fallback_builder=lambda *args, **kwargs: _build_followup_fallback_answer(*args, **kwargs),
+                    stream_token_callback=None,
+                ),
+                timeout=_replan_llm_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger and logger.warning("LLM replan timed out after %ss", _replan_llm_timeout)
+            return None
+        except Exception as exc:
+            logger and logger.warning("LLM replan failed: %s", exc)
+            return None
+        new_actions_raw = _as_list(replan_bundle.get("langchain_actions"))
+        if not new_actions_raw:
+            return None
+        return new_actions_raw
+
     react_exec_bundle = await _run_followup_auto_exec_react_loop(
         session_id=analysis_session_id,
         message_id=assistant_message_id,
@@ -6442,6 +6509,7 @@ async def _run_follow_up_analysis_core(
         build_react_loop_fn=_build_followup_react_loop,
         event_callback=event_callback,
         logger=logger,
+        llm_replan_callback=_llm_replan_callback,
     )
     promoted_actions = [
         item
