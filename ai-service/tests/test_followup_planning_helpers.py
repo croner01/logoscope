@@ -1134,3 +1134,74 @@ def test_build_followup_react_loop_clickhouse_template_contains_suggested_comman
     suggested_spec = template_items[0].get("suggested_command_spec")
     assert isinstance(suggested_spec, dict) and suggested_spec
     assert str(suggested_spec.get("tool") or "") == "generic_exec"
+
+
+# ── Task 1: _extract_namespace_from_observations ──────────────────────────
+
+
+def test_extract_namespace_from_kubectl_get_pods_output():
+    from ai.followup_planning_helpers import _extract_namespace_from_observations
+
+    observations = [
+        {
+            "command": "kubectl get pods -A -l app=temporal",
+            "stdout": (
+                "NAMESPACE   NAME                       READY   STATUS    RESTARTS   AGE\n"
+                "default     temporal-7b9c8f5d6-xk3m2   1/1     Running   0          5m\n"
+                "default     temporal-7b9c8f5d6-ab12c   1/1     Running   0          5m\n"
+            ),
+            "status": "executed",
+            "exit_code": 0,
+        }
+    ]
+    result = _extract_namespace_from_observations(observations)
+    assert result == {"temporal": "default"}
+
+
+def test_extract_namespace_returns_empty_dict_when_no_matching_output():
+    from ai.followup_planning_helpers import _extract_namespace_from_observations
+
+    observations = [
+        {
+            "command": "kubectl logs deploy/query-service -n islap --tail=20",
+            "stdout": "2024-01-01 10:00:00 INFO server started",
+            "status": "executed",
+            "exit_code": 0,
+        }
+    ]
+    result = _extract_namespace_from_observations(observations)
+    assert result == {}
+
+
+def test_extract_namespace_handles_multiple_apps():
+    from ai.followup_planning_helpers import _extract_namespace_from_observations
+
+    observations = [
+        {
+            "command": "kubectl get pods -A -l app=temporal",
+            "stdout": (
+                "NAMESPACE   NAME                       READY   STATUS    RESTARTS   AGE\n"
+                "default     temporal-7b9c8f5d6-xk3m2   1/1     Running   0          5m\n"
+                "islap       clickhouse-6df48cc9f9-ab12   1/1     Running   0          10m\n"
+            ),
+            "status": "executed",
+            "exit_code": 0,
+        }
+    ]
+    result = _extract_namespace_from_observations(observations)
+    assert result == {"temporal": "default", "clickhouse": "islap"}
+
+
+def test_extract_namespace_skips_empty_stdout():
+    from ai.followup_planning_helpers import _extract_namespace_from_observations
+
+    observations = [
+        {
+            "command": "kubectl get pods -A",
+            "stdout": "",
+            "status": "executed",
+            "exit_code": 0,
+        }
+    ]
+    result = _extract_namespace_from_observations(observations)
+    assert result == {}

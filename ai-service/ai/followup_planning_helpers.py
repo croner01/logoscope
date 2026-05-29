@@ -1639,6 +1639,12 @@ def _build_followup_react_loop(
                     outcome = "missing"
                 if command_run_id:
                     evidence_ids.append(command_run_id)
+            elif status in {"confirmation_required", "permission_required", "elevation_required"}:
+                outcome = "pending"
+                # 待审批的命令不是缺失证据——它们会在外部审批通过后由框架执行。
+                # 从 required_evidence_slots 中移除，避免 evidence_coverage 计算为 0 导致阻塞。
+                if slot_id in required_evidence_slots:
+                    required_evidence_slots.remove(slot_id)
             elif status == "skipped" and reason_code == "duplicate_skipped":
                 supporting_obs: Optional[Dict[str, Any]] = None
                 command_key = _normalize_followup_command_match_key(command)
@@ -1666,6 +1672,8 @@ def _build_followup_react_loop(
             evidence_filled_slots += 1
             if outcome == "reused":
                 evidence_reused_slots += 1
+        elif outcome == "pending":
+            pass  # 待审批——非缺失证据，不计入 evidence_missing_slots
         else:
             evidence_missing_slots += 1
             missing_evidence_slots.append(slot_id)
@@ -2051,3 +2059,36 @@ def _prioritize_followup_actions_with_react_memory(
         action["react_memory_priority"] = bool(_as_str(action.get("command")) in command_rank)
         prioritized.append(action)
     return prioritized
+
+
+def _extract_namespace_from_observations(
+    observations: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """
+    从 kubectl get pods -A 输出的观察中提取 app→namespace 映射。
+
+    解析逻辑：
+    1. 从 stdout 找出所有 "NAMESPACE   NAME" 格式的 pod 行
+    2. 从 pod name 前缀（第一个 '-' 之前的部分）推断 app 名
+    3. 映射到 namespace（第一列）
+
+    Returns:
+        {app_name: namespace, ...}  — 空 dict 表示没有发现
+    """
+    mapping: Dict[str, str] = {}
+    pod_line_re = re.compile(r"^(\S+)\s+([a-zA-Z][a-zA-Z0-9_-]+)", re.MULTILINE)
+
+    for obs in observations:
+        stdout = _as_str(obs.get("stdout"))
+        if not stdout.strip():
+            continue
+        for match in pod_line_re.finditer(stdout):
+            namespace = match.group(1)
+            raw_name = match.group(2)
+            if not raw_name or raw_name.upper() in ("NAME", "NAMESPACE", "READY", "STATUS", "RESTARTS", "AGE"):
+                continue
+            # 从 pod name 前提取 app 名（第一个 '-' 之前的部分）
+            app = raw_name.split("-")[0] if "-" in raw_name else raw_name
+            if app and namespace and app not in mapping:
+                mapping[app] = namespace
+    return mapping
