@@ -678,6 +678,88 @@ def _compact_command_normalizer(text: Any) -> str:
     return result
 
 
+def _normalize_embedded_command_text(text: Any) -> str:
+    """
+    Normalize text that may contain shell commands embedded in CJK/natural language.
+
+    Handles two distinct problems:
+    1. CJK-ASCII boundary — e.g. "执行kubectlgetpods" → "执行 kubectl get pods"
+    2. Compact commands — delegates to _compact_command_normalizer for known patterns
+
+    The CJK-ASCII boundary problem occurs because LLM tokenizers treat CJK and
+    ASCII characters as separate tokens, and the model does not reliably emit a
+    separating space between them. This is a known issue with multilingual LLM
+    output (see also: HuggingFace tokenizer issues for non-space-separated languages).
+    """
+    raw = _as_str(text)
+    if not raw:
+        return ""
+
+    result = raw
+
+    # ── Stage 1: Insert space at every CJK↔ASCII boundary ──
+    # CJK (Chinese/Japanese/Korean) before ASCII letter/digit
+    result = re.sub(
+        r"([一-鿿぀-ヿ가-힯])(?=[A-Za-z0-9])",
+        r"\1 ",
+        result,
+    )
+    # ASCII letter/digit before CJK
+    result = re.sub(
+        r"([A-Za-z0-9])(?=[一-鿿぀-ヿ가-힯])",
+        r"\1 ",
+        result,
+    )
+
+    # ── Stage 2: Repair SQL keyword gluing ──
+    # e.g. SELECTnameFROMsystem.tables → SELECT name FROM system.tables
+    # Use the same keyword lists as _detect_glued_clickhouse_keyword.
+    #
+    # Note: \b (word boundary) won't match when keyword is glued to adjacent
+    # word on either side (e.g. "nameFROM" has no boundary before FROM,
+    # "FROMsystem" has no boundary after FROM). We work around this by:
+    #   - multi-word repairs first (SHOWCREATETABLE → SHOW CREATE TABLE)
+    #   - space-AFTER: {keyword}(?=[A-Za-z0-9]) — no lookbehind needed,
+    #     inserts space when keyword is directly followed by alphanumeric
+    #   - space-BEFORE: (?<=[a-z0-9)]){keyword} — lookbehind for preceding
+    #     word char, inserts space when keyword is glued to previous word
+    _space_after = _SQL_KEYWORDS_REQUIRE_SPACE_AFTER
+    _space_before = _SQL_KEYWORDS_REQUIRE_SPACE_BEFORE
+    for compact, expanded in _SQL_COMPACT_MULTIWORD_REPAIRS:
+        result = re.sub(rf"(?i){compact}", expanded, result)
+    result = re.sub(r"(?i)EXPLAINSYNTAX", "EXPLAIN SYNTAX", result)
+    # After multi-word expansion, fix TABLE glued to identifier
+    # (e.g. SHOW CREATE TABLElogs → SHOW CREATE TABLE logs)
+    result = re.sub(r"(?i)(CREATE\s+TABLE)(?=[A-Za-z0-9])", r"\1 ", result)
+    result = re.sub(r"(?i)(SHOW\s+CREATE\s+TABLE)(?=[A-Za-z0-9])", r"\1 ", result)
+    for keyword in _space_after:
+        result = re.sub(
+            rf"(?i){keyword}(?=[A-Za-z0-9])",
+            f"{keyword} ",
+            result,
+        )
+    # Special case: BY followed by lowercase letter after multi-word repair
+    # (e.g. ORDER BYcountDESC → ORDER BY countDESC)
+    result = re.sub(r"(?i)\bBY(?=[a-z])", "BY ", result)
+    for keyword in _space_before:
+        # No (?=[A-Za-z0-9]) lookahead here — space-AFTER pass may have
+        # already inserted space after the keyword, and we don't want to
+        # skip the space-BEFORE fix just because of that.
+        result = re.sub(
+            rf"(?i)(?<=[a-z0-9)]){keyword}",
+            f" {keyword}",
+            result,
+        )
+
+    # ── Stage 3: delegate to compact_command_normalizer for kubectl/etc ──
+    result = _compact_command_normalizer(result)
+
+    # ── Stage 4: clean up double spaces ──
+    result = re.sub(r" {2,}", " ", result).strip()
+
+    return result
+
+
 def _canonicalize_kubectl_command_argv(command_argv: list[str]) -> list[str]:
     if not command_argv:
         return []

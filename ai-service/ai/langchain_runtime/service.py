@@ -13,7 +13,11 @@ from ai.langchain_runtime.memory import build_memory_context
 from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT, build_followup_prompt
 from ai.langchain_runtime.schemas import ActionItem, StructuredAnswer
 from ai.langchain_runtime.tools import collect_tool_observations
-from ai.followup_command_spec import compile_followup_command_spec, normalize_followup_command_spec
+from ai.followup_command_spec import (
+    _normalize_embedded_command_text,
+    compile_followup_command_spec,
+    normalize_followup_command_spec,
+)
 from ai.followup_planning_helpers import _resolve_followup_evidence_window
 from ai.llm_stream_helpers import collect_chat_response
 
@@ -815,13 +819,17 @@ def _resolve_renderable_action_command(action: Any) -> str:
 
 def _render_structured_answer(answer: StructuredAnswer) -> str:
     lines: List[str] = []
-    conclusion = _as_str(answer.conclusion)
+    conclusion = _normalize_embedded_command_text(_as_str(answer.conclusion))
     if conclusion:
         lines.append(f"结论：{conclusion}")
 
     if answer.request_flow:
         lines.append("请求流程：")
-        lines.extend(f"- {item}" for item in answer.request_flow if _as_str(item))
+        lines.extend(
+            f"- {_normalize_embedded_command_text(item)}"
+            for item in answer.request_flow
+            if _as_str(item)
+        )
 
     if answer.root_causes:
         lines.append("根因分析：")
@@ -838,8 +846,12 @@ def _render_structured_answer(answer: StructuredAnswer) -> str:
             key=lambda item: int(getattr(item, "priority", 1) or 1),
         )
         for action in sorted_actions:
-            action_text = _as_str(getattr(action, "action", ""))
-            title = _as_str(getattr(action, "title", ""))
+            action_text = _normalize_embedded_command_text(
+                _as_str(getattr(action, "action", ""))
+            )
+            title = _normalize_embedded_command_text(
+                _as_str(getattr(action, "title", ""))
+            )
             command = _resolve_renderable_action_command(action)
             outcome = _as_str(getattr(action, "expected_outcome", ""))
             rendered_text = action_text or title
@@ -852,7 +864,11 @@ def _render_structured_answer(answer: StructuredAnswer) -> str:
 
     if answer.verification:
         lines.append("验证：")
-        lines.extend(f"- {item}" for item in answer.verification if _as_str(item))
+        lines.extend(
+            f"- {_normalize_embedded_command_text(item)}"
+            for item in answer.verification
+            if _as_str(item)
+        )
 
     if answer.rollback:
         lines.append("回滚：")
@@ -860,9 +876,13 @@ def _render_structured_answer(answer: StructuredAnswer) -> str:
 
     if answer.missing_evidence:
         lines.append("仍缺失证据：")
-        lines.extend(f"- {item}" for item in answer.missing_evidence if _as_str(item))
+        lines.extend(
+            f"- {_normalize_embedded_command_text(item)}"
+            for item in answer.missing_evidence
+            if _as_str(item)
+        )
 
-    summary = _as_str(answer.summary)
+    summary = _normalize_embedded_command_text(_as_str(answer.summary))
     if summary:
         lines.append(f"补充说明：{summary}")
 

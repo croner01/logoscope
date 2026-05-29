@@ -1237,12 +1237,19 @@ def _build_followup_react_loop(
         safe_expected = _as_str(expected_signal).strip().lower()
         if not safe_expected:
             return True, "expected_signal_missing"
-        expected_tokens = [
+        expected_tokens_raw = [
             token
             for token in re.findall(r"[a-z0-9_./:-]{4,}|[\u4e00-\u9fff]{2,}", safe_expected, flags=re.IGNORECASE)
             if token not in {"证据", "命令", "日志", "查询", "输出", "current", "error", "warn"}
         ][:8]
+        # 过滤掉纯 CJK token——它们来自中文 purpose，不可能出现在系统命令输出中。
+        expected_tokens = [
+            t for t in expected_tokens_raw
+            if not re.fullmatch(r"[\u4e00-\u9fff]+", t)
+        ]
         if not expected_tokens:
+            if expected_tokens_raw:
+                return True, "all_tokens_cjk_skipped"
             return True, "expected_signal_tokens_empty"
         evidence_text = " ".join(
             [
@@ -2114,32 +2121,65 @@ def _extract_namespace_from_observations(
     observations: List[Dict[str, Any]],
 ) -> Dict[str, str]:
     """
-    从 kubectl get pods -A 输出的观察中提取 app→namespace 映射。
+    从 kubectl get pods 输出的观察中提取 app→namespace 映射。
+
+    同时支持两种输出格式：
+    - kubectl get pods -A（含 NAMESPACE 列）
+    - kubectl get pods -n <ns>（无 NAMESPACE 列，从 command 字段中解析 namespace）
 
     解析逻辑：
-    1. 从 stdout 找出所有 "NAMESPACE   NAME" 格式的 pod 行
-    2. 从 pod name 前缀（第一个 '-' 之前的部分）推断 app 名
-    3. 映射到 namespace（第一列）
+    1. 通过表头行检测输出格式
+    2. -A 格式：第一列 NAMESPACE、第二列 NAME → 直接映射
+    3. -n <ns> 格式：第一列 NAME，从 command 中解析 -n <ns> → 映射到该 namespace
+    4. 从 pod name 前缀（第一个 '-' 之前的部分）推断 app 名
 
     Returns:
         {app_name: namespace, ...}  — 空 dict 表示没有发现
     """
     mapping: Dict[str, str] = {}
-    pod_line_re = re.compile(r"^(\S+)\s+([a-zA-Z][a-zA-Z0-9_-]+)", re.MULTILINE)
 
     for obs in observations:
         stdout = _as_str(obs.get("stdout"))
         if not stdout.strip():
             continue
-        for match in pod_line_re.finditer(stdout):
-            namespace = match.group(1)
-            raw_name = match.group(2)
-            if not raw_name or raw_name.upper() in ("NAME", "NAMESPACE", "READY", "STATUS", "RESTARTS", "AGE"):
+
+        lines = stdout.strip().splitlines()
+        header_line = next((ln.strip() for ln in lines if ln.strip()), "")
+        if not header_line:
+            continue
+
+        KNOWN_HEADERS = frozenset({"NAME", "NAMESPACE", "READY", "STATUS", "RESTARTS", "AGE", "POD"})
+
+        if header_line.startswith("NAMESPACE"):
+            # kubectl get pods -A 格式：第一列 NAMESPACE，第二列 NAME
+            pod_line_re = re.compile(r"^(\S+)\s+([a-zA-Z][a-zA-Z0-9_-]+)", re.MULTILINE)
+            for match in pod_line_re.finditer(stdout):
+                namespace = match.group(1)
+                raw_name = match.group(2)
+                if raw_name.upper() in KNOWN_HEADERS:
+                    continue
+                app = raw_name.split("-")[0] if "-" in raw_name else raw_name
+                if app and namespace and app not in mapping:
+                    mapping[app] = namespace
+        else:
+            # kubectl get pods -n <ns> 格式：第一列 NAME（无 NAMESPACE 列）
+            # 从 command 字段解析 namespace
+            command = _as_str(obs.get("command"))
+            ns_match = re.search(r'(?:^|\s)-n\s+(\S+)', command)
+            if not ns_match:
                 continue
-            # 从 pod name 前提取 app 名（第一个 '-' 之前的部分）
-            app = raw_name.split("-")[0] if "-" in raw_name else raw_name
-            if app and namespace and app not in mapping:
-                mapping[app] = namespace
+            namespace = ns_match.group(1)
+
+            # 第一列是 pod name（以字母开头，字母/数字/连字符），第二列是 READY（如 1/1）
+            pod_line_re = re.compile(r"^([a-zA-Z][a-zA-Z0-9_-]+)\s+\S+", re.MULTILINE)
+            for match in pod_line_re.finditer(stdout):
+                raw_name = match.group(1)
+                if raw_name.upper() in KNOWN_HEADERS:
+                    continue
+                app = raw_name.split("-")[0] if "-" in raw_name else raw_name
+                if app and app not in mapping:
+                    mapping[app] = namespace
+
     return mapping
 
 
