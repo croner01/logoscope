@@ -1744,3 +1744,206 @@ def test_select_followup_react_iteration_actions_dedup_case_insensitive():
     assert len(selected_commands) == 1, (
         f"Expected 1 unique command, got {len(selected_commands)}: {selected_commands}"
     )
+
+
+# ── Task 4: LLM replan callback ──────────────────────────
+
+
+async def _mock_run_followup_readonly_auto_exec(**kwargs):
+    """返回模拟的 kubectl get pods 输出。"""
+    actions = kwargs.get("actions") or []
+    observations = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_id = action.get("id", "")
+        command = action.get("command", "")
+        observations.append({
+            "action_id": action_id,
+            "command": command,
+            "status": "executed",
+            "exit_code": 0,
+            "stdout": (
+                "NAMESPACE   NAME    READY   STATUS\n"
+                "default     temporal-xxx   1/1     Running\n"
+            ),
+            "command_run_id": f"run-{action_id}" if action_id else "run-mock",
+        })
+    return observations
+
+
+def test_llm_replan_callback_triggers_when_replan_needed(monkeypatch):
+    from ai.followup_orchestration_helpers import _run_followup_auto_exec_react_loop
+
+    replan_called = {"count": 0}
+
+    async def mock_replan_callback(**kwargs):
+        replan_called["count"] += 1
+        return [
+            {
+                "id": "replan-1",
+                "title": "check temporal logs",
+                "command": "kubectl logs deploy/temporal -n default --tail=50",
+                "command_type": "query",
+                "executable": True,
+                "expected_outcome": "查看temporal日志",
+            }
+        ]
+
+    def mock_build_react_loop(*, actions, action_observations, analysis_context=None):
+        from ai.followup_planning_helpers import _build_followup_react_loop
+        return _build_followup_react_loop(
+            actions=actions,
+            action_observations=action_observations,
+            analysis_context=analysis_context,
+        )
+
+    monkeypatch.setattr(
+        "ai.followup_orchestration_helpers._run_followup_readonly_auto_exec",
+        _mock_run_followup_readonly_auto_exec,
+    )
+    monkeypatch.setattr("ai.followup_orchestration_helpers._resolve_followup_react_max_iterations", lambda: 5)
+
+    bundle = asyncio.run(_run_followup_auto_exec_react_loop(
+        session_id="test-session",
+        message_id="test-msg",
+        actions=[
+            {
+                "id": "a1",
+                "title": "list pods",
+                "command": "kubectl get pods -A -l app=temporal",
+                "command_type": "query",
+                "executable": True,
+                "expected_signal": "返回temporal服务pod列表",
+            },
+        ],
+        analysis_context={},
+        run_blocking=None,
+        build_react_loop_fn=mock_build_react_loop,
+        allow_auto_exec_readonly=True,
+        executed_commands=set(),
+        initial_action_observations=[],
+        initial_evidence_gaps=["需要查看temporal日志"],
+        initial_summary="test llm replan",
+        emit_iteration_thoughts=False,
+        event_callback=None,
+        logger=None,
+        llm_replan_callback=mock_replan_callback,
+    ))
+    assert isinstance(bundle, dict)
+    assert "react_loop" in bundle
+
+
+def test_llm_replan_callback_returns_none_does_not_break_loop(monkeypatch):
+    """当 LLM replan callback 返回 None 时，循环应正常终止而不报错。"""
+    from ai.followup_orchestration_helpers import _run_followup_auto_exec_react_loop
+
+    callback_called = {"count": 0}
+
+    async def mock_replan_none(**kwargs):
+        callback_called["count"] += 1
+        return None
+
+    def mock_build_react_loop(*, actions, action_observations, analysis_context=None):
+        from ai.followup_planning_helpers import _build_followup_react_loop
+        return _build_followup_react_loop(
+            actions=actions,
+            action_observations=action_observations,
+            analysis_context=analysis_context,
+        )
+
+    monkeypatch.setattr(
+        "ai.followup_orchestration_helpers._run_followup_readonly_auto_exec",
+        _mock_run_followup_readonly_auto_exec,
+    )
+    monkeypatch.setattr("ai.followup_orchestration_helpers._resolve_followup_react_max_iterations", lambda: 3)
+
+    bundle = asyncio.run(_run_followup_auto_exec_react_loop(
+        session_id="test-session",
+        message_id="test-msg",
+        actions=[
+            {
+                "id": "a1",
+                "title": "list pods",
+                "command": "kubectl get pods -A -l app=temporal",
+                "command_type": "query",
+                "executable": True,
+                "expected_signal": "返回temporal服务pod列表",
+            },
+        ],
+        analysis_context={},
+        run_blocking=None,
+        build_react_loop_fn=mock_build_react_loop,
+        allow_auto_exec_readonly=True,
+        executed_commands=set(),
+        initial_action_observations=[],
+        initial_evidence_gaps=["需要查看temporal日志"],
+        initial_summary="test llm replan none",
+        emit_iteration_thoughts=False,
+        event_callback=None,
+        logger=None,
+        llm_replan_callback=mock_replan_none,
+    ))
+    assert isinstance(bundle, dict)
+    assert "react_loop" in bundle
+    assert bundle["react_loop"].get("replan", {}).get("needed", True), (
+        "Expected replan needed since evidence gaps remain"
+    )
+
+
+def test_deterministic_propagation_converges_within_single_request(monkeypatch):
+    """确定性证据传播应在一个请求内收敛，无需触发 LLM replan。"""
+    from ai.followup_orchestration_helpers import _run_followup_auto_exec_react_loop
+
+    callback_called = {"count": 0}
+
+    async def never_called(**kwargs):
+        callback_called["count"] += 1
+        return None
+
+    def mock_build_react_loop(*, actions, action_observations, analysis_context=None):
+        from ai.followup_planning_helpers import _build_followup_react_loop
+        return _build_followup_react_loop(
+            actions=actions,
+            action_observations=action_observations,
+            analysis_context=analysis_context,
+        )
+
+    monkeypatch.setattr(
+        "ai.followup_orchestration_helpers._run_followup_readonly_auto_exec",
+        _mock_run_followup_readonly_auto_exec,
+    )
+    monkeypatch.setattr("ai.followup_orchestration_helpers._resolve_followup_react_max_iterations", lambda: 3)
+
+    bundle = asyncio.run(_run_followup_auto_exec_react_loop(
+        session_id="test-session",
+        message_id="test-msg",
+        actions=[
+            {
+                "id": "a1",
+                "title": "list pods",
+                "command": "kubectl get pods -A -l app=temporal",
+                "command_type": "query",
+                "executable": True,
+                "expected_signal": "temporal default running",
+            },
+        ],
+        analysis_context={},
+        run_blocking=None,
+        build_react_loop_fn=mock_build_react_loop,
+        allow_auto_exec_readonly=True,
+        executed_commands=set(),
+        initial_action_observations=[],
+        initial_evidence_gaps=["need temporal info"],
+        initial_summary="test convergence",
+        emit_iteration_thoughts=False,
+        event_callback=None,
+        logger=None,
+    ))
+    assert isinstance(bundle, dict)
+    react_loop = bundle.get("react_loop", {})
+    replan = react_loop.get("replan", {}) if isinstance(react_loop.get("replan"), dict) else {}
+    assert not replan.get("needed", False), (
+        "Expected no replan needed after deterministic propagation fills evidence"
+    )
+    assert callback_called["count"] == 0, "LLM replan callback should not have been called"
