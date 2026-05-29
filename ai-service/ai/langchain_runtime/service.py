@@ -663,17 +663,33 @@ async def _repair_malformed_action_commands(
         original = item["command"]
         if original in repair_map:
             repair = repair_map[original]
-            _set_action_command(
-                structured.actions[item["index"]],
-                repair["fixed"],
-                repair.get("fixed_argv") or [],
-            )
-            logger.info(
-                "Repaired malformed command: %s -> %s",
-                original[:120],
-                repair["fixed"][:120],
-            )
-            updated += 1
+            if repair["fixed"] == original:
+                # LLM repair returned same string — treat as failure, try heuristic
+                import shlex
+                fixed = _normalize_action_command(original)
+                if fixed and fixed != original:
+                    try:
+                        fixed_argv = shlex.split(fixed)
+                    except Exception:
+                        fixed_argv = fixed.split()
+                    _set_action_command(
+                        structured.actions[item["index"]],
+                        fixed,
+                        fixed_argv,
+                    )
+                    updated += 1
+            else:
+                _set_action_command(
+                    structured.actions[item["index"]],
+                    repair["fixed"],
+                    repair.get("fixed_argv") or [],
+                )
+                logger.info(
+                    "Repaired malformed command: %s -> %s",
+                    original[:120],
+                    repair["fixed"][:120],
+                )
+                updated += 1
         else:
             # Heuristic fallback: normalize_action_command already handles many
             # compact patterns without needing an LLM call
