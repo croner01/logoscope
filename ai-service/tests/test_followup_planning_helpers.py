@@ -612,7 +612,9 @@ def test_build_followup_actions_drops_glued_generic_exec_command_from_display():
     )
 
 
-def test_build_followup_actions_repairs_invalid_command_spec_using_valid_command_and_clears_repair_reason():
+def test_build_followup_actions_normalizer_fixes_glued_command_in_spec():
+    """Glued command in command_spec is now fixed by _compact_command_normalizer,
+    so the action compiles successfully without needing repair."""
     actions = _build_followup_actions(
         question="获取 query-service pod 列表",
         answer="",
@@ -628,7 +630,7 @@ def test_build_followup_actions_repairs_invalid_command_spec_using_valid_command
                     "args": {
                         "command": "kubectl get pods-nislap-lapp=query-service",
                         "target_kind": "k8s_cluster",
-                        "target_identity": "cluster:kubernetes",
+                        "target_identity": "namespace:islap",
                         "timeout_s": 30,
                     },
                 },
@@ -642,9 +644,6 @@ def test_build_followup_actions_repairs_invalid_command_spec_using_valid_command
     assert action["command"] == "kubectl get pods -n islap -l app=query-service"
     assert action["command_spec"]["tool"] == "generic_exec"
     assert action["executable"] is True
-    assert action["reason"] == ""
-    assert action["spec_repaired"] is True
-    assert action["spec_repair_from_reason"] in {"unsupported_command_head", "invalid_kubectl_token"}
 
 
 def test_build_followup_actions_infers_command_spec_when_missing_for_query_command():

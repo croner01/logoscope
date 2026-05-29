@@ -269,7 +269,9 @@ def test_extract_structured_actions_prefers_command_spec_compile_over_raw_comman
     assert "unsupported_clickhouse_readonly_query" in reason or "glued_sql_tokens" in reason
 
 
-def test_extract_structured_actions_missing_command_spec_is_not_executable():
+def test_extract_structured_actions_auto_wraps_free_text_command_as_generic_exec():
+    """Free-text commands without command_spec are auto-wrapped as generic_exec
+    and go through compile_followup_command_spec (including normalizer)."""
     answer = StructuredAnswer(
         actions=[
             ActionItem(
@@ -288,8 +290,9 @@ def test_extract_structured_actions_missing_command_spec_is_not_executable():
 
     assert len(actions) == 1
     assert actions[0]["command"] == "kubectl logs deploy/query-service -n islap --tail=50"
-    assert actions[0]["executable"] is False
-    assert "missing_structured_spec" in str(actions[0]["reason"])
+    assert actions[0]["command_spec"]["tool"] == "generic_exec"
+    assert actions[0]["executable"] is True
+    assert "missing_structured_spec" not in str(actions[0].get("reason") or "")
 
 
 def test_extract_structured_actions_supports_generic_exec_command_spec():

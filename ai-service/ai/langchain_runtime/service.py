@@ -873,6 +873,11 @@ def _extract_structured_actions(answer: StructuredAnswer) -> List[Dict[str, Any]
         command = ""
         command_display = _normalize_action_command(getattr(action, "command", ""))
         command_spec_compile_reason = ""
+        if not command_spec and not skill_name and command_display:
+            # Auto-wrap free-text commands as generic_exec so they go through
+            # compile_followup_command_spec (including _compact_command_normalizer)
+            # instead of being treated as unvalidated free-text.
+            command_spec = {"tool": "generic_exec", "args": {"command": command_display}}
         if skill_name and not command_spec:
             command_spec_compile_reason = ""
         elif not command_spec:
