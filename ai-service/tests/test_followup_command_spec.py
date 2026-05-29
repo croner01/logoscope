@@ -106,7 +106,8 @@ def test_compile_followup_command_spec_supports_generic_exec():
     assert result["command_spec"]["args"]["target_identity"] == "namespace:islap"
 
 
-def test_compile_followup_command_spec_rejects_glued_command_head_in_generic_exec():
+def test_compile_followup_command_spec_now_fixes_glued_command_head_in_generic_exec():
+    """Glued commands like kubectlgetpods are now fixed by _compact_command_normalizer."""
     result = compile_followup_command_spec(
         {
             "tool": "generic_exec",
@@ -119,8 +120,8 @@ def test_compile_followup_command_spec_rejects_glued_command_head_in_generic_exe
         }
     )
 
-    assert result["ok"] is False
-    assert result["reason"] == "glued_command_tokens"
+    assert result["ok"] is True
+    assert result["command"] == "kubectl get pods -n islap -l app=query-service"
 
 
 @pytest.mark.parametrize(
@@ -168,21 +169,23 @@ def test_compile_followup_command_spec_canonicalizes_compact_kubectl_flags():
     assert result["command"] == "kubectl get pods -n islap -l app=query-service"
 
 
-def test_compile_followup_command_spec_rejects_kubectl_positional_token_with_equals():
+def test_compile_followup_command_spec_now_fixes_compact_kubectl_positional_token_with_equals():
+    """Compact kubectl tokens with glued flags like pods-nislap-lapp= query-service
+    are now fixed by _compact_command_normalizer before compilation."""
     result = compile_followup_command_spec(
         {
             "tool": "generic_exec",
             "args": {
                 "command": "kubectl get pods-nislap-lapp=query-service",
                 "target_kind": "k8s_cluster",
-                "target_identity": "cluster:kubernetes",
+                "target_identity": "namespace:islap",
                 "timeout_s": 30,
             },
         }
     )
 
-    assert result["ok"] is False
-    assert result["reason"] == "invalid_kubectl_token"
+    assert result["ok"] is True
+    assert result["command"] == "kubectl get pods -n islap -l app=query-service"
 
 
 def test_compile_followup_command_spec_infers_k8s_target_when_runtime_default_is_passed():

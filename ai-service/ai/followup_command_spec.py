@@ -666,9 +666,11 @@ def _compact_command_normalizer(text: Any) -> str:
     result = re.sub(r"(?i)(?<!\S)-l([a-z0-9_.-]+=[a-z0-9_.:/-]+)(?=\s|$)", r"-l \1", result)
     result = re.sub(r"(?i)(?<!\S)-o(jsonpath=[^\s]+|json|yaml|wide|name)(?=\s|$)", r"-o \1", result)
 
-    # Stage 6b: handle -l<key>=<value> where -l needs a space inserted
+    # Stage 6b: handle -l<key>=<value> and -n<ns> where -l/-n needs a space inserted
+    # but the value isn't followed by whitespace (e.g. -nislap-lapp=...)
+    # Note: must have (?<!\S) to avoid splitting within hyphenated words (e.g. query-service-nislap)
     result = re.sub(r"(?i)(?<!\S)-l(?=[a-z][a-z0-9_.-]*=)", "-l ", result)
-    result = re.sub(r"(?i)-n([a-z0-9][-a-z0-9]*)(?!\S)", r"-n \1", result)
+    result = re.sub(r"(?i)(?<!\S)-n([a-z0-9][-a-z0-9]*)(?!\S)", r"-n \1", result)
 
     # Clean up any double spaces introduced
     result = re.sub(r" {2,}", " ", result).strip()
@@ -1023,6 +1025,7 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
         if not command_argv:
             if not command_text:
                 return {"ok": False, "reason": "command is required in command_spec.args"}
+            command_text = _compact_command_normalizer(command_text)
             try:
                 command_argv = [item for item in shlex.split(command_text) if _as_str(item).strip()]
             except Exception:
