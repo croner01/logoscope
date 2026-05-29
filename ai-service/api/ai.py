@@ -46,7 +46,7 @@ from ai.followup_prompt_helpers import (
 from ai.followup_planning_helpers import (
     _append_followup_react_summary,
     _build_followup_actions,
-    _build_followup_llm_replan_context,
+    _build_llm_replan_context,
     _build_followup_react_loop,
     _build_followup_subgoals,
     _prioritize_followup_actions_with_react_memory,
@@ -6444,7 +6444,7 @@ async def _run_follow_up_analysis_core(
         logger: Optional[Any] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """LLM 重规划回调：使用执行上下文调用大模型生成新动作。"""
-        replan_context = _build_followup_llm_replan_context(
+        replan_context = _build_llm_replan_context(
             original_question=original_question,
             analysis_context=analysis_context,
             all_observations=all_observations,
