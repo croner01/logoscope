@@ -729,3 +729,59 @@ def test_build_command_spec_self_repair_payload_fixes_selector_namespace_glue_wi
     args = suggested.get("args") if isinstance(suggested.get("args"), dict) else {}
     assert payload.get("fix_code") == "suspicious_selector_namespace_glue"
     assert str(args.get("command") or "") == "kubectl get pods -l app=query-service -n islap"
+
+
+class TestCompactCommandNormalizer:
+    """Test _compact_command_normalizer across all known compact patterns."""
+
+    def test_kubectl_verb_glued_to_getpods(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        raw = "kubectlgetpods-A-lapp=temporal"
+        result = _compact_command_normalizer(raw)
+        assert result == "kubectl get pods -A -l app=temporal", f"got: {result}"
+
+    def test_kubectl_verb_glued_to_logs_with_flags(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        raw = "kubectllogs-nislap-lapp=temporal--since-time=2026-05-29T06:44:00Z--tail=100"
+        result = _compact_command_normalizer(raw)
+        assert "kubectl" in result
+        assert "logs" in result.split()
+        assert "-n" in result.split()
+        assert "islap" in result.split()
+        assert "-l" in result.split()
+        assert "app=temporal" in result.split()
+        assert "--since-time=2026-05-29T06:44:00Z" in result.split()
+        assert "--tail=100" in result.split()
+
+    def test_already_correct_command_unchanged(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        raw = "kubectl get pods -A -l app=temporal"
+        result = _compact_command_normalizer(raw)
+        assert result == raw
+
+    def test_non_kubectl_command_unchanged(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        raw = "echo hello world"
+        result = _compact_command_normalizer(raw)
+        assert result == raw
+
+    def test_kubectl_describe_pod_expansion(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        raw = "kubectldescribepods-nislap"
+        result = _compact_command_normalizer(raw)
+        assert "describe" in result.split()
+        assert "pods" in result.split()
+        assert "-n" in result.split()
+        assert "islap" in result.split()
+
+    def test_stage6_short_flag_concatenation(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        raw = "kubectl get pods -A-lapp=temporal"
+        result = _compact_command_normalizer(raw)
+        assert "-A" in result.split()
+        assert "-l" in result.split()
+
+    def test_empty_string_returns_empty(self):
+        from ai.followup_command_spec import _compact_command_normalizer
+        assert _compact_command_normalizer("") == ""
+        assert _compact_command_normalizer(None) == ""

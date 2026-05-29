@@ -601,6 +601,81 @@ def _detect_glued_command_head(head: str) -> str:
     return ""
 
 
+def _compact_command_normalizer(text: Any) -> str:
+    """Pre-process command text before shlex.split to insert missing spaces
+    in LLM-generated compact commands (e.g. 'kubectlgetpods' → 'kubectl get pods').
+
+    Uses entirely deterministic regex — no LLM call.
+    Order matters: flag expansion must happen after value--flag split.
+    """
+    raw = _as_str(text)
+    if not raw:
+        return ""
+
+    result = raw
+
+    # Stage 1: kubectl<letter> → kubectl <verb>
+    # Simply insert a space when kubectl is directly followed by a letter (no space).
+    # The verb extraction happens in Stage 2/3 via _KUBECTL_COMPACT_VERB_EXPANSIONS.
+    result = re.sub(r"(?i)^kubectl(?=[a-z])", "kubectl ", result)
+    result = re.sub(r"(?i)(?<=\s)kubectl(?=[a-z])", "kubectl ", result)
+
+    # Stage 2: expand compact verbs (getpods → get pods, etc.)
+    for compact, expanded in _KUBECTL_COMPACT_VERB_EXPANSIONS.items():
+        result = re.sub(rf"(?i)(?<!\w){compact}(?!\w)", " ".join(expanded), result)
+
+    # Stage 3: <known_verb>-<attached_flag> → <known_verb> -<attached_flag>
+    _kubectl_verbs = "get|describe|logs|exec|top|rollout|apply|delete|patch|edit|replace|scale|set|annotate|label|create|expose"
+    result = re.sub(
+        rf"(?i)(\b(?:{_kubectl_verbs})\b)(?=-[a-zA-Z])",
+        r"\1 ",
+        result,
+    )
+
+    # Stage 3b: <resource>-<UPPERCASE_flag> → <resource> -<UPPERCASE_flag>
+    # e.g. "pods-A" → "pods -A" (single uppercase letters are standalone flags)
+    result = re.sub(r"(\w+)(?=-[A-Z](?:\s|$|[=-]))", r"\1 ", result)
+
+    # Stage 3c: <known_resource>-<short_flag> → <known_resource> -<short_flag>
+    # e.g. "pods-n" → "pods -n" (resource name directly followed by short flag)
+    # Note: uses capturing group instead of look-behind since Python re
+    # doesn't support variable-width look-behind (?<=\s|^).
+    _k8s_resource_types = "pods?|svc|nodes?|events?|deployments?|namespaces?|services|endpoints|ingresses?|configmaps?|secrets?|daemonsets?|statefulsets?|jobs?|cronjobs?|pvc|pv|roles?|rolebindings?|serviceaccounts?|hpa|vpa|pdb|networkpolicies?|replicasets?"
+    result = re.sub(
+        rf"(?i)(^|\s)({_k8s_resource_types})(?=-[nloA])",
+        r"\1\2 ",
+        result,
+    )
+
+    # Stage 3d: <flag_value>-<next_flag> → <flag_value> -<next_flag>
+    # e.g. "-nislap-lapp=temporal" → "-n islap -lapp=temporal"
+    # Split at the boundary between a flag's value and the next flag
+    result = re.sub(r"(?i)(-n[a-z0-9][-a-z0-9]*)(?=-[lnoA])", r"\1 ", result)
+
+    # Stage 4: <value>--<flag> → <value> --<flag>
+    # Lookbehind: -- preceded by non-whitespace means missing space
+    result = re.sub(r"(?<=\S)--", " --", result)
+
+    # Stage 5: short flag concatenation -A-l → -A -l
+    # Must run BEFORE flag value glue to separate -A-lapp into -A -lapp
+    result = re.sub(r"(-[A-Za-z])(?=-[A-Za-z])", r"\1 ", result)
+
+    # Stage 6: short flag value glue: -n<ns>, -l<sel>, -o<fmt>
+    # Run AFTER Stage 5 so -lapp (now preceded by space) is handled correctly
+    result = re.sub(r"(?i)(?<!\S)-n([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)(?=\s|$)", r"-n \1", result)
+    result = re.sub(r"(?i)(?<!\S)-l([a-z0-9_.-]+=[a-z0-9_.:/-]+)(?=\s|$)", r"-l \1", result)
+    result = re.sub(r"(?i)(?<!\S)-o(jsonpath=[^\s]+|json|yaml|wide|name)(?=\s|$)", r"-o \1", result)
+
+    # Stage 6b: handle -l<key>=<value> where -l needs a space inserted
+    result = re.sub(r"(?i)(?<!\S)-l(?=[a-z][a-z0-9_.-]*=)", "-l ", result)
+    result = re.sub(r"(?i)-n([a-z0-9][-a-z0-9]*)(?!\S)", r"-n \1", result)
+
+    # Clean up any double spaces introduced
+    result = re.sub(r" {2,}", " ", result).strip()
+
+    return result
+
+
 def _canonicalize_kubectl_command_argv(command_argv: list[str]) -> list[str]:
     if not command_argv:
         return []
