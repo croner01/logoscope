@@ -3048,8 +3048,8 @@ def test_execute_ai_run_command_skips_duplicate_attempt_after_failed_terminal(mo
     first, second, events = asyncio.run(_run())
 
     assert first["status"] == "running"
-    assert second["status"] == "running"
-    assert len(create_calls) == 2
+    assert second["status"] == "needs_rethink"
+    assert len(create_calls) == 1
     duplicate_msgs = [
         str((item.get("payload") or {}).get("message") or "")
         for item in events["events"]

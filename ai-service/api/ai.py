@@ -1833,6 +1833,8 @@ async def _run_followup_runtime_task(
             "exit_code": last_exit_code,
             "timed_out": last_timed_out,
             "auto_executed": False,
+            "stdout": _as_str(summary_payload.get("last_command_stdout")),
+            "stderr": _as_str(summary_payload.get("last_command_error_detail")),
             "message": last_error_detail,
         })
     runtime_service._update_run_summary(  # noqa: SLF001

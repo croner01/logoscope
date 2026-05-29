@@ -119,7 +119,7 @@ spec:
               command:
               - /bin/sh
               - -lc
-              - sleep 15
+              - pg_ctl stop -m smart -D "$PGDATA" -w -t 45 || true
         resources:
           requests:
             cpu: 100m
@@ -208,6 +208,10 @@ spec:
           value: "20"
         - name: SQL_CONN_MAX_LIFETIME
           value: "1h"
+        - name: SQL_VIS_MAX_CONNS
+          value: "20"
+        - name: SQL_VIS_MAX_IDLE_CONNS
+          value: "10"
         ports:
         - containerPort: 7233
           name: grpc

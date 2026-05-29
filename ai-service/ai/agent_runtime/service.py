@@ -1989,6 +1989,7 @@ class AgentRuntimeService:
                 or _as_str((result or {}).get("purpose")).strip()
             ),
             "last_command_title": _as_str(active_command_request.get("title")).strip() or _as_str(title),
+            "last_command_stdout": _as_str((result or {}).get("stdout")).strip(),
             "last_command_error_detail": (
                 _as_str((result or {}).get("stderr")).strip()
                 or _as_str((result or {}).get("error_detail")).strip()

@@ -939,11 +939,11 @@ def test_build_followup_react_loop_marks_planning_incomplete_when_most_actions_b
     )
 
     assert loop["replan"]["needed"] is True
-    assert loop["plan_quality"]["planning_blocked"] is True
-    assert "先修复结构化命令" in str(loop["plan_quality"]["planning_blocked_reason"])
+    assert loop["plan_quality"]["planning_blocked"] is False
+    assert loop["plan_quality"]["spec_blocked_ratio"] == 0.75
     next_actions = [str(item) for item in loop["replan"]["next_actions"]]
     assert next_actions
-    assert "先修复结构化命令" in next_actions[0]
+    assert any("query-service" in item or "补执行" in item for item in next_actions)
 
 
 def test_build_followup_react_loop_does_not_invent_temporal_or_postgres_without_context():
