@@ -3,6 +3,7 @@ Tests for ai.langchain_runtime.service
 """
 
 import asyncio
+import json
 
 from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT
 from ai.langchain_runtime.schemas import ActionItem, StructuredAnswer
@@ -643,3 +644,152 @@ def test_run_followup_langchain_nl_extraction_exception():
     assert result["analysis_method"] == "langchain"
     # 异常被捕获，fallback 返回原始 NL 文本
     assert "需要进一步排查原因" in result["answer"]
+
+def test_needs_command_repair_detects_fused_kubectl():
+    """kubectl 命令压缩无空格应被检测为格式错误。"""
+    from ai.langchain_runtime.service import _needs_command_repair
+
+    assert _needs_command_repair("kubectl-nislaplogsdeployment/xxx--since-time=T--tail=20")
+    assert _needs_command_repair("kubectlgetpods")
+    assert _needs_command_repair("kubectldescribepodnginx")
+
+
+def test_needs_command_repair_detects_fused_sql():
+    """SQL 关键字后缺少空格应被检测。"""
+    from ai.langchain_runtime.service import _needs_command_repair
+
+    assert _needs_command_repair("SELECT * FROMsystem.query_log")
+    assert _needs_command_repair("SELECTcount(*) FROM system.query_log")
+    assert _needs_command_repair("ORDERBYevent_time")
+
+
+def test_needs_command_repair_passes_good_commands():
+    """格式正确的命令不应被标记。"""
+    from ai.langchain_runtime.service import _needs_command_repair
+
+    assert not _needs_command_repair("")
+    assert not _needs_command_repair("kubectl -n islap get pods")
+    assert not _needs_command_repair("kubectl -n islap logs deploy/query-service --tail=20")
+    assert not _needs_command_repair("SELECT * FROM system.query_log WHERE event_time > now()")
+    assert not _needs_command_repair("ls -la /tmp")
+    assert not _needs_command_repair("cat /var/log/syslog | grep error")
+
+
+class _CommandRepairMockLLM:
+    """主调用返回 JSON 含格式错误的命令，修复调用返回正确的命令。"""
+
+    def __init__(self):
+        self.call_count = 0
+        self.repair_call_received = None
+
+    async def chat(self, message, context=None, **kwargs):
+        return json.dumps([
+            {
+                "original": "kubectl-nislaplogsdeployment/matching-engine--since-time=T--tail=500",
+                "fixed": "kubectl -n islap logs deployment/matching-engine --since-time=T --tail=500",
+                "fixed_argv": ["kubectl", "-n", "islap", "logs", "deployment/matching-engine", "--since-time=T", "--tail=500"],
+            }
+        ])
+
+    async def chat_stream(self, message, context=None, **kwargs):
+        self.call_count += 1
+        context_engine = (context or {}).get("engine", "")
+        if context_engine == "langchain_command_repair":
+            self.repair_call_received = str(message)
+            yield await self.chat(message, context, **kwargs)
+            return
+        if self.call_count == 1:
+            yield json.dumps({
+                "conclusion": "需要查看 matching-engine 的日志",
+                "actions": [
+                    {
+                        "priority": 1,
+                        "title": "查看 matching-engine 日志",
+                        "action": "查看 matching-engine 日志",
+                        "command": "kubectl-nislaplogsdeployment/matching-engine--since-time=T--tail=500",
+                        "command_spec": {
+                            "tool": "generic_exec",
+                            "args": {
+                                "command": "kubectl-nislaplogsdeployment/matching-engine--since-time=T--tail=500",
+                                "target_kind": "k8s_cluster",
+                                "target_identity": "namespace:islap",
+                                "timeout_s": 30,
+                            },
+                        },
+                        "command_type": "query",
+                        "risk_level": "low",
+                        "executable": True,
+                        "expected_outcome": "查看 matching-engine 日志",
+                    }
+                ],
+                "summary": "需要先查看匹配引擎的日志",
+            })
+        else:
+            yield json.dumps({
+                "conclusion": "fallback",
+                "summary": "fallback",
+                "actions": [],
+            })
+
+
+def test_run_followup_langchain_command_repair_fixes_malformed_commands():
+    """格式错误的命令应被修复。"""
+    llm = _CommandRepairMockLLM()
+
+    async def _run():
+        return await run_followup_langchain(
+            **_build_runtime_kwargs(llm),
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["analysis_method"] == "langchain"
+    actions = result.get("actions") or []
+    assert len(actions) >= 1
+    # 检查命令已被修复（包含正确的空格）
+    repaired_cmd = actions[0].get("command", "")
+    assert "kubectl -n islap logs" in repaired_cmd or "kubectl-nislaplogs" not in repaired_cmd
+
+
+def test_run_followup_langchain_command_repair_does_not_break_good_commands():
+    """格式正确的命令不应被修复调用影响。"""
+    d = {
+        "conclusion": "系统正常",
+        "actions": [
+            {
+                "priority": 1,
+                "title": "查看 pod",
+                "action": "查看 pod",
+                "command": "kubectl -n islap get pods",
+                "command_spec": {
+                    "tool": "generic_exec",
+                    "args": {
+                        "command": "kubectl -n islap get pods",
+                        "target_kind": "k8s_cluster",
+                        "target_identity": "namespace:islap",
+                        "timeout_s": 30,
+                    },
+                },
+                "command_type": "query",
+                "risk_level": "low",
+                "executable": True,
+                "expected_outcome": "查看 pod 列表",
+            }
+        ],
+        "summary": "一切正常",
+    }
+    llm = DummyStreamingLLM([json.dumps(d)])
+
+    async def _run():
+        return await run_followup_langchain(
+            **_build_runtime_kwargs(llm),
+            stream_token_callback=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["analysis_method"] == "langchain"
+    actions = result.get("actions") or []
+    assert len(actions) >= 1
+    assert "kubectl -n islap get pods" in actions[0].get("command", "")

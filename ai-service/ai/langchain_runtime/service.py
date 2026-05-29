@@ -292,7 +292,26 @@ def _normalize_action_command(raw: Any) -> str:
     command = re.sub(r"(\bkubectl\s+)getpods(?=[\s\-]|$)", r"\1get pods", command, flags=re.IGNORECASE)
     command = re.sub(r"(\bkubectl\s+)describepods(?=[\s\-]|$)", r"\1describe pods", command, flags=re.IGNORECASE)
     command = re.sub(r"(\bkubectl\s+)describepod(?=[\s\-]|$)", r"\1describe pod", command, flags=re.IGNORECASE)
+    # Heuristic: fix verb directly followed by attached flag; e.g. "logs-ntemporal" → "logs -ntemporal"
+    command = re.sub(
+        r"(\bkubectl\s+(?:get|describe|logs|exec|delete|patch|edit|replace|scale|rollout|top|create|set|annotate|label|apply))(?=-[A-Za-z])",
+        r"\1 ",
+        command,
+        flags=re.IGNORECASE,
+    )
     command = re.sub(r"(\bkubectl\s+exec)\s*-n([A-Za-z0-9._-]+)-it(?=\s|$)", r"\1 -n \2 -it", command, flags=re.IGNORECASE)
+    # Fix "kubectl <verb> <resource>-<flag>" → "kubectl <verb> <resource> -<flag>"; e.g. "pods-A" → "pods -A"
+    # Only match when the flag letter is followed by "=" (flag value), "-" (next flag), or end-of-string
+    # to avoid splitting pod names like "my-pod-abc"
+    command = re.sub(
+        r"(\bkubectl\s+(?:get|describe|logs|exec|delete|patch|edit|replace|scale|rollout|top|create|set|annotate|label|apply)\s+\w+)"
+        r"(?=-[A-Za-z](?:[=-]|$))",
+        r"\1 ",
+        command,
+        flags=re.IGNORECASE,
+    )
+    # Fix concatenated short flags: "-A-lapp=temporal" → "-A -lapp=temporal"
+    command = re.sub(r"(-[A-Za-z])(?=-[A-Za-z])", r"\1 ", command)
     command = re.sub(r"(^|[\s(])-n([A-Za-z0-9._-]+)(?=-[A-Za-z])", r"\1-n \2 ", command, flags=re.IGNORECASE)
     command = re.sub(r"(^|[\s(])-l([A-Za-z0-9._-]+=)", r"\1-l \2", command, flags=re.IGNORECASE)
     command = re.sub(r"(^|[\s(])-o([A-Za-z][A-Za-z0-9_.-]*=)", r"\1-o \2", command, flags=re.IGNORECASE)
@@ -513,6 +532,171 @@ async def _extract_commands_from_nl(
             actions.append(action)
 
     return actions if actions else None
+
+
+def _get_action_command(action: Any) -> str:
+    """从 ActionItem 中提取命令字符串。"""
+    command = _as_str(getattr(action, "command", ""))
+    command_spec = getattr(action, "command_spec", None)
+    if command_spec is not None:
+        try:
+            if hasattr(command_spec, "command") and _as_str(command_spec.command):
+                if not command:
+                    command = _as_str(command_spec.command)
+            elif hasattr(command_spec, "args"):
+                args = command_spec.args
+                if hasattr(args, "command") and _as_str(args.command):
+                    if not command:
+                        command = _as_str(args.command)
+        except Exception:
+            pass
+    return command
+
+
+def _set_action_command(action: Any, command: str, command_argv: List[str]) -> None:
+    """设置 ActionItem 的命令和 command_argv。"""
+    action.command = command
+    command_spec = getattr(action, "command_spec", None)
+    if command_spec is not None:
+        try:
+            if hasattr(command_spec, "command"):
+                command_spec.command = command
+                command_spec.command_argv = list(command_argv)
+            elif hasattr(command_spec, "args"):
+                args = command_spec.args
+                if hasattr(args, "command"):
+                    args.command = command
+                if hasattr(args, "command_argv"):
+                    args.command_argv = list(command_argv)
+        except Exception:
+            pass
+
+
+def _needs_command_repair(command: str) -> bool:
+    """判断命令是否需要修复（格式问题导致无法正确分词）。"""
+    if not command:
+        return False
+    import shlex
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return True
+    # 单个 token 且看起来应该是多个 token
+    if len(tokens) <= 1:
+        lowered = tokens[0].lower() if tokens else command.lower()
+        if any(lowered.startswith(h) for h in ("kubectl", "clickhouse", "clickhouse-client", "curl")):
+            return True
+    # SQL 关键词语法错误（FROMsystem, ORDERBY 等）
+    for token in tokens:
+        if re.search(r'(?i)(FROM|WHERE|SELECT|HAVING|LIMIT|ORDERBY|GROUPBY|LEFTJOIN|RIGHTJOIN|INNERJOIN|FULLJOIN|CROSSJOIN|SHOWCREATETABLE|DESCRIBETABLE|EXPLAINTABLE)\w', token):
+            return True
+        if re.search(r'(?i)\w+(FROM|WHERE|SELECT|LIMIT)', token):
+            return True
+    return False
+
+
+async def _repair_malformed_action_commands(
+    *,
+    llm_service: Any,
+    structured: StructuredAnswer,
+    timeout_seconds: int,
+) -> bool:
+    """
+    修复 StructuredAnswer 中格式错误的命令（缺少空格、SQL 关键字粘连等）。
+    返回 True 表示至少修复了一个命令。
+    """
+    malformed: List[Dict[str, Any]] = []
+
+    for i, action in enumerate(structured.actions):
+        command = _get_action_command(action)
+        if _needs_command_repair(command):
+            malformed.append({"index": i, "command": command})
+
+    if not malformed:
+        return False
+
+    from ai.langchain_runtime.prompts import COMMAND_REPAIR_PROMPT
+
+    commands_json = json.dumps([m["command"] for m in malformed], ensure_ascii=False)
+    repair_prompt = COMMAND_REPAIR_PROMPT.format(commands_json=commands_json)
+
+    try:
+        result = await collect_chat_response(
+            llm_service=llm_service,
+            message=repair_prompt,
+            context={"engine": "langchain_command_repair"},
+            total_timeout_seconds=timeout_seconds,
+            first_token_timeout_seconds=max(1, timeout_seconds // 2),
+            on_token=None,
+        )
+    except Exception:
+        logger.warning("Command repair LLM call failed", exc_info=True)
+        return False
+
+    raw = _as_str(result).strip()
+    if not raw:
+        return False
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+
+    try:
+        repairs = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Command repair result not valid JSON")
+        return False
+
+    if not isinstance(repairs, list):
+        return False
+
+    repair_map: Dict[str, Dict[str, Any]] = {}
+    for r in repairs:
+        if isinstance(r, dict) and r.get("original") and r.get("fixed"):
+            repair_map[r["original"]] = {
+                "fixed": r["fixed"],
+                "fixed_argv": r.get("fixed_argv", []),
+            }
+
+    updated = 0
+    for item in malformed:
+        original = item["command"]
+        if original in repair_map:
+            repair = repair_map[original]
+            _set_action_command(
+                structured.actions[item["index"]],
+                repair["fixed"],
+                repair.get("fixed_argv") or [],
+            )
+            logger.info(
+                "Repaired malformed command: %s -> %s",
+                original[:120],
+                repair["fixed"][:120],
+            )
+            updated += 1
+        else:
+            # Heuristic fallback: normalize_action_command already handles many
+            # compact patterns without needing an LLM call
+            import shlex
+            fixed = _normalize_action_command(original)
+            if fixed and fixed != original:
+                try:
+                    fixed_argv = shlex.split(fixed)
+                except Exception:
+                    fixed_argv = fixed.split()
+                _set_action_command(
+                    structured.actions[item["index"]],
+                    fixed,
+                    fixed_argv,
+                )
+                logger.info(
+                    "Heuristic-repaired malformed command: %s -> %s",
+                    original[:120],
+                    fixed[:120],
+                )
+                updated += 1
+
+    return updated > 0
 
 
 def _sanitize_json_like_answer(raw: str) -> Dict[str, Any]:
@@ -1079,6 +1263,17 @@ async def run_followup_langchain(
             raise ValueError("llm empty answer")
 
         structured = _parse_structured_answer(answer_text)
+        if structured is not None:
+            # === Command repair: 修复 Phase 1 JSON 中格式错误的命令（缺少空格等） ===
+            try:
+                await _repair_malformed_action_commands(
+                    llm_service=llm_service,
+                    structured=structured,
+                    timeout_seconds=max(5, int(llm_timeout_seconds * 0.3)),
+                )
+            except Exception:
+                logger.warning("Command repair failed", exc_info=True)
+
         if structured is None:
             # === Retry: only when response is not JSON-like (format issue, not content issue) ===
             if not _looks_like_json_payload(answer_text):
@@ -1120,6 +1315,7 @@ async def run_followup_langchain(
                     logger.warning("LLM format retry failed, using original response", exc_info=True)
 
             # === Phase 2: NL 命令提取 ===
+            nl_actions = None
             if structured is None and not _looks_like_json_payload(answer_text):
                 try:
                     nl_namespace = _as_str(analysis_context.get("namespace")) or "islap"
@@ -1142,6 +1338,63 @@ async def run_followup_langchain(
                         summary="LLM 返回了自然语言分析，已提取可执行命令",
                         actions=[ActionItem(**a) for a in nl_actions],
                     )
+
+            # === Phase 2b: structured 存在但所有 actions 都不可执行时的 NL 提取兜底 ===
+            # nl_actions guard: Phase 2 已提取过时不再重复触发
+            if structured is not None and not nl_actions:
+                try:
+                    extracted_actions = _extract_structured_actions(structured)
+                except Exception:
+                    extracted_actions = []
+                if extracted_actions and not any(a.get("executable") for a in extracted_actions):
+                    # 从 structured 的字段中拼接自然语言文本，供 NL 提取使用
+                    nl_fields = []
+                    if _as_str(structured.conclusion):
+                        nl_fields.append(f"结论：{_as_str(structured.conclusion)}")
+                    if _as_str(structured.summary):
+                        nl_fields.append(f"分析摘要：{_as_str(structured.summary)}")
+                    for act in (structured.actions or []):
+                        parts = []
+                        t = _as_str(getattr(act, "title", ""))
+                        a = _as_str(getattr(act, "action", ""))
+                        e = _as_str(getattr(act, "expected_outcome", ""))
+                        c = _normalize_action_command(getattr(act, "command", ""))
+                        if t:
+                            parts.append(f"标题：{t}")
+                        if a:
+                            parts.append(f"动作：{a}")
+                        if c:
+                            parts.append(f"命令：{c}")
+                        if e:
+                            parts.append(f"预期结果：{e}")
+                        if parts:
+                            nl_fields.append("；".join(parts))
+                    nl_text = "\n".join(nl_fields)
+                    if nl_text.strip():
+                        try:
+                            nl_namespace = _as_str(analysis_context.get("namespace")) or "islap"
+                            nl_service_name = _as_str(analysis_context.get("service_name"))
+                            nl_fallback_actions = await _extract_commands_from_nl(
+                                llm_service=llm_service,
+                                nl_text=nl_text,
+                                original_question=question,
+                                timeout_seconds=max(5, int(llm_timeout_seconds * 0.4)),
+                                namespace=nl_namespace,
+                                service_name=nl_service_name,
+                            )
+                        except Exception:
+                            logger.warning("NL extraction fallback (Phase 2b) failed", exc_info=True)
+                            nl_fallback_actions = None
+                        if nl_fallback_actions:
+                            logger.info(
+                                "Phase 2b NL extraction recovered %d actions from non-executable structured answer",
+                                len(nl_fallback_actions),
+                            )
+                            structured = StructuredAnswer(
+                                conclusion=_as_str(structured.conclusion) or "从分析结果中提取诊断命令",
+                                summary="LLM 返回了结构化分析但命令不可执行，已从原文提取可执行命令",
+                                actions=[ActionItem(**a) for a in nl_fallback_actions],
+                            )
 
             if structured is None:
                 if _looks_like_json_payload(answer_text):
