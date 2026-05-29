@@ -662,6 +662,38 @@ class StorageAdapter:
         rows = self.execute_query(query, params=params if params else None)
         return self._format_edge_red_metrics_rows(rows)
 
+    def _ensure_clickhouse_client(self):
+        """
+        懒初始化/重连 ClickHouse 客户端。
+
+        当 ch_client 和 ch_http_client 均为 None 时（例如首次启动时
+        ClickHouse 尚未就绪），重新尝试建立连接。每次 execute_query
+        前调用，确保即使 ClickHouse 延迟可用也能自动恢复。
+        """
+        if self.ch_client or self.ch_http_client:
+            return
+
+        logger.info("Attempting to (re)connect to ClickHouse...")
+
+        # 优先尝试原生驱动
+        if CLICKHOUSE_DRIVER_AVAILABLE:
+            try:
+                self.ch_client = _ThreadLocalClickHouseClientProxy(
+                    client_factory=self._create_native_clickhouse_client,
+                )
+                self.ch_client.execute("SELECT 1")
+                logger.info("ClickHouse driver client reconnected successfully")
+                return
+            except Exception as e:
+                logger.warning("ClickHouse driver reconnection failed: %s, trying HTTP", e)
+                self.ch_client = None
+
+        # HTTP 客户端作为备用
+        if not self.ch_client:
+            self._init_http_client()
+            if self.ch_http_client:
+                logger.info("ClickHouse HTTP client reconnected successfully")
+
     def _create_native_clickhouse_client(self):
         """创建一个新的 ClickHouse Native Client 实例。"""
         return ClickHouseClient(
@@ -2642,6 +2674,8 @@ class StorageAdapter:
         Returns:
             List[Dict[str, Any]]: 查询结果字典列表
         """
+        self._ensure_clickhouse_client()
+
         template_summary = _compact_sql(query)
         should_log_info = _should_log_query_info(template_summary)
         if should_log_info:
@@ -2895,6 +2929,7 @@ class StorageAdapter:
             }
         }
         """
+        self._ensure_clickhouse_client()
         if not self.ch_client:
             return {}
 
