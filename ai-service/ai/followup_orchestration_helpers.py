@@ -1809,6 +1809,7 @@ async def _run_followup_auto_exec_react_loop(
     emit_iteration_thoughts: bool = True,
     event_callback: Optional[Any] = None,
     logger: Optional[Any] = None,
+    llm_replan_callback: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     在单次请求内执行多轮 ReAct 自动执行闭环。
@@ -1832,6 +1833,7 @@ async def _run_followup_auto_exec_react_loop(
         if _as_str(item).strip()
     ]
     active_summary = _as_str(initial_summary).strip()
+    _loop_deadline = time.perf_counter() + float(os.getenv("AI_FOLLOWUP_REQUEST_DEADLINE_SECONDS", "120"))
 
     for iteration in range(1, max_iterations + 1):
         # Always gate by executable query candidates, including the first round.
@@ -2052,7 +2054,29 @@ async def _run_followup_auto_exec_react_loop(
         )
         if len(observations) <= 0:
             break
-        if not bool((final_react_loop.get("replan") or {}).get("needed")):
+        replan_needed_for_cb = bool((final_react_loop.get("replan") or {}).get("needed"))
+        if replan_needed_for_cb and llm_replan_callback is not None:
+            remaining = _loop_deadline - time.perf_counter()
+            if remaining >= 25.0:
+                try:
+                    new_actions = await llm_replan_callback(
+                        original_question=_as_str(analysis_context.get("question", "")) if analysis_context else "",
+                        analysis_context=analysis_context,
+                        all_observations=all_observations,
+                        executed_commands=executed_commands or set(),
+                        current_evidence_gaps=next_actions or active_evidence_gaps,
+                        remaining_iterations=max_iterations - iteration,
+                        remaining_timeout=remaining - 5.0,
+                        event_callback=event_callback,
+                        logger=logger,
+                    )
+                except Exception as exc:
+                    logger and logger.warning("LLM replan callback failed: %s", exc)
+                    new_actions = None
+                if new_actions:
+                    working_actions.extend(new_actions)
+                    continue
+        if not replan_needed_for_cb:
             break
 
     if not final_react_loop:
