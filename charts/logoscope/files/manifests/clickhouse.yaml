@@ -815,7 +815,7 @@ spec:
             cpu: 1
             memory: 2Gi
           limits:
-            cpu: 2
+            cpu: 6
             memory: 4Gi
         startupProbe:
           exec:

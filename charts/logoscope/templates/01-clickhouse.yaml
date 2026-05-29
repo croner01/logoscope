@@ -1091,7 +1091,7 @@ spec:
             cpu: 1
             memory: 2Gi
           limits:
-            cpu: 2
+            cpu: 6
             memory: 4Gi
         startupProbe:
           exec:
@@ -1219,6 +1219,7 @@ spec:
           value: "9000"
         resources:
           limits:
+            cpu: 6
             memory: 2Gi
           requests:
             cpu: 500m
