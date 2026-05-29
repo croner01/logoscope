@@ -1205,3 +1205,92 @@ def test_extract_namespace_skips_empty_stdout():
     ]
     result = _extract_namespace_from_observations(observations)
     assert result == {}
+
+
+# ── Task 2: 确定性证据传播 ──────────────────────────────────
+
+
+def test_deterministic_propagation_fills_missing_evidence():
+    from ai.followup_planning_helpers import _build_followup_react_loop
+
+    actions = [
+        {
+            "id": "a1",
+            "title": "list temporal pods",
+            "command": "kubectl get pods -A -l app=temporal",
+            "command_type": "query",
+            "executable": True,
+            "expected_signal": "返回temporal服务pod列表及其namespace",
+        },
+        {
+            "id": "a2",
+            "title": "query temporal logs",
+            "command": "kubectl logs -n default deploy/temporal --tail=20",
+            "command_type": "query",
+            "executable": True,
+            "expected_outcome": "确认temporal服务pod所在namespace",
+            "expected_signal": "确认temporal服务pod所在namespace",
+        },
+    ]
+    observations = [
+        {
+            "action_id": "a1",
+            "status": "executed",
+            "exit_code": 0,
+            "command": "kubectl get pods -A -l app=temporal",
+            "stdout": (
+                "NAMESPACE   NAME                       READY   STATUS    RESTARTS   AGE\n"
+                "default     temporal-7b9c8f5d6-xk3m2   1/1     Running   0          5m\n"
+            ),
+            "command_run_id": "run-abc123",
+        },
+    ]
+    loop = _build_followup_react_loop(actions=actions, action_observations=observations)
+    assert loop["observe"]["propagation_hits"] >= 1, (
+        f"Expected propagation_hits >= 1, got {loop['observe'].get('propagation_hits')}"
+    )
+    slot_map = loop["observe"]["evidence_slot_map"]
+    a2_slot = next(
+        (s for s in slot_map.values() if s.get("action_id") == "a2"), None
+    )
+    assert a2_slot is not None, "a2 evidence slot should exist"
+    assert a2_slot.get("status") == "cross_filled", (
+        f"Expected cross_filled, got {a2_slot.get('status')}"
+    )
+
+
+def test_deterministic_propagation_no_hit_when_no_matching_observation():
+    from ai.followup_planning_helpers import _build_followup_react_loop
+
+    actions = [
+        {
+            "id": "a1",
+            "title": "list temporal pods",
+            "command": "kubectl get pods -A -l app=temporal",
+            "command_type": "query",
+            "executable": True,
+        },
+        {
+            "id": "a2",
+            "title": "check clickhouse connection",
+            "command": "kubectl logs deploy/query-service -n islap --tail=20",
+            "command_type": "query",
+            "executable": True,
+            "expected_signal": "确认clickhouse连接是否正常",
+        },
+    ]
+    observations = [
+        {
+            "action_id": "a1",
+            "status": "executed",
+            "exit_code": 0,
+            "command": "kubectl get pods -A -l app=temporal",
+            "stdout": (
+                "NAMESPACE   NAME    READY   STATUS    RESTARTS   AGE\n"
+                "default     temporal-xxx   1/1     Running   0          5m\n"
+            ),
+            "command_run_id": "run-abc123",
+        },
+    ]
+    loop = _build_followup_react_loop(actions=actions, action_observations=observations)
+    assert loop["observe"].get("propagation_hits", 0) == 0

@@ -1696,6 +1696,36 @@ def _build_followup_react_loop(
             "signal_match_reason": signal_match_reason,
         }
 
+    # === 确定性证据传播：跨动作观察自动填充缺失证据槽 ===
+    propagation_hits = 0
+    if evidence_missing_slots > 0:
+        for slot_id, slot_info in evidence_slot_map.items():
+            if not isinstance(slot_info, dict):
+                continue
+            if slot_info.get("status") in ("filled", "reused", "pending"):
+                continue
+            expected_signal = slot_info.get("expected_signal", "")
+            if not expected_signal:
+                continue
+            for obs in safe_observations:
+                if not isinstance(obs, dict):
+                    continue
+                obs_stdout = _as_str(obs.get("stdout"))
+                if not obs_stdout.strip():
+                    continue
+                signal_match, signal_reason = _match_expected_signal(expected_signal, obs)
+                if signal_match:
+                    slot_info["status"] = "cross_filled"
+                    slot_info["evidence_quality"] = "cross"
+                    slot_info["signal_match"] = True
+                    slot_info["signal_match_reason"] = f"cross_propagation:{signal_reason}"
+                    slot_info["source_obs_id"] = _as_str(obs.get("command_run_id"))
+                    propagation_hits += 1
+                    break
+        if propagation_hits:
+            evidence_filled_slots += propagation_hits
+            evidence_missing_slots -= propagation_hits
+
     ready_template_actions_total = sum(
         1
         for item in safe_actions
@@ -1875,6 +1905,7 @@ def _build_followup_react_loop(
             "evidence_reused_slots": evidence_reused_slots,
             "evidence_missing_slots": evidence_missing_slots,
             "evidence_partial_slots": evidence_partial_slots,
+            "propagation_hits": propagation_hits,
             "evidence_slot_map": evidence_slot_map,
         },
         "replan": {
