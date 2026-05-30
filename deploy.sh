@@ -365,6 +365,19 @@ deploy_exec_service() {
     print_success "Exec Service 部署完成"
 }
 
+# 部署 SSH Gateway
+deploy_ssh_gateway() {
+    print_header "部署 SSH Gateway"
+
+    kubectl apply -f "$DEPLOY_DIR/ssh-hosts-config.yaml"
+    kubectl apply -f "$DEPLOY_DIR/ssh-gateway.yaml"
+
+    print_info "等待 SSH Gateway 就绪..."
+    wait_for_deployment "$NAMESPACE" "ssh-gateway" 180
+
+    print_success "SSH Gateway 部署完成"
+}
+
 # 部署 Worker
 deploy_worker() {
     print_header "部署 Semantic Engine Worker"
@@ -514,6 +527,9 @@ deploy_all() {
     deploy_exec_service
     echo ""
 
+    deploy_ssh_gateway
+    echo ""
+
     deploy_worker
     echo ""
 
@@ -601,6 +617,7 @@ health_check() {
         "ai-service"
         "opa"
         "exec-service"
+        "ssh-gateway"
         "semantic-engine-worker"
         "query-service"
         "topology-service"
@@ -1248,7 +1265,7 @@ restart_component() {
             print_success "组件 $component 已重启"
             print_info "使用 '$0 status' 查看状态"
             ;;
-        neo4j|ingest-service|semantic-engine|ai-service|opa|exec-service|semantic-engine-worker|query-service|topology-service|otel-gateway|temporal|temporal-postgresql)
+        neo4j|ingest-service|semantic-engine|ai-service|opa|exec-service|ssh-gateway|semantic-engine-worker|query-service|topology-service|otel-gateway|temporal|temporal-postgresql)
             kubectl rollout restart deployment/"$component" -n "$NAMESPACE"
             print_success "组件 $component 已重启"
             print_info "使用 '$0 status' 查看状态"
@@ -1319,6 +1336,9 @@ show_logs() {
         exec-service)
             kubectl logs -l app=exec-service -n "$NAMESPACE" --tail="$lines"
             ;;
+        ssh-gateway)
+            kubectl logs -l app=ssh-gateway -n "$NAMESPACE" --tail="$lines"
+            ;;
         worker|semantic-engine-worker)
             kubectl logs -l app=semantic-engine-worker -n "$NAMESPACE" --tail="$lines"
             ;;
@@ -1342,7 +1362,7 @@ show_logs() {
             ;;
         *)
             print_error "未知组件: $component"
-            print_info "支持的组件: clickhouse, neo4j, redis, temporal, temporal-postgresql, ingest-service, semantic-engine, ai-service, opa, exec-service, worker, query-service, topology-service, frontend, fluent-bit, otel-collector, otel-gateway"
+            print_info "支持的组件: clickhouse, neo4j, redis, temporal, temporal-postgresql, ingest-service, semantic-engine, ai-service, opa, exec-service, ssh-gateway, worker, query-service, topology-service, frontend, fluent-bit, otel-collector, otel-gateway"
             return 1
             ;;
     esac
@@ -1371,6 +1391,7 @@ ${BLUE}部署命令:${NC}
     ai-service              部署 AI Service（LLM/会话/案例库/follow-up）
     opa                     部署 OPA Policy Engine（命令策略决策）
     exec-service            部署 Exec Service（命令预检/执行/审计）
+    ssh-gateway             部署 SSH Gateway（SSH 远程命令代理）
     worker                  部署 Semantic Engine Worker
     query-service           部署 Query Service（查询服务）
     topology-service        部署 Topology Service（拓扑服务）
@@ -1408,14 +1429,15 @@ ${BLUE}组件部署顺序:${NC}
     8. ai-service (AI API)
     9. opa (策略决策引擎)
     10. exec-service (命令执行服务)
-    11. worker (异步处理 Worker)
-    12. query-service (查询服务)
-    13. topology-service (拓扑服务)
-    14. fluent-bit (日志采集)
-    15. otel-collector (OTel 采集器)
-    16. otel-gateway (OTel 网关)
-    17. frontend (前端界面)
-    18. value-kpi-cronjob (价值指标周任务)
+    11. ssh-gateway (SSH 远程命令代理)
+    12. worker (异步处理 Worker)
+    13. query-service (查询服务)
+    14. topology-service (拓扑服务)
+    15. fluent-bit (日志采集)
+    16. otel-collector (OTel 采集器)
+    17. otel-gateway (OTel 网关)
+    18. frontend (前端界面)
+    19. value-kpi-cronjob (价值指标周任务)
 
 ${BLUE}服务地址:${NC}
     Ingest Service:  http://10.43.167.123:8080
@@ -1478,6 +1500,9 @@ main() {
             ;;
         exec-service)
             deploy_exec_service
+            ;;
+        ssh-gateway)
+            deploy_ssh_gateway
             ;;
         worker)
             deploy_worker

@@ -12,7 +12,7 @@ REGISTRY_PREFIX="${REGISTRY_PREFIX:-localhost:5000/logoscope}"
 DEFAULT_TAG="${DEFAULT_TAG:-latest}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SERVICES=(semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend)
+SERVICES=(semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend ssh-gateway)
 
 usage() {
   cat <<'EOF'
@@ -28,7 +28,7 @@ Usage:
   scripts/k8s-image-ops.sh rollout-status <service|all>
 
 Service list:
-  semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend
+  semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend ssh-gateway
 
 Notes:
   1) semantic-engine image update also updates semantic-engine-worker deployment.
@@ -85,7 +85,15 @@ build_one() {
 
   echo "[INFO] docker build ${image} (${service}/)"
 
-  cd "$PROJECT_ROOT" && docker build -t "$image" -f "${service}/Dockerfile" .
+  case "$service" in
+    ssh-gateway)
+      # ssh-gateway has a self-contained Dockerfile that expects build context within the service dir
+      cd "$PROJECT_ROOT/${service}" && docker build -t "$image" -f Dockerfile .
+      ;;
+    *)
+      cd "$PROJECT_ROOT" && docker build -t "$image" -f "${service}/Dockerfile" .
+      ;;
+  esac
 }
 
 push_one() {
@@ -114,6 +122,9 @@ set_image_one() {
       ;;
     exec-service)
       kubectl -n "$NAMESPACE" set image deployment/exec-service exec-service="$image"
+      ;;
+    ssh-gateway)
+      kubectl -n "$NAMESPACE" set image deployment/ssh-gateway ssh-gateway="$image"
       ;;
     toolbox-gateway)
       kubectl -n "$NAMESPACE" set image deployment/toolbox-gateway toolbox-gateway="$image"
@@ -150,6 +161,10 @@ apply_one() {
     exec-service)
       kubectl apply -f "${PROJECT_ROOT}/deploy/exec-service.yaml"
       ;;
+    ssh-gateway)
+      kubectl apply -f "${PROJECT_ROOT}/deploy/ssh-gateway.yaml"
+      kubectl apply -f "${PROJECT_ROOT}/deploy/ssh-hosts-config.yaml"
+      ;;
     toolbox-gateway)
       kubectl apply -f "${PROJECT_ROOT}/deploy/toolbox-gateway.yaml"
       ;;
@@ -179,7 +194,7 @@ restart_one() {
       kubectl -n "$NAMESPACE" rollout restart deployment/semantic-engine
       kubectl -n "$NAMESPACE" rollout restart deployment/semantic-engine-worker
       ;;
-    ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend)
+    ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend|ssh-gateway)
       kubectl -n "$NAMESPACE" rollout restart "deployment/${service}"
       ;;
     *)
@@ -196,7 +211,7 @@ rollout_status_one() {
       kubectl -n "$NAMESPACE" rollout status deployment/semantic-engine
       kubectl -n "$NAMESPACE" rollout status deployment/semantic-engine-worker
       ;;
-    ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend)
+    ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend|ssh-gateway)
       kubectl -n "$NAMESPACE" rollout status "deployment/${service}"
       ;;
     *)
