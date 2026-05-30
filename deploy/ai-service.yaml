@@ -72,7 +72,7 @@ data:
   AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS: "15"
   AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS: "200"
   AI_RUNTIME_V4_GRAPH_CHECKPOINT_TABLE: "logs.ai_runtime_v4_graph_checkpoints"
-  AI_RUNTIME_V4_REMOTE_TARGETS_JSON: '[{"target_kind":"k8s_cluster","target_identity":"namespace:openstack-cluster-01","display_name":"OpenStack K8s Cluster","description":"OpenStack-provisioned Kubernetes cluster","metadata":{"cluster_id":"openstack-cluster-01","risk_tier":"high","preferred_executor_profiles":["toolbox-k8s-readonly","toolbox-k8s-mutating"]},"capabilities":["read_logs","restart_workload","helm_read","helm_mutation"],"credential_scope":{"kubeconfig_name":"openstack-cluster-01"}}]'
+  AI_RUNTIME_V4_REMOTE_TARGETS_JSON: '[{"target_kind":"k8s_cluster","target_identity":"namespace:openstack-cluster-01","display_name":"OpenStack K8s Cluster","description":"OpenStack-provisioned Kubernetes cluster","metadata":{"cluster_id":"openstack-cluster-01","risk_tier":"high","preferred_executor_profiles":["toolbox-k8s-readonly","toolbox-k8s-mutating"]},"capabilities":["read_logs","restart_workload","helm_read","helm_mutation"],"credential_scope":{"kubeconfig_name":"openstack-cluster-01"}},{"target_kind":"host_node","target_identity":"host:node-3","display_name":"OpenStack Node-3","description":"OpenStack compute node node-3","metadata":{"cluster_id":"openstack-cluster-01","node_name":"node-3","risk_tier":"high","preferred_executor_profiles":["host-ssh-readonly","host-ssh-mutating"]},"capabilities":["read_host_state","host_mutation"],"credential_scope":{"ssh_host":"node-3"}}]'
 ---
 apiVersion: v1
 kind: Service
