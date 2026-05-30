@@ -1872,6 +1872,9 @@ const AIAnalysis: React.FC = () => {
   const [analysisAssistNotice, setAnalysisAssistNotice] = useState<string>('');
   const [crossLogLoading, setCrossLogLoading] = useState(false);
   const [historyHint, setHistoryHint] = useState<string>('');
+  // ── 布局 UI 状态 ──
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [activeRightTab, setActiveRightTab] = useState<'result' | 'kb' | 'actions'>('result');
   const [kbRemoteEnabled, setKbRemoteEnabled] = useState(false);
   const [kbRetrievalMode, setKbRetrievalMode] = useState<'local' | 'hybrid' | 'remote_only'>('local');
   const [kbSaveMode, setKbSaveMode] = useState<'local_only' | 'local_and_remote'>('local_only');
@@ -5710,60 +5713,102 @@ const AIAnalysis: React.FC = () => {
 
       {/* 三栏主布局 */}
       <div className="flex flex-1 min-h-0 gap-3">
-        {/* ── 左侧历史面板 ── */}
-        <div className="w-60 shrink-0 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 bg-slate-50 shrink-0">
-            <span className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
-              <History className="w-3.5 h-3.5 text-indigo-500" />
-              历史记录
-            </span>
-            <span className="text-[11px] text-slate-400">{historyItems.length}/{historyTotalAll || historyItems.length}</span>
+        {/* ── 左侧历史面板（可折叠） ── */}
+        <div
+          className={`shrink-0 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden transition-all duration-300 ${
+            historyCollapsed ? 'w-10' : 'w-56'
+          }`}
+        >
+          {/* 头部：标题 + 折叠按钮 */}
+          <div className="flex items-center justify-between px-2.5 py-2.5 border-b border-gray-100 bg-slate-50 shrink-0">
+            {!historyCollapsed && (
+              <span className="text-xs font-semibold text-gray-700 flex items-center gap-1.5 truncate">
+                <History className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                历史记录
+                <span className="text-[10px] text-slate-400 font-normal">{historyItems.length}/{historyTotalAll || historyItems.length}</span>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setHistoryCollapsed(!historyCollapsed)}
+              title={historyCollapsed ? '展开历史面板' : '折叠历史面板'}
+              className={`p-1 rounded hover:bg-slate-200 text-slate-400 hover:text-slate-600 transition-colors shrink-0 ${historyCollapsed ? 'mx-auto' : ''}`}
+            >
+              {historyCollapsed ? (
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+              ) : (
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+              )}
+            </button>
           </div>
-          <div className="flex-1 overflow-auto p-2 space-y-1.5 min-h-0">
-            {loadingHistoryItems ? (
-              <div className="text-xs text-gray-400 py-4 text-center">加载中…</div>
-            ) : historyItems.length > 0 ? (
-              historyItems.map((item) => (
+          {/* 折叠时只显示图标列 */}
+          {historyCollapsed ? (
+            <div className="flex-1 overflow-auto py-2 flex flex-col items-center gap-1.5">
+              {historyItems.slice(0, 8).map((item) => (
                 <button
                   type="button"
                   key={item.session_id}
+                  title={item.title || item.summary || item.session_id}
                   onClick={() => handleOpenHistorySession(item.session_id)}
-                  className={`w-full text-left rounded-md border px-2.5 py-2 transition-colors hover:bg-indigo-50 hover:border-indigo-200 ${
+                  className={`w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-bold transition-colors ${
                     analysisSessionId === item.session_id
-                      ? 'border-indigo-300 bg-indigo-50'
-                      : 'border-slate-100 bg-white'
+                      ? 'bg-indigo-100 text-indigo-700 border border-indigo-300'
+                      : 'bg-slate-50 text-slate-400 border border-slate-100 hover:bg-indigo-50 hover:text-indigo-600'
                   }`}
                 >
-                  <div className="text-[11px] font-medium text-gray-800 truncate leading-snug">
-                    {item.is_pinned ? '📌 ' : ''}{item.title || item.summary || item.session_id}
-                  </div>
-                  <div className="text-[10px] text-gray-400 mt-0.5 truncate">
-                    {item.service_name || 'unknown'} · {item.analysis_type || 'log'}
-                  </div>
-                  <div className="text-[10px] text-gray-400">{toLocaleTime(item.created_at)}</div>
+                  {item.is_pinned ? '📌' : (item.analysis_type === 'trace' ? '🔀' : '📋')}
                 </button>
-              ))
-            ) : (
-              <div className="text-xs text-gray-400 py-8 text-center">
-                <History className="w-8 h-8 mx-auto mb-2 text-gray-200" />
-                暂无历史记录
-              </div>
-            )}
-          </div>
-          {!loadingHistoryItems && historyHasMore && (
-            <div className="shrink-0 px-2 pb-2">
-              <button
-                type="button"
-                onClick={handleLoadMoreHistoryItems}
-                disabled={loadingMoreHistoryItems}
-                className="w-full px-2 py-1.5 text-[11px] rounded border border-indigo-100 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
-              >
-                {loadingMoreHistoryItems ? '加载中…' : '加载更多'}
-              </button>
+              ))}
             </div>
-          )}
-          {historyHint && (
-            <div className="shrink-0 px-2 pb-2 text-[11px] text-amber-600">{historyHint}</div>
+          ) : (
+            <>
+              <div className="flex-1 overflow-auto p-2 space-y-1.5 min-h-0">
+                {loadingHistoryItems ? (
+                  <div className="text-xs text-gray-400 py-4 text-center">加载中…</div>
+                ) : historyItems.length > 0 ? (
+                  historyItems.map((item) => (
+                    <button
+                      type="button"
+                      key={item.session_id}
+                      onClick={() => handleOpenHistorySession(item.session_id)}
+                      className={`w-full text-left rounded-md border px-2.5 py-2 transition-colors hover:bg-indigo-50 hover:border-indigo-200 ${
+                        analysisSessionId === item.session_id
+                          ? 'border-indigo-300 bg-indigo-50'
+                          : 'border-slate-100 bg-white'
+                      }`}
+                    >
+                      <div className="text-[11px] font-medium text-gray-800 truncate leading-snug">
+                        {item.is_pinned ? '📌 ' : ''}{item.title || item.summary || item.session_id}
+                      </div>
+                      <div className="text-[10px] text-gray-400 mt-0.5 truncate">
+                        {item.service_name || 'unknown'} · {item.analysis_type || 'log'}
+                      </div>
+                      <div className="text-[10px] text-gray-400">{toLocaleTime(item.created_at)}</div>
+                    </button>
+                  ))
+                ) : (
+                  <div className="text-xs text-gray-400 py-8 text-center">
+                    <History className="w-8 h-8 mx-auto mb-2 text-gray-200" />
+                    暂无历史记录
+                  </div>
+                )}
+              </div>
+              {!loadingHistoryItems && historyHasMore && (
+                <div className="shrink-0 px-2 pb-2">
+                  <button
+                    type="button"
+                    onClick={handleLoadMoreHistoryItems}
+                    disabled={loadingMoreHistoryItems}
+                    className="w-full px-2 py-1.5 text-[11px] rounded border border-indigo-100 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                  >
+                    {loadingMoreHistoryItems ? '加载中…' : '加载更多'}
+                  </button>
+                </div>
+              )}
+              {historyHint && (
+                <div className="shrink-0 px-2 pb-2 text-[11px] text-amber-600">{historyHint}</div>
+              )}
+            </>
           )}
         </div>
 
@@ -5835,70 +5880,71 @@ const AIAnalysis: React.FC = () => {
             </div>
 
             {analysisType === 'log' && (
-              <div className="rounded-md border border-gray-200 bg-gray-50 p-2.5">
-                <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <div>
+              <details className="rounded-md border border-gray-200 bg-gray-50 group" open={!!serviceErrorSnapshot}>
+                <summary className="flex items-center justify-between gap-2 px-2.5 py-2 cursor-pointer list-none">
+                  <div className="flex items-center gap-2">
+                    <svg className="w-3.5 h-3.5 text-slate-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
                     <span className="text-xs font-medium text-gray-700">服务报错样本</span>
                     {hasSnapshotForCurrentService && serviceErrorSnapshotLoadedAt && (
-                      <span className="ml-2 text-[11px] text-slate-500">
+                      <span className="text-[11px] text-slate-500">
                         {trimmedServiceName} · {serviceErrorSnapshot?.rawLogs?.length || 0}条 · {toLocaleTime(serviceErrorSnapshotLoadedAt)}
                       </span>
                     )}
                   </div>
                   <button
                     type="button"
-                    onClick={handleLoadServiceErrorSnapshot}
+                    onClick={(e) => { e.preventDefault(); handleLoadServiceErrorSnapshot(); }}
                     disabled={loadingServiceErrorSnapshot || !trimmedServiceName}
                     className="px-2.5 py-1 text-[11px] font-medium rounded bg-slate-200 text-slate-700 hover:bg-slate-300 disabled:opacity-50 shrink-0"
                   >
                     {serviceSnapshotButtonText}
                   </button>
-                </div>
-
-                {serviceErrorSnapshotError && (
-                  <div className="text-xs text-red-600 mb-2">{serviceErrorSnapshotError}</div>
-                )}
-
-                {serviceErrorSnapshot && (
-                  <div className="space-y-1.5">
-                    <div className="rounded border border-blue-100 bg-blue-50 p-2">
-                      <div className="text-[11px] font-medium text-blue-700 mb-1">摘要信息</div>
-                      <ul className="text-[11px] text-blue-700 space-y-0.5">
-                        {serviceErrorSnapshot.summaryLines.map((line, idx) => (
-                          <li key={`summary-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div className="rounded border border-gray-200 bg-white p-2">
-                      <div className="text-[11px] font-medium text-gray-700 mb-1">未汇总原始日志（前 5 条）</div>
-                      <div className="space-y-0.5 max-h-24 overflow-auto">
-                        {serviceErrorSnapshot.rawLogs.slice(0, 5).map((item) => (
-                          <div key={item.id || `${item.timestamp}-${item.message}`} className="text-[10px] text-gray-700 font-mono">
-                            [{item.level}] {item.timestamp ? `${toLocaleTime(item.timestamp)} ` : ''}{item.message}
-                          </div>
-                        ))}
+                </summary>
+                <div className="px-2.5 pb-2.5 space-y-1.5">
+                  {serviceErrorSnapshotError && (
+                    <div className="text-xs text-red-600">{serviceErrorSnapshotError}</div>
+                  )}
+                  {serviceErrorSnapshot && (
+                    <>
+                      <div className="rounded border border-blue-100 bg-blue-50 p-2">
+                        <div className="text-[11px] font-medium text-blue-700 mb-1">摘要信息</div>
+                        <ul className="text-[11px] text-blue-700 space-y-0.5">
+                          {serviceErrorSnapshot.summaryLines.map((line, idx) => (
+                            <li key={`summary-${idx}`}>{line}</li>
+                          ))}
+                        </ul>
                       </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setInputText(serviceErrorSnapshot.generatedInput)}
-                        className="px-2.5 py-1 text-[11px] rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
-                      >
-                        填充到输入框
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleAnalyzeServiceErrorSnapshot}
-                        disabled={isLoading}
-                        className="px-2.5 py-1 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
-                      >
-                        直接提交分析
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
+                      <div className="rounded border border-gray-200 bg-white p-2">
+                        <div className="text-[11px] font-medium text-gray-700 mb-1">未汇总原始日志（前 5 条）</div>
+                        <div className="space-y-0.5 max-h-24 overflow-auto">
+                          {serviceErrorSnapshot.rawLogs.slice(0, 5).map((item) => (
+                            <div key={item.id || `${item.timestamp}-${item.message}`} className="text-[10px] text-gray-700 font-mono">
+                              [{item.level}] {item.timestamp ? `${toLocaleTime(item.timestamp)} ` : ''}{item.message}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setInputText(serviceErrorSnapshot.generatedInput)}
+                          className="px-2.5 py-1 text-[11px] rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                        >
+                          填充到输入框
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleAnalyzeServiceErrorSnapshot}
+                          disabled={isLoading}
+                          className="px-2.5 py-1 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                        >
+                          直接提交分析
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </details>
             )}
 
             {useLLM && (
@@ -5923,20 +5969,7 @@ const AIAnalysis: React.FC = () => {
                 className="w-full h-36 px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono text-sm resize-y bg-white"
               />
             </div>
-            {/* 错误提示 */}
-            {error && (
-              <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center text-red-700">
-                <AlertCircle className="w-5 h-5 mr-2 shrink-0" />
-                <span className="text-sm">{error}</span>
-              </div>
-            )}
-            {analysisAssistNotice && (
-              <div className="mt-3 p-2 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs">
-                {analysisAssistNotice}
-              </div>
-            )}
-
-            {/* 错误提示 */}
+            {/* 错误 / 辅助提示 */}
             {error && (
               <div className="p-2.5 bg-red-50 border border-red-200 rounded-md flex items-start gap-2 text-red-700">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -5992,583 +6025,168 @@ const AIAnalysis: React.FC = () => {
           </div>
           </div>
 
-          {/* ── 分析结果卡片 ── */}
-          <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex-1 min-h-0 overflow-auto">
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-slate-50 sticky top-0 z-10">
-              <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
-                <Zap className="w-4 h-4 text-amber-500" />
-                分析结果
+          {/* ── AI 追问对话面板（独立主体，充分利用剩余高度） ── */}
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex-1 min-h-0 flex flex-col overflow-hidden">
+            {/* Chat 头部 */}
+            <div className="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 bg-slate-50 shrink-0">
+              <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                <MessageCircle className="w-4 h-4 text-indigo-500" />
+                AI 追问对话
+                {followUpMessages.length > 0 && (
+                  <span className="text-[11px] bg-emerald-50 border border-emerald-200 text-emerald-700 px-1.5 py-0.5 rounded font-normal">
+                    {followUpMessages.length} 条消息
+                  </span>
+                )}
               </h3>
-              {llmInfo && (
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                  {llmInfo.method === 'llm' ? (
-                    <>
-                      <BrainCircuit className="w-3.5 h-3.5 text-purple-500" />
-                      <span className="text-purple-600 font-medium">LLM</span>
-                      {llmInfo.model && <span className="text-gray-400">({llmInfo.model})</span>}
-                      {llmInfo.cached && <span className="text-green-500">缓存</span>}
-                      {llmInfo.latency_ms && <span>{llmInfo.latency_ms}ms</span>}
-                    </>
-                  ) : llmInfo.method === 'none' ? (
-                    <>
-                      <AlertCircle className="w-3.5 h-3.5 text-gray-400" />
-                      <span className="text-gray-500">LLM 未启用</span>
-                    </>
-                  ) : (
-                    <>
-                      <Zap className="w-3.5 h-3.5 text-amber-500" />
-                      <span className="text-amber-600">规则引擎</span>
-                    </>
+              <div className="flex items-center gap-2">
+                {tokenHint.warning && (
+                  <span className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                    ⚡ 上下文较长，已启用压缩
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={resetFollowUpConversation}
+                  disabled={followUpLoading || followUpMessages.length === 0}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  新对话
+                </button>
+              </div>
+            </div>
+
+            {/* Chat 消息滚动区 */}
+            <div
+              ref={followUpListRef}
+              onScroll={handleFollowUpListScroll}
+              className="flex-1 overflow-auto px-3 py-3 space-y-3 min-h-0 bg-slate-50"
+            >
+              {followUpMessages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-center py-12">
+                  <MessageCircle className="w-10 h-10 text-gray-200 mb-3" />
+                  <p className="text-sm text-gray-400 font-medium">AI 追问对话</p>
+                  <p className="text-xs text-gray-400 mt-1 max-w-xs">
+                    分析完成后，可基于结果连续追问。例如：「优先排查哪条根因？」「给出具体修复步骤」
+                  </p>
+                  {!result && (
+                    <p className="text-xs text-gray-300 mt-3">请先提交分析，追问功能将在分析完成后启用</p>
                   )}
                 </div>
-              )}
-            </div>
-
-            {isLoading ? (
-              <LoadingState message={useLLM ? "LLM 正在深度分析..." : "AI 正在分析..."} />
-            ) : result ? (
-              <div className="space-y-6">
-                {contextPills.length > 0 && (
-                  <div className="rounded-lg border border-indigo-100 bg-indigo-50 p-3">
-                    <div className="text-xs font-medium text-indigo-700 mb-2">上下文挂载</div>
-                    <div className="flex flex-wrap gap-2">
-                      {contextPills.map((pill) => (
-                        <span
-                          key={`${pill.key}:${pill.value}`}
-                          className="inline-flex items-center rounded-full border border-indigo-200 bg-white px-2 py-1 text-[11px] text-indigo-700"
-                        >
-                          {pill.key}: {pill.value}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 摘要 */}
-                {result.overview && (
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                    <h4 className="font-medium text-blue-800 mb-2">分析摘要</h4>
-                    <p className="text-sm text-blue-700 mb-2">{result.overview.description || result.overview.problem}</p>
-                    <div className="flex items-center gap-2 text-xs text-blue-600">
-                      <span>置信度: {Math.round((result.overview.confidence || 0) * 100)}%</span>
-                      <span>•</span>
-                      <span>级别: {result.overview.severity}</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* 数据路径分析 */}
-                {result.dataFlow && (
-                  <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-4">
-                    <div className="flex items-center mb-2">
-                      <Network className="w-5 h-5 text-cyan-600 mr-2" />
-                      <h4 className="font-medium text-cyan-900">数据路径分析</h4>
-                    </div>
-                    {result.dataFlow.summary && (
-                      <p className="text-sm text-cyan-800 mb-2">{result.dataFlow.summary}</p>
-                    )}
-                    {Array.isArray(result.dataFlow.path) && result.dataFlow.path.length > 0 && (
-                      <ol className="space-y-2">
-                        {result.dataFlow.path.map((item, index) => (
-                          <li key={index} className="rounded border border-cyan-200 bg-white p-2 text-xs">
-                            <div className="font-medium text-cyan-900">
-                              #{item.step || index + 1} {item.component || 'unknown'}
-                            </div>
-                            {item.operation && <div className="text-cyan-800 mt-1">操作: {item.operation}</div>}
-                            {item.from && item.to && (
-                              <div className="text-cyan-700 mt-1">流向: {item.from} → {item.to}</div>
-                            )}
-                            {item.evidence && <div className="text-cyan-700 mt-1">证据: {item.evidence}</div>}
-                            {(item.status || item.latency_ms) && (
-                              <div className="text-cyan-700 mt-1">
-                                {item.status ? `状态: ${item.status}` : ''}
-                                {item.status && item.latency_ms ? ' · ' : ''}
-                                {item.latency_ms ? `耗时: ${item.latency_ms}ms` : ''}
-                              </div>
-                            )}
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                    {Array.isArray(result.dataFlow.evidence) && result.dataFlow.evidence.length > 0 && (
-                      <div className="mt-3 text-xs text-cyan-800">
-                        关键证据: {result.dataFlow.evidence.join('；')}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 根因分析 */}
-                {result.rootCauses && result.rootCauses.length > 0 && (
-                  <div>
-                    <div className="flex items-center mb-3">
-                      <Bug className="w-5 h-5 text-red-500 mr-2" />
-                      <h4 className="font-medium text-gray-900">可能根因</h4>
-                    </div>
-                    <ul className="space-y-2">
-                      {result.rootCauses.map((cause, index) => (
-                        <li key={index} className="text-sm">
-                          <div className="font-medium text-gray-800 mb-1">{cause.title}</div>
-                          <div className="text-gray-600">{cause.description}</div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* 处理思路 */}
-                {result.handlingIdeas && result.handlingIdeas.length > 0 && (
-                  <div>
-                    <div className="flex items-center mb-3">
-                      <MessageCircle className="w-5 h-5 text-indigo-500 mr-2" />
-                      <h4 className="font-medium text-gray-900">处理思路</h4>
-                    </div>
-                    <ul className="space-y-2">
-                      {result.handlingIdeas.map((idea, index) => (
-                        <li key={index} className="text-sm">
-                          <div className="font-medium text-gray-800 mb-1">{idea.title}</div>
-                          <div className="text-gray-600">{idea.description}</div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* 解决建议 */}
-                {result.solutions && result.solutions.length > 0 && (
-                  <div>
-                    <div className="flex items-center mb-3">
-                      <Lightbulb className="w-5 h-5 text-yellow-500 mr-2" />
-                      <h4 className="font-medium text-gray-900">解决建议</h4>
-                    </div>
-                    <ul className="space-y-3">
-                      {result.solutions.map((solution, index) => (
-                        <li key={index} className="text-sm">
-                          <div className="font-medium text-gray-800 mb-1">{solution.title}</div>
-                          <div className="text-gray-600 mb-2">{solution.description}</div>
-                          {solution.steps && solution.steps.length > 0 && (
-                            <ol className="ml-4 space-y-1">
-                              {solution.steps.map((step, stepIdx) => (
-                                <li key={stepIdx} className="text-gray-700 text-xs">{step}</li>
-                              ))}
-                            </ol>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-              </div>
-            ) : (
-              <EmptyState
-                icon={<BrainCircuit className="w-12 h-12 text-gray-400" />}
-                title="等待分析"
-                description='输入日志或追踪数据，点击"开始分析"获取 AI 智能分析结果'
-              />
-            )}
-          </div>
-        </div>
-
-        {/* ── 右侧功能面板 ── */}
-        <div className="w-80 shrink-0 flex flex-col gap-3 overflow-auto min-h-0">
-          <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h4 className="font-medium text-indigo-900">知识库联动与提交</h4>
-              {kbRuntimeLoading ? (
-                <span className="text-xs text-indigo-600 inline-flex items-center gap-1">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  策略校验中
-                </span>
               ) : (
-                <span className="text-xs text-indigo-600">
-                  生效: 检索 {kbEffectiveRetrievalMode} / 保存 {kbEffectiveSaveMode}
-                </span>
-              )}
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-              <label className="inline-flex items-center gap-2 text-sm text-indigo-800">
-                <input
-                  type="checkbox"
-                  checked={kbRemoteEnabled}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setKbRemoteEnabled(checked);
-                    setKbRetrievalMode((current) => (checked ? (current === 'local' ? 'hybrid' : current) : 'local'));
-                    if (!checked) {
-                      setKbSaveMode('local_only');
+                followUpMessages.map((msg, index) => {
+                  const assistantMessageOrder = msg.role === 'assistant'
+                    ? followUpMessages
+                      .slice(0, index + 1)
+                      .filter((item) => item.role === 'assistant')
+                      .length
+                    : 0;
+                  const suppressPlanningForMessage = assistantMessageOrder > 1;
+                  const messageMetadata = (msg.metadata && typeof msg.metadata === 'object')
+                    ? msg.metadata
+                    : undefined;
+                  const messageSubgoals = Array.isArray(messageMetadata?.subgoals)
+                    ? messageMetadata.subgoals as FollowUpSubgoal[]
+                    : [];
+                  const messageReflection = (messageMetadata?.reflection && typeof messageMetadata.reflection === 'object')
+                    ? messageMetadata.reflection as FollowUpReflection
+                    : undefined;
+                  const reflectionActions = Array.isArray(messageReflection?.next_actions)
+                    ? messageReflection?.next_actions || []
+                    : [];
+                  const reflectionGaps = Array.isArray(messageReflection?.gaps)
+                    ? messageReflection?.gaps || []
+                    : [];
+                  const messageActions = Array.isArray(messageMetadata?.actions)
+                    ? normalizeFollowUpActions(messageMetadata.actions)
+                    : [];
+                  const messageThoughtTimeline = msg.role === 'assistant' && FOLLOWUP_SHOW_THOUGHT_ENABLED
+                    ? buildFollowUpThoughtTimelineFromMetadata(messageMetadata, {
+                      suppressPlanning: suppressPlanningForMessage,
+                    })
+                    : [];
+                  const streamLoading = Boolean(messageMetadata?.stream_loading);
+                  const streamStage = String(messageMetadata?.stream_stage || '').trim();
+                  const resolvedMessageId = String(
+                    msg.message_id || (messageMetadata as UnknownObject)?.stream_message_id || '',
+                  ).trim();
+                  const messageObservations = Array.isArray(messageMetadata?.action_observations)
+                    ? messageMetadata.action_observations as Array<Record<string, unknown>>
+                    : [];
+                  const messageApprovals = Array.isArray(messageMetadata?.approval_required)
+                    ? messageMetadata.approval_required as Array<Record<string, unknown>>
+                    : [];
+                  const observationsByActionId = new Map<string, Record<string, unknown>>();
+                  const observationsByCommand = new Map<string, Record<string, unknown>>();
+                  const approvalsByActionId = new Map<string, Record<string, unknown>>();
+                  const approvalsByCommand = new Map<string, Record<string, unknown>>();
+                  messageObservations.forEach((item) => {
+                    if (!item || typeof item !== 'object') {
+                      return;
                     }
-                  }}
-                />
-                启用远端知识库
-              </label>
-              <label className="text-xs text-indigo-700">
-                检索策略
-                <select
-                  value={kbRetrievalMode}
-                  onChange={(e) => setKbRetrievalMode(e.target.value as 'local' | 'hybrid' | 'remote_only')}
-                  className="mt-1 w-full rounded border border-indigo-200 bg-white px-2 py-1"
-                  disabled={!kbRemoteEnabled}
-                >
-                  <option value="local">仅本地</option>
-                  <option value="remote_only">仅远端</option>
-                  <option value="hybrid">本地 + 远端</option>
-                </select>
-              </label>
-              <label className="text-xs text-indigo-700">
-                保存策略
-                <select
-                  value={kbSaveMode}
-                  onChange={(e) => setKbSaveMode(e.target.value as 'local_only' | 'local_and_remote')}
-                  className="mt-1 w-full rounded border border-indigo-200 bg-white px-2 py-1"
-                >
-                  <option value="local_only">仅存本地</option>
-                  <option value="local_and_remote" disabled={!kbRemoteEnabled || !kbRemoteAvailable}>本地 + 远端</option>
-                </select>
-              </label>
-            </div>
-            {kbRuntimeNotice && (
-              <div className="text-xs text-amber-700 rounded border border-amber-200 bg-amber-50 px-2 py-1">
-                {kbRuntimeNotice}
-              </div>
-            )}
-            {kbRemoteEnabled && !kbRemoteAvailable && (
-              <div className="text-xs text-amber-700 rounded border border-amber-200 bg-amber-50 px-2 py-1">
-                远端知识库不可用，当前仅支持存入本地。
-              </div>
-            )}
-            <div>
-              <div className="text-sm font-medium text-indigo-900 mb-1">人工修复步骤（至少 1 条）</div>
-              <textarea
-                value={manualRemediationText}
-                onChange={(e) => setManualRemediationText(e.target.value)}
-                placeholder={'1. 调整 timeout\n2. 配置重试\n3. 灰度验证'}
-                className="w-full h-24 px-3 py-2 border border-indigo-200 rounded bg-white text-sm"
-              />
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              <label className="text-xs text-indigo-700">
-                验证结果
-                <select
-                  value={verificationResult}
-                  onChange={(e) => setVerificationResult(e.target.value as 'pass' | 'fail')}
-                  className="mt-1 w-full rounded border border-indigo-200 bg-white px-2 py-1"
-                >
-                  <option value="pass">pass</option>
-                  <option value="fail">fail</option>
-                </select>
-              </label>
-              <label className="text-xs text-indigo-700">
-                关联知识库ID（可选，不填则自动新建）
-                <input
-                  value={manualCaseId}
-                  onChange={(e) => setManualCaseId(e.target.value)}
-                  className="mt-1 w-full rounded border border-indigo-200 bg-white px-2 py-1"
-                  placeholder="case-xxxx"
-                />
-              </label>
-            </div>
-            <div>
-              <label className="text-xs text-indigo-700 block mb-1">最终解决方案</label>
-              <textarea
-                value={finalResolution}
-                onChange={(e) => setFinalResolution(e.target.value)}
-                className="w-full h-16 px-3 py-2 border border-indigo-200 rounded bg-white text-sm"
-                placeholder="填写最终修复方案（可由分析摘要预填）"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-indigo-700 block mb-1">验证说明（至少20字）</label>
-              <textarea
-                value={verificationNotes}
-                onChange={(e) => setVerificationNotes(e.target.value)}
-                className="w-full h-16 px-3 py-2 border border-indigo-200 rounded bg-white text-sm"
-                placeholder="填写验证过程与结果，至少20字"
-              />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={handleBuildKBFromSession}
-                disabled={kbDraftLoading || kbSubmitLoading || !analysisSessionId}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-white border border-indigo-300 text-indigo-700 text-xs hover:bg-indigo-100 disabled:opacity-50"
-              >
-                {kbDraftLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
-                从会话提取草稿
-              </button>
-              <button
-                type="button"
-                onClick={handleSubmitManualRemediation}
-                disabled={kbDraftLoading || kbSubmitLoading}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700 disabled:opacity-50"
-              >
-                {kbSubmitLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Bookmark className="w-3.5 h-3.5" />}
-                提交知识库
-              </button>
-            </div>
-            {kbActionNotice && (
-              <div className="text-xs text-indigo-800 rounded border border-indigo-200 bg-white px-2 py-1">
-                {kbActionNotice}
-              </div>
-            )}
-          </div>
-
-          {(kbSearchLoading || kbSearchResults.length > 0) && (
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-sm font-medium text-slate-800">联合知识检索候选</h4>
-                <span className="text-xs text-slate-500">
-                  local={kbSearchSources.local} / remote={kbSearchSources.external}
-                </span>
-              </div>
-              {kbSearchLoading ? (
-                <div className="text-xs text-slate-500 inline-flex items-center gap-1">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  检索中...
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {kbSearchResults.map((item) => (
-                    <div key={`${item.source_backend}:${item.id}`} className="rounded border border-slate-200 bg-white p-2">
-                      <div className="text-sm text-slate-800 font-medium">{item.summary}</div>
-                      <div className="text-[11px] text-slate-500 mt-1">
-                        {item.source_backend} · score={Math.round((item.similarity_score || 0) * 100)}% · {item.problem_type || 'unknown'}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 相似案例 - 使用新组件 */}
-          {(similarCases.length > 0 || loadingSimilarCases) && (
-            <div className="pt-4 border-t border-gray-200">
-              <SimilarCases
-                cases={similarCases}
-                loading={loadingSimilarCases}
-                onSelectCase={handleSelectSimilarCase}
-              />
-            </div>
-          )}
-                
-          {/* 快速操作 */}
-          <div className="pt-4 border-t border-gray-200">
-            <h4 className="font-medium text-gray-900 mb-3">快速操作</h4>
-            <div className="flex flex-wrap gap-2">
-              {serviceName && (
-                <>
-                  <button
-                    onClick={() => navigation.goToLogs({ serviceName })}
-                    className="flex items-center gap-2 px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors text-sm"
-                  >
-                    <FileText className="w-4 h-4" />
-                    查看服务日志
-                  </button>
-                  <button
-                    onClick={() => navigation.goToTopology({ serviceName })}
-                    className="flex items-center gap-2 px-3 py-2 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg transition-colors text-sm"
-                  >
-                    <Network className="w-4 h-4" />
-                    查看服务拓扑
-                  </button>
-                </>
-              )}
-              {analysisType === 'trace' && currentTraceId && (
-                <button
-                  onClick={() => navigation.goToTraces({ traceId: currentTraceId, serviceName: serviceName || undefined })}
-                  className="flex items-center gap-2 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg transition-colors text-sm"
-                >
-                  <Zap className="w-4 h-4" />
-                  查看 Trace 详情
-                </button>
-              )}
-              <button
-                onClick={handleSaveCase}
-                disabled={!result}
-                className="flex items-center gap-2 px-3 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Bookmark className="w-4 h-4" />
-                保存到知识库
-              </button>
-              <button
-                onClick={() => handleKBSearch(inputText, {
-                  problemType: result?.overview?.problem,
-                  service: serviceName || undefined,
-                })}
-                disabled={!inputText}
-                className="flex items-center gap-2 px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-lg transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <BookOpen className="w-4 h-4" />
-                联合知识检索
-              </button>
-              <button
-                onClick={() => handleFindSimilarCases(inputText, result?.overview?.problem, serviceName, {})}
-                disabled={!inputText}
-                className="flex items-center gap-2 px-3 py-2 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-lg transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <BookOpen className="w-4 h-4" />
-                本地相似案例
-              </button>
-              <button
-                onClick={() => navigate('/ai-cases?tab=history')}
-                className="flex items-center gap-2 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg transition-colors text-sm"
-              >
-                <History className="w-4 h-4" />
-                查看 AI 历史
-              </button>
-            </div>
-          </div>
-
-          <div className="pt-4 border-t border-gray-200">
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="font-medium text-gray-900 flex items-center gap-2">
-                <MessageCircle className="w-4 h-4 text-indigo-600" />
-                对话
-              </h4>
-              <button
-                type="button"
-                onClick={resetFollowUpConversation}
-                disabled={followUpLoading || followUpMessages.length === 0}
-                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                清空会话
-              </button>
-            </div>
-
-            <div className="rounded-lg border border-gray-200 bg-slate-50 p-3">
-              <div className="mb-2 rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-600 space-y-1">
-                <div>可解释性：AI 回答内会显示引用片段（分析结论 `[A*]`、原始日志 `[L*]`）。</div>
-                <div>操作闭环：每条 AI 回答支持一键转工单 / Runbook / 告警抑制建议。</div>
-                <div>命令执行：查询类计划会自动执行并回填结果；也可在输入框使用 `/exec &lt;command&gt;` 或 `执行命令: &lt;command&gt;` 手动触发。</div>
-                <div>权限策略：`AI_FOLLOWUP_COMMAND_EXEC_ENABLED` 控制总开关，`AI_FOLLOWUP_COMMAND_WRITE_ENABLED` 控制写命令；写命令会触发提权确认。</div>
-                <div>安全与成本：追问内容自动脱敏，长会话会自动摘要压缩并在必要时提醒。</div>
-                <div>提示：先发送一次追问后，AI 回答卡片才会出现“引用片段”和“转工单/Runbook/告警抑制”按钮。</div>
-              </div>
-              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_22rem]">
-                <div className="min-w-0">
-              <div
-                ref={followUpListRef}
-                onScroll={handleFollowUpListScroll}
-                className="space-y-2 max-h-[28rem] overflow-auto pr-1"
-              >
-                {followUpMessages.length === 0 ? (
-                  <div className="text-xs text-gray-500">
-                    可基于当前分析结果连续追问，例如“优先排查哪条根因？”、“给出更细的修复步骤”。
-                  </div>
-                ) : (
-                  followUpMessages.map((msg, index) => {
-                    const assistantMessageOrder = msg.role === 'assistant'
-                      ? followUpMessages
-                        .slice(0, index + 1)
-                        .filter((item) => item.role === 'assistant')
-                        .length
-                      : 0;
-                    const suppressPlanningForMessage = assistantMessageOrder > 1;
-                    const messageMetadata = (msg.metadata && typeof msg.metadata === 'object')
-                      ? msg.metadata
-                      : undefined;
-                    const messageSubgoals = Array.isArray(messageMetadata?.subgoals)
-                      ? messageMetadata.subgoals as FollowUpSubgoal[]
-                      : [];
-                    const messageReflection = (messageMetadata?.reflection && typeof messageMetadata.reflection === 'object')
-                      ? messageMetadata.reflection as FollowUpReflection
-                      : undefined;
-                    const reflectionActions = Array.isArray(messageReflection?.next_actions)
-                      ? messageReflection?.next_actions || []
-                      : [];
-                    const reflectionGaps = Array.isArray(messageReflection?.gaps)
-                      ? messageReflection?.gaps || []
-                      : [];
-                    const messageActions = Array.isArray(messageMetadata?.actions)
-                      ? normalizeFollowUpActions(messageMetadata.actions)
-                      : [];
-                    const messageThoughtTimeline = msg.role === 'assistant' && FOLLOWUP_SHOW_THOUGHT_ENABLED
-                      ? buildFollowUpThoughtTimelineFromMetadata(messageMetadata, {
-                        suppressPlanning: suppressPlanningForMessage,
-                      })
-                      : [];
-                    const streamLoading = Boolean(messageMetadata?.stream_loading);
-                    const streamStage = String(messageMetadata?.stream_stage || '').trim();
-                    const resolvedMessageId = String(
-                      msg.message_id || (messageMetadata as UnknownObject)?.stream_message_id || '',
-                    ).trim();
-                    const messageObservations = Array.isArray(messageMetadata?.action_observations)
-                      ? messageMetadata.action_observations as Array<Record<string, unknown>>
-                      : [];
-                    const messageApprovals = Array.isArray(messageMetadata?.approval_required)
-                      ? messageMetadata.approval_required as Array<Record<string, unknown>>
-                      : [];
-                    const observationsByActionId = new Map<string, Record<string, unknown>>();
-                    const observationsByCommand = new Map<string, Record<string, unknown>>();
-                    const approvalsByActionId = new Map<string, Record<string, unknown>>();
-                    const approvalsByCommand = new Map<string, Record<string, unknown>>();
-                    messageObservations.forEach((item) => {
-                      if (!item || typeof item !== 'object') {
-                        return;
-                      }
-                      const payload = item as UnknownObject;
-                      const actionId = String(payload.action_id || '').trim();
-                      const commandText = normalizeCommandMatchKey(String(payload.command || ''));
-                      if (actionId) {
-                        observationsByActionId.set(actionId, payload as Record<string, unknown>);
-                      }
-                      if (commandText) {
-                        observationsByCommand.set(commandText, payload as Record<string, unknown>);
-                      }
-                    });
-                    messageApprovals.forEach((item) => {
-                      if (!item || typeof item !== 'object') {
-                        return;
-                      }
-                      const payload = item as UnknownObject;
-                      const actionId = String(payload.action_id || '').trim();
-                      const commandText = normalizeCommandMatchKey(String(payload.command || ''));
-                      if (actionId) {
-                        approvalsByActionId.set(actionId, payload as Record<string, unknown>);
-                      }
-                      if (commandText) {
-                        approvalsByCommand.set(commandText, payload as Record<string, unknown>);
-                      }
-                    });
-                    return (
+                    const payload = item as UnknownObject;
+                    const actionId = String(payload.action_id || '').trim();
+                    const commandText = normalizeCommandMatchKey(String(payload.command || ''));
+                    if (actionId) {
+                      observationsByActionId.set(actionId, payload as Record<string, unknown>);
+                    }
+                    if (commandText) {
+                      observationsByCommand.set(commandText, payload as Record<string, unknown>);
+                    }
+                  });
+                  messageApprovals.forEach((item) => {
+                    if (!item || typeof item !== 'object') {
+                      return;
+                    }
+                    const payload = item as UnknownObject;
+                    const actionId = String(payload.action_id || '').trim();
+                    const commandText = normalizeCommandMatchKey(String(payload.command || ''));
+                    if (actionId) {
+                      approvalsByActionId.set(actionId, payload as Record<string, unknown>);
+                    }
+                    if (commandText) {
+                      approvalsByCommand.set(commandText, payload as Record<string, unknown>);
+                    }
+                  });
+                  return (
+                    <div
+                      key={`${msg.message_id || `${msg.role}-${index}`}-${msg.timestamp || ''}`}
+                      className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+                    >
+                      {/* 气泡主体 */}
                       <div
-                        key={`${msg.message_id || `${msg.role}-${index}`}-${msg.timestamp || ''}`}
-                        className={`rounded p-2 text-sm ${
+                        className={`max-w-[85%] rounded-xl px-3 py-2.5 text-sm leading-relaxed shadow-sm ${
                           msg.role === 'user'
-                            ? 'bg-blue-50 border border-blue-100 text-blue-800'
-                            : 'bg-white border border-gray-200 text-gray-700'
+                            ? 'bg-blue-600 text-white rounded-br-sm'
+                            : 'bg-white border border-gray-200 text-gray-800 rounded-bl-sm'
                         }`}
                       >
-                      <div className="text-[11px] mb-1 opacity-70 flex items-center gap-2 flex-wrap">
-                        <span>
-                          {msg.role === 'user' ? '你' : 'AI'} {msg.timestamp ? `· ${toLocaleTime(msg.timestamp)}` : ''}
-                        </span>
+                        <div className="min-h-[18px]">
+                          {msg.role === 'assistant'
+                            ? renderFollowUpRichContent(
+                              String(msg.content || ''),
+                              `${msg.message_id || index}`,
+                              { streamLoading },
+                            )
+                            : <div className="whitespace-pre-wrap">{msg.content}</div>}
+                        </div>
                         {msg.role === 'assistant' && streamLoading && (
-                          <span className="inline-flex items-center gap-1 text-indigo-600">
+                          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-indigo-500">
                             <Loader2 className="w-3 h-3 animate-spin" />
-                            流式输出中
-                          </span>
-                        )}
-                        {msg.role === 'assistant' && streamStage && (
-                          <span className="inline-flex items-center rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
-                            阶段: {streamStage}
-                          </span>
+                            <span>
+                              {streamStage ? `${streamStage}...` : '流式输出中...'}
+                            </span>
+                          </div>
                         )}
                       </div>
-                      <div className="min-h-[18px]">
-                        {msg.role === 'assistant'
-                          ? renderFollowUpRichContent(
-                            String(msg.content || ''),
-                            `${msg.message_id || index}`,
-                            { streamLoading },
-                          )
-                          : <div className="whitespace-pre-wrap">{msg.content}</div>}
+                      {/* 时间戳 */}
+                      <div className={`text-[10px] text-gray-400 mt-1 px-1 flex items-center gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                        <span>{msg.role === 'user' ? '你' : 'AI'}{msg.timestamp ? ` · ${toLocaleTime(msg.timestamp)}` : ''}</span>
                       </div>
+                      {/* 思考过程 */}
                       {msg.role === 'assistant' && messageThoughtTimeline.length > 0 && (
                         streamLoading ? (
-                          <div className="mt-2 rounded border border-indigo-200 bg-indigo-50/60 p-2">
+                          <div className="mt-1.5 w-full max-w-[85%] rounded border border-indigo-200 bg-indigo-50/60 p-2">
                             <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-indigo-700">
                               <span>思考过程（实时）</span>
                               <span className="inline-flex items-center gap-1">
@@ -6603,9 +6221,9 @@ const AIAnalysis: React.FC = () => {
                             </div>
                           </div>
                         ) : (
-                          <details className="mt-2 rounded border border-indigo-200 bg-indigo-50/60 p-2">
+                          <details className="mt-1.5 w-full max-w-[85%] rounded border border-indigo-200 bg-indigo-50/60 p-2">
                             <summary className="cursor-pointer text-[11px] font-medium text-indigo-700">
-                              思考过程 ({messageThoughtTimeline.length})
+                              🧠 思考过程 ({messageThoughtTimeline.length})
                             </summary>
                             <div className="mt-1.5 space-y-1.5">
                               {messageThoughtTimeline.map((thought, thoughtIndex) => (
@@ -6632,14 +6250,15 @@ const AIAnalysis: React.FC = () => {
                           </details>
                         )
                       )}
-                      <div className="mt-2 flex flex-wrap gap-2">
+                      {/* 操作按钮 */}
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
                         <button
                           type="button"
                           onClick={() => void handleCopyFollowUpMessage(msg)}
-                          className="px-2 py-1 text-[11px] rounded bg-white text-slate-700 border border-slate-200 hover:bg-slate-100"
+                          className="px-2 py-0.5 text-[11px] rounded bg-white text-slate-700 border border-slate-200 hover:bg-slate-100"
                         >
                           <span className="inline-flex items-center gap-1">
-                            <Copy className="w-3.5 h-3.5" />
+                            <Copy className="w-3 h-3" />
                             复制
                           </span>
                         </button>
@@ -6648,24 +6267,24 @@ const AIAnalysis: React.FC = () => {
                             type="button"
                             onClick={() => handleRetryFollowUpMessage(msg)}
                             disabled={followUpLoading}
-                            className="px-2 py-1 text-[11px] rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 disabled:opacity-50"
+                            className="px-2 py-0.5 text-[11px] rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 disabled:opacity-50"
                           >
                             <span className="inline-flex items-center gap-1">
-                              <RefreshCw className="w-3.5 h-3.5" />
-                            重试
-                          </span>
-                        </button>
+                              <RefreshCw className="w-3 h-3" />
+                              重试
+                            </span>
+                          </button>
                         )}
                         <button
                           type="button"
                           onClick={() => void handleDeleteFollowUpMessage(msg, index)}
                           disabled={followUpLoading || deletingMessageKey === (msg.message_id || `${msg.role}-${index}-${msg.timestamp || ''}`)}
-                          className="px-2 py-1 text-[11px] rounded bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 disabled:opacity-50"
+                          className="px-2 py-0.5 text-[11px] rounded bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 disabled:opacity-50"
                         >
                           <span className="inline-flex items-center gap-1">
                             {deletingMessageKey === (msg.message_id || `${msg.role}-${index}-${msg.timestamp || ''}`)
-                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              : <Trash2 className="w-3.5 h-3.5" />}
+                              ? <Loader2 className="w-3 h-3 animate-spin" />
+                              : <Trash2 className="w-3 h-3" />}
                             删除
                           </span>
                         </button>
@@ -6675,7 +6294,7 @@ const AIAnalysis: React.FC = () => {
                               type="button"
                               onClick={() => handleCreateActionDraft(msg.message_id, 'ticket')}
                               disabled={!msg.message_id || !analysisSessionId || !!actionLoadingKey}
-                              className="px-2 py-1 text-[11px] rounded bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-50"
+                              className="px-2 py-0.5 text-[11px] rounded bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-50"
                             >
                               {actionLoadingKey === `${msg.message_id}:ticket` ? '生成中...' : '转工单'}
                             </button>
@@ -6683,23 +6302,23 @@ const AIAnalysis: React.FC = () => {
                               type="button"
                               onClick={() => handleCreateActionDraft(msg.message_id, 'runbook')}
                               disabled={!msg.message_id || !analysisSessionId || !!actionLoadingKey}
-                              className="px-2 py-1 text-[11px] rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50"
+                              className="px-2 py-0.5 text-[11px] rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50"
                             >
-                              {actionLoadingKey === `${msg.message_id}:runbook` ? '生成中...' : '转 Runbook 步骤'}
+                              {actionLoadingKey === `${msg.message_id}:runbook` ? '生成中...' : '转 Runbook'}
                             </button>
                             <button
                               type="button"
                               onClick={() => handleCreateActionDraft(msg.message_id, 'alert_suppression')}
                               disabled={!msg.message_id || !analysisSessionId || !!actionLoadingKey}
-                              className="px-2 py-1 text-[11px] rounded bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 disabled:opacity-50"
+                              className="px-2 py-0.5 text-[11px] rounded bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 disabled:opacity-50"
                             >
-                              {actionLoadingKey === `${msg.message_id}:alert_suppression` ? '生成中...' : '转告警抑制建议'}
+                              {actionLoadingKey === `${msg.message_id}:alert_suppression` ? '生成中...' : '告警抑制'}
                             </button>
                           </>
                         )}
                       </div>
                       {msg.role === 'assistant' && Array.isArray(msg.metadata?.references) && msg.metadata?.references.length > 0 && (
-                        <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2">
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-amber-200 bg-amber-50 p-2">
                           <div className="text-[11px] font-medium text-amber-700 mb-1">引用片段</div>
                           <div className="space-y-1">
                             {(msg.metadata?.references || []).map((ref: FollowUpReference) => (
@@ -6711,7 +6330,7 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.role === 'assistant' && messageSubgoals.length > 0 && (
-                        <div className="mt-2 rounded border border-sky-200 bg-sky-50 p-2">
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2">
                           <div className="text-[11px] font-medium text-sky-700 mb-1">子目标拆解</div>
                           <div className="space-y-1.5">
                             {messageSubgoals.map((goal, goalIndex) => (
@@ -6723,14 +6342,10 @@ const AIAnalysis: React.FC = () => {
                                   </span>
                                 </div>
                                 {goal.reason && (
-                                  <div className="mt-1 text-[11px] text-sky-700">
-                                    {goal.reason}
-                                  </div>
+                                  <div className="mt-1 text-[11px] text-sky-700">{goal.reason}</div>
                                 )}
                                 {goal.next_action && (
-                                  <div className="mt-1 text-[11px] text-sky-600">
-                                    下一步：{goal.next_action}
-                                  </div>
+                                  <div className="mt-1 text-[11px] text-sky-600">下一步：{goal.next_action}</div>
                                 )}
                               </div>
                             ))}
@@ -6738,7 +6353,7 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.role === 'assistant' && messageReflection && (
-                        <div className="mt-2 rounded border border-violet-200 bg-violet-50 p-2">
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2">
                           <div className="text-[11px] font-medium text-violet-700 mb-1">反思闭环</div>
                           <div className="flex flex-wrap gap-2 text-[11px] text-violet-700">
                             <span>迭代: {Number(messageReflection.iterations || 0)}</span>
@@ -6746,19 +6361,15 @@ const AIAnalysis: React.FC = () => {
                             <span>置信度: {formatReflectionConfidence(messageReflection.final_confidence)}</span>
                           </div>
                           {reflectionGaps.length > 0 && (
-                            <div className="mt-1 text-[11px] text-violet-700">
-                              缺口：{reflectionGaps.slice(0, 3).join('；')}
-                            </div>
+                            <div className="mt-1 text-[11px] text-violet-700">缺口：{reflectionGaps.slice(0, 3).join('；')}</div>
                           )}
                           {reflectionActions.length > 0 && (
-                            <div className="mt-1 text-[11px] text-violet-700">
-                              下一步：{reflectionActions.slice(0, 3).join('；')}
-                            </div>
+                            <div className="mt-1 text-[11px] text-violet-700">下一步：{reflectionActions.slice(0, 3).join('；')}</div>
                           )}
                         </div>
                       )}
                       {msg.role === 'assistant' && messageActions.length > 0 && (
-                        <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 p-2">
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-emerald-200 bg-emerald-50 p-2">
                           <div className="text-[11px] font-medium text-emerald-700 mb-1">执行计划（ReAct）</div>
                           <div className="space-y-1.5">
                             {messageActions.slice(0, 1).map((action, actionIndex) => {
@@ -6859,9 +6470,7 @@ const AIAnalysis: React.FC = () => {
                                     {`P${displayPriority} · ${displayTitle}`}
                                   </div>
                                   {action.purpose && (
-                                    <div className="mt-1 text-[11px] text-emerald-700">
-                                      目的：{action.purpose}
-                                    </div>
+                                    <div className="mt-1 text-[11px] text-emerald-700">目的：{action.purpose}</div>
                                   )}
                                   {action.command && (
                                     <div className="mt-1 text-[11px] text-emerald-800 break-all">
@@ -6880,9 +6489,7 @@ const AIAnalysis: React.FC = () => {
                                     {action.requires_elevation && <span>提权: 必需</span>}
                                   </div>
                                   {action.reason && (
-                                    <div className="mt-1 text-[10px] text-emerald-600">
-                                      说明：{action.reason}
-                                    </div>
+                                    <div className="mt-1 text-[10px] text-emerald-600">说明：{action.reason}</div>
                                   )}
                                   {action.executable && action.command && (
                                     <div className="mt-1 text-[10px] text-emerald-600 break-all">
@@ -6940,7 +6547,7 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.role === 'assistant' && messageApprovals.length > 0 && (
-                        <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2">
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-amber-200 bg-amber-50 p-2">
                           <div className="text-[11px] font-medium text-amber-800 mb-1">待审批动作</div>
                           <div className="space-y-1.5">
                             {messageApprovals.slice(0, 1).map((item, approvalIndex) => {
@@ -7025,7 +6632,7 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.message_id && actionDrafts[msg.message_id] && (
-                        <div className="mt-2 rounded border border-slate-200 bg-slate-50 p-2">
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-slate-200 bg-slate-50 p-2">
                           <div className="text-[11px] font-medium text-slate-700 mb-1">动作草案：{actionDrafts[msg.message_id].action_type}</div>
                           <div className="text-[11px] text-slate-600 mb-1">{actionDrafts[msg.message_id].title}</div>
                           <pre className="text-[11px] text-slate-700 whitespace-pre-wrap">{JSON.stringify(actionDrafts[msg.message_id].payload, null, 2)}</pre>
@@ -7033,12 +6640,10 @@ const AIAnalysis: React.FC = () => {
                       )}
                     </div>
                   );
-                  })
-                )}
-              </div>
-
+                })
+              )}
               {followUpHasUnseenUpdate && !followUpAutoScrollEnabled && (
-                <div className="mt-2 flex justify-end">
+                <div className="flex justify-end">
                   <button
                     type="button"
                     onClick={handleJumpToFollowUpBottom}
@@ -7048,105 +6653,568 @@ const AIAnalysis: React.FC = () => {
                   </button>
                 </div>
               )}
-
               {followUpError && (
-                <div className="mt-2 text-xs text-red-600">{followUpError}</div>
+                <div className="text-xs text-red-600">{followUpError}</div>
               )}
               {followUpNotice && (
-                <div className="mt-2 text-xs text-emerald-700">{followUpNotice}</div>
+                <div className="text-xs text-emerald-700">{followUpNotice}</div>
               )}
+            </div>
 
-              {followUpSuggestions.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {followUpSuggestions.map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      onClick={() => setFollowUpQuestion(suggestion)}
-                      className="px-2 py-1 text-xs rounded bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {analysisType === 'log' && (
-                <div className="mt-3 flex flex-wrap gap-2">
+            {/* 快捷追问建议 */}
+            {followUpSuggestions.length > 0 && (
+              <div className="px-3 py-2 border-t border-gray-100 bg-slate-50 flex flex-wrap gap-1.5 shrink-0">
+                {followUpSuggestions.map((suggestion) => (
                   <button
+                    key={suggestion}
                     type="button"
-                    onClick={() => {
-                      void handleInjectCrossLogsToFollowUpDraft();
-                    }}
-                    disabled={followUpLoading || followUpCrossLogLoading}
-                    className="px-2 py-1 text-xs rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50"
+                    onClick={() => setFollowUpQuestion(suggestion)}
+                    className="px-2 py-0.5 text-[11px] rounded bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
                   >
-                    {followUpCrossLogLoading ? '拉取中...' : '查日志注入草稿'}
+                    {suggestion}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void handleSendFollowUpWithCrossLogs();
-                    }}
-                    disabled={followUpLoading || followUpCrossLogLoading || !followUpQuestion.trim()}
-                    className="px-2 py-1 text-xs rounded bg-emerald-600 text-white border border-emerald-600 hover:bg-emerald-700 disabled:opacity-50"
-                  >
-                    {followUpCrossLogLoading ? '发送中...' : '查日志并发送'}
-                  </button>
-                </div>
-              )}
+                ))}
+              </div>
+            )}
 
-              <div className="mt-2 flex items-start gap-2">
+            {/* 横向日志注入工具 */}
+            {analysisType === 'log' && (
+              <div className="px-3 py-2 border-t border-gray-100 flex flex-wrap gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => { void handleInjectCrossLogsToFollowUpDraft(); }}
+                  disabled={followUpLoading || followUpCrossLogLoading}
+                  className="px-2 py-1 text-xs rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50"
+                >
+                  {followUpCrossLogLoading ? '拉取中...' : '查日志注入草稿'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleSendFollowUpWithCrossLogs(); }}
+                  disabled={followUpLoading || followUpCrossLogLoading || !followUpQuestion.trim()}
+                  className="px-2 py-1 text-xs rounded bg-emerald-600 text-white border border-emerald-600 hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {followUpCrossLogLoading ? '发送中...' : '查日志并发送'}
+                </button>
+              </div>
+            )}
+
+            {/* 输入区域 */}
+            <div className="px-3 py-2.5 border-t border-gray-200 shrink-0 bg-white">
+              <div className="flex items-end gap-2">
                 <textarea
                   value={followUpQuestion}
                   onChange={(e) => setFollowUpQuestion(e.target.value)}
                   onKeyDown={handleFollowUpKeyDown}
-                  placeholder="继续追问当前分析结果..."
-                  className="flex-1 min-h-[72px] px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-y"
+                  placeholder="继续追问当前分析结果... (Ctrl/Cmd+Enter 发送)"
+                  className="flex-1 min-h-[60px] max-h-[120px] px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-y"
                 />
                 <button
                   type="button"
-                  onClick={() => {
-                    void handleSubmitFollowUp();
-                  }}
+                  onClick={() => { void handleSubmitFollowUp(); }}
                   disabled={followUpLoading || !followUpQuestion.trim()}
-                  className="inline-flex items-center gap-1 px-3 py-2 rounded bg-indigo-600 text-white text-sm hover:bg-indigo-700 disabled:opacity-50"
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm hover:bg-indigo-700 disabled:opacity-50 shrink-0"
                 >
                   {followUpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                   发送
                 </button>
               </div>
-              <div className="mt-2 text-[11px] text-gray-400 flex flex-wrap gap-3">
-                <span>快捷键：Ctrl/Cmd + Enter 发送</span>
-                {analysisSessionId && <span>分析会话: {analysisSessionId}</span>}
-                {conversationId && <span>对话会话: {conversationId}</span>}
+              <div className="mt-1.5 text-[10px] text-gray-400 flex flex-wrap gap-3">
+                {analysisSessionId && <span>分析会话: {analysisSessionId.slice(0, 8)}…</span>}
                 {followUpMessages.length > 0 && <span>消息数: {followUpMessages.length}</span>}
-                {tokenHint.warning && <span className="text-amber-600">对话较长，已启用上下文压缩策略</span>}
                 {tokenHint.historyCompacted && <span className="text-indigo-500">长会话已自动摘要压缩</span>}
-                {!tokenHint.warning && !tokenHint.historyCompacted && <span>追问后将按会话长度自动启用压缩策略</span>}
                 <span>敏感字段自动脱敏已开启</span>
               </div>
+            </div>
+
+            {/* RuntimeActivityPanel */}
+            {runtimePanelRuns.length > 0 && (
+              <div className="px-3 pb-2 shrink-0">
+                <RuntimeActivityPanel
+                  runs={runtimePanelRuns}
+                  disabled={followUpLoading || approvalDialogSubmitting}
+                  onApprove={openRuntimeApprovalDialog}
+                  onSubmitUserInput={(params) => {
+                    return handleContinueRuntimeUserInput({
+                      runId: params.runId,
+                      text: params.text,
+                      source: params.source,
+                    });
+                  }}
+                  onCancelRun={(runId) => {
+                    void handleCancelRuntimeRun(runId);
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── 右侧功能面板：Tab 化 ── */}
+        <div className="w-80 shrink-0 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-h-0">
+          {/* Tab 导航 */}
+          <div className="flex shrink-0 border-b border-gray-100 bg-slate-50">
+            {(
+              [
+                { key: 'result', label: '分析结果', icon: <Zap className="w-3.5 h-3.5" /> },
+                { key: 'kb',     label: '知识库',   icon: <Bookmark className="w-3.5 h-3.5" /> },
+                { key: 'actions',label: '操作',     icon: <FileText className="w-3.5 h-3.5" /> },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveRightTab(tab.key)}
+                className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium border-b-2 transition-colors ${
+                  activeRightTab === tab.key
+                    ? 'border-teal-500 text-teal-600 bg-white'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-slate-100'
+                }`}
+              >
+                {tab.icon}
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab: 分析结果 */}
+          {activeRightTab === 'result' && (
+            <div className="flex-1 overflow-auto">
+              {/* LLM 信息 */}
+              {llmInfo && (
+                <div className="px-3 py-2 border-b border-gray-100 flex items-center gap-2 text-xs text-gray-500 shrink-0">
+                  {llmInfo.method === 'llm' ? (
+                    <>
+                      <BrainCircuit className="w-3.5 h-3.5 text-purple-500" />
+                      <span className="text-purple-600 font-medium">LLM</span>
+                      {llmInfo.model && <span className="text-gray-400">({llmInfo.model})</span>}
+                      {llmInfo.cached && <span className="text-green-500">缓存</span>}
+                      {llmInfo.latency_ms && <span>{llmInfo.latency_ms}ms</span>}
+                    </>
+                  ) : llmInfo.method === 'none' ? (
+                    <>
+                      <AlertCircle className="w-3.5 h-3.5 text-gray-400" />
+                      <span className="text-gray-500">LLM 未启用</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-3.5 h-3.5 text-amber-500" />
+                      <span className="text-amber-600">规则引擎</span>
+                    </>
+                  )}
                 </div>
-                <div className="xl:sticky xl:top-3 xl:self-start">
-                  <RuntimeActivityPanel
-                    runs={runtimePanelRuns}
-                    disabled={followUpLoading || approvalDialogSubmitting}
-                    onApprove={openRuntimeApprovalDialog}
-                    onSubmitUserInput={(params) => {
-                      return handleContinueRuntimeUserInput({
-                        runId: params.runId,
-                        text: params.text,
-                        source: params.source,
-                      });
-                    }}
-                    onCancelRun={(runId) => {
-                      void handleCancelRuntimeRun(runId);
-                    }}
+              )}
+              <div className="p-3">
+                {isLoading ? (
+                  <LoadingState message={useLLM ? "LLM 正在深度分析..." : "AI 正在分析..."} />
+                ) : result ? (
+                  <div className="space-y-4">
+                    {contextPills.length > 0 && (
+                      <div className="rounded border border-indigo-100 bg-indigo-50 p-2">
+                        <div className="text-xs font-medium text-indigo-700 mb-1.5">上下文挂载</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {contextPills.map((pill) => (
+                            <span
+                              key={`${pill.key}:${pill.value}`}
+                              className="inline-flex items-center rounded-full border border-indigo-200 bg-white px-2 py-0.5 text-[11px] text-indigo-700"
+                            >
+                              {pill.key}: {pill.value}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {result.overview && (
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                        <h4 className="font-medium text-blue-800 mb-1.5 text-xs">分析摘要</h4>
+                        <p className="text-xs text-blue-700 mb-1.5">{result.overview.description || result.overview.problem}</p>
+                        <div className="flex items-center gap-2 text-[11px] text-blue-600">
+                          <span>置信度: {Math.round((result.overview.confidence || 0) * 100)}%</span>
+                          <span>•</span>
+                          <span>级别: {result.overview.severity}</span>
+                        </div>
+                      </div>
+                    )}
+                    {result.dataFlow && (
+                      <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
+                        <div className="flex items-center mb-1.5">
+                          <Network className="w-4 h-4 text-cyan-600 mr-1.5" />
+                          <h4 className="font-medium text-cyan-900 text-xs">数据路径分析</h4>
+                        </div>
+                        {result.dataFlow.summary && (
+                          <p className="text-xs text-cyan-800 mb-1.5">{result.dataFlow.summary}</p>
+                        )}
+                        {Array.isArray(result.dataFlow.path) && result.dataFlow.path.length > 0 && (
+                          <ol className="space-y-1.5">
+                            {result.dataFlow.path.map((item, index) => (
+                              <li key={index} className="rounded border border-cyan-200 bg-white p-1.5 text-[11px]">
+                                <div className="font-medium text-cyan-900">#{item.step || index + 1} {item.component || 'unknown'}</div>
+                                {item.operation && <div className="text-cyan-800 mt-0.5">操作: {item.operation}</div>}
+                                {item.from && item.to && <div className="text-cyan-700 mt-0.5">流向: {item.from} → {item.to}</div>}
+                                {item.evidence && <div className="text-cyan-700 mt-0.5">证据: {item.evidence}</div>}
+                                {(item.status || item.latency_ms) && (
+                                  <div className="text-cyan-700 mt-0.5">
+                                    {item.status ? `状态: ${item.status}` : ''}
+                                    {item.status && item.latency_ms ? ' · ' : ''}
+                                    {item.latency_ms ? `耗时: ${item.latency_ms}ms` : ''}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ol>
+                        )}
+                        {Array.isArray(result.dataFlow.evidence) && result.dataFlow.evidence.length > 0 && (
+                          <div className="mt-2 text-[11px] text-cyan-800">
+                            关键证据: {result.dataFlow.evidence.join('；')}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {result.rootCauses && result.rootCauses.length > 0 && (
+                      <div>
+                        <div className="flex items-center mb-2">
+                          <Bug className="w-4 h-4 text-red-500 mr-1.5" />
+                          <h4 className="font-medium text-gray-900 text-xs">可能根因</h4>
+                        </div>
+                        <ul className="space-y-2">
+                          {result.rootCauses.map((cause, index) => (
+                            <li key={index} className="text-xs">
+                              <div className="font-medium text-gray-800 mb-0.5">{cause.title}</div>
+                              <div className="text-gray-600">{cause.description}</div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {result.handlingIdeas && result.handlingIdeas.length > 0 && (
+                      <div>
+                        <div className="flex items-center mb-2">
+                          <MessageCircle className="w-4 h-4 text-indigo-500 mr-1.5" />
+                          <h4 className="font-medium text-gray-900 text-xs">处理思路</h4>
+                        </div>
+                        <ul className="space-y-2">
+                          {result.handlingIdeas.map((idea, index) => (
+                            <li key={index} className="text-xs">
+                              <div className="font-medium text-gray-800 mb-0.5">{idea.title}</div>
+                              <div className="text-gray-600">{idea.description}</div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {result.solutions && result.solutions.length > 0 && (
+                      <div>
+                        <div className="flex items-center mb-2">
+                          <Lightbulb className="w-4 h-4 text-yellow-500 mr-1.5" />
+                          <h4 className="font-medium text-gray-900 text-xs">解决建议</h4>
+                        </div>
+                        <ul className="space-y-2">
+                          {result.solutions.map((solution, index) => (
+                            <li key={index} className="text-xs">
+                              <div className="font-medium text-gray-800 mb-0.5">{solution.title}</div>
+                              <div className="text-gray-600 mb-1">{solution.description}</div>
+                              {solution.steps && solution.steps.length > 0 && (
+                                <ol className="ml-3 space-y-0.5">
+                                  {solution.steps.map((step, stepIdx) => (
+                                    <li key={stepIdx} className="text-gray-700">{step}</li>
+                                  ))}
+                                </ol>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {(similarCases.length > 0 || loadingSimilarCases) && (
+                      <div className="pt-2 border-t border-gray-100">
+                        <SimilarCases
+                          cases={similarCases}
+                          loading={loadingSimilarCases}
+                          onSelectCase={handleSelectSimilarCase}
+                        />
+                      </div>
+                    )}
+                    {(kbSearchLoading || kbSearchResults.length > 0) && (
+                      <div className="rounded border border-slate-200 bg-slate-50 p-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <h4 className="text-xs font-medium text-slate-800">联合知识检索候选</h4>
+                          <span className="text-[11px] text-slate-500">local={kbSearchSources.local} / remote={kbSearchSources.external}</span>
+                        </div>
+                        {kbSearchLoading ? (
+                          <div className="text-xs text-slate-500 inline-flex items-center gap-1">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            检索中...
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {kbSearchResults.map((item) => (
+                              <div key={`${item.source_backend}:${item.id}`} className="rounded border border-slate-200 bg-white p-1.5">
+                                <div className="text-xs text-slate-800 font-medium">{item.summary}</div>
+                                <div className="text-[11px] text-slate-500 mt-0.5">
+                                  {item.source_backend} · score={Math.round((item.similarity_score || 0) * 100)}% · {item.problem_type || 'unknown'}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <EmptyState
+                    icon={<BrainCircuit className="w-10 h-10 text-gray-300" />}
+                    title="等待分析"
+                    description='提交日志或追踪数据后，分析结果将显示在此处'
                   />
-                </div>
+                )}
               </div>
             </div>
-          </div>
+          )}
+
+          {/* Tab: 知识库 */}
+          {activeRightTab === 'kb' && (
+            <div className="flex-1 overflow-auto p-3 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-semibold text-indigo-900">知识库联动与提交</h4>
+                {kbRuntimeLoading ? (
+                  <span className="text-[11px] text-indigo-600 inline-flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    策略校验中
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-indigo-500">
+                    检索 {kbEffectiveRetrievalMode} / 保存 {kbEffectiveSaveMode}
+                  </span>
+                )}
+              </div>
+              <details className="rounded border border-indigo-200 bg-indigo-50">
+                <summary className="px-2.5 py-2 cursor-pointer text-[11px] font-medium text-indigo-700 flex items-center gap-1.5">
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                  高级策略配置
+                </summary>
+                <div className="px-2.5 pb-2.5 space-y-2">
+                  <label className="inline-flex items-center gap-2 text-xs text-indigo-800">
+                    <input
+                      type="checkbox"
+                      checked={kbRemoteEnabled}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setKbRemoteEnabled(checked);
+                        setKbRetrievalMode((current) => (checked ? (current === 'local' ? 'hybrid' : current) : 'local'));
+                        if (!checked) {
+                          setKbSaveMode('local_only');
+                        }
+                      }}
+                    />
+                    启用远端知识库
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-[11px] text-indigo-700">
+                      检索策略
+                      <select
+                        value={kbRetrievalMode}
+                        onChange={(e) => setKbRetrievalMode(e.target.value as 'local' | 'hybrid' | 'remote_only')}
+                        className="mt-1 w-full rounded border border-indigo-200 bg-white px-1.5 py-1 text-[11px]"
+                        disabled={!kbRemoteEnabled}
+                      >
+                        <option value="local">仅本地</option>
+                        <option value="remote_only">仅远端</option>
+                        <option value="hybrid">本地+远端</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] text-indigo-700">
+                      保存策略
+                      <select
+                        value={kbSaveMode}
+                        onChange={(e) => setKbSaveMode(e.target.value as 'local_only' | 'local_and_remote')}
+                        className="mt-1 w-full rounded border border-indigo-200 bg-white px-1.5 py-1 text-[11px]"
+                      >
+                        <option value="local_only">仅存本地</option>
+                        <option value="local_and_remote" disabled={!kbRemoteEnabled || !kbRemoteAvailable}>本地+远端</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </details>
+              {kbRuntimeNotice && (
+                <div className="text-[11px] text-amber-700 rounded border border-amber-200 bg-amber-50 px-2 py-1">
+                  {kbRuntimeNotice}
+                </div>
+              )}
+              {kbRemoteEnabled && !kbRemoteAvailable && (
+                <div className="text-[11px] text-amber-700 rounded border border-amber-200 bg-amber-50 px-2 py-1">
+                  远端知识库不可用，当前仅支持存入本地。
+                </div>
+              )}
+              <div>
+                <div className="text-xs font-medium text-indigo-900 mb-1">人工修复步骤（至少 1 条）</div>
+                <textarea
+                  value={manualRemediationText}
+                  onChange={(e) => setManualRemediationText(e.target.value)}
+                  placeholder={"1. 调整 timeout\n2. 配置重试\n3. 灰度验证"}
+                  className="w-full h-20 px-2.5 py-2 border border-indigo-200 rounded bg-white text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-[11px] text-indigo-700">
+                  验证结果
+                  <select
+                    value={verificationResult}
+                    onChange={(e) => setVerificationResult(e.target.value as 'pass' | 'fail')}
+                    className="mt-1 w-full rounded border border-indigo-200 bg-white px-1.5 py-1 text-[11px]"
+                  >
+                    <option value="pass">pass</option>
+                    <option value="fail">fail</option>
+                  </select>
+                </label>
+                <label className="text-[11px] text-indigo-700">
+                  关联 Case ID（可选）
+                  <input
+                    value={manualCaseId}
+                    onChange={(e) => setManualCaseId(e.target.value)}
+                    className="mt-1 w-full rounded border border-indigo-200 bg-white px-1.5 py-1 text-[11px]"
+                    placeholder="自动新建"
+                  />
+                </label>
+              </div>
+              <div>
+                <label className="text-[11px] text-indigo-700 block mb-1">最终解决方案</label>
+                <textarea
+                  value={finalResolution}
+                  onChange={(e) => setFinalResolution(e.target.value)}
+                  className="w-full h-14 px-2.5 py-2 border border-indigo-200 rounded bg-white text-xs"
+                  placeholder="填写最终修复方案（可由分析摘要预填）"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-indigo-700 block mb-1">验证说明（至少20字）</label>
+                <textarea
+                  value={verificationNotes}
+                  onChange={(e) => setVerificationNotes(e.target.value)}
+                  className="w-full h-14 px-2.5 py-2 border border-indigo-200 rounded bg-white text-xs"
+                  placeholder="填写验证过程与结果，至少20字"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleBuildKBFromSession}
+                  disabled={kbDraftLoading || kbSubmitLoading || !analysisSessionId}
+                  className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded bg-white border border-indigo-300 text-indigo-700 text-xs hover:bg-indigo-50 disabled:opacity-50"
+                >
+                  {kbDraftLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
+                  提取草稿
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmitManualRemediation}
+                  disabled={kbDraftLoading || kbSubmitLoading}
+                  className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {kbSubmitLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Bookmark className="w-3 h-3" />}
+                  提交知识库
+                </button>
+              </div>
+              {kbActionNotice && (
+                <div className="text-[11px] text-indigo-800 rounded border border-indigo-200 bg-white px-2 py-1">
+                  {kbActionNotice}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tab: 操作 */}
+          {activeRightTab === 'actions' && (
+            <div className="flex-1 overflow-auto p-3 space-y-4">
+              <div>
+                <h4 className="text-xs font-semibold text-gray-700 mb-2">数据跳转</h4>
+                <div className="grid grid-cols-2 gap-2">
+                  {serviceName && (
+                    <>
+                      <button
+                        onClick={() => navigation.goToLogs({ serviceName })}
+                        className="flex flex-col items-center gap-1 px-2 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors text-xs border border-blue-100"
+                      >
+                        <FileText className="w-4 h-4" />
+                        查看日志
+                      </button>
+                      <button
+                        onClick={() => navigation.goToTopology({ serviceName })}
+                        className="flex flex-col items-center gap-1 px-2 py-2.5 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg transition-colors text-xs border border-green-100"
+                      >
+                        <Network className="w-4 h-4" />
+                        服务拓扑
+                      </button>
+                    </>
+                  )}
+                  {analysisType === 'trace' && currentTraceId && (
+                    <button
+                      onClick={() => navigation.goToTraces({ traceId: currentTraceId, serviceName: serviceName || undefined })}
+                      className="flex flex-col items-center gap-1 px-2 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg transition-colors text-xs border border-emerald-100"
+                    >
+                      <Zap className="w-4 h-4" />
+                      Trace 详情
+                    </button>
+                  )}
+                  <button
+                    onClick={() => navigate('/ai-cases?tab=history')}
+                    className="flex flex-col items-center gap-1 px-2 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg transition-colors text-xs border border-indigo-100"
+                  >
+                    <History className="w-4 h-4" />
+                    AI 历史
+                  </button>
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-gray-700 mb-2">知识库操作</h4>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={handleSaveCase}
+                    disabled={!result}
+                    className="flex flex-col items-center gap-1 px-2 py-2.5 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed border border-purple-100"
+                  >
+                    <Bookmark className="w-4 h-4" />
+                    保存知识库
+                  </button>
+                  <button
+                    onClick={() => handleKBSearch(inputText, {
+                      problemType: result?.overview?.problem,
+                      service: serviceName || undefined,
+                    })}
+                    disabled={!inputText}
+                    className="flex flex-col items-center gap-1 px-2 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed border border-amber-100"
+                  >
+                    <BookOpen className="w-4 h-4" />
+                    联合检索
+                  </button>
+                  <button
+                    onClick={() => handleFindSimilarCases(inputText, result?.overview?.problem, serviceName, {})}
+                    disabled={!inputText}
+                    className="flex flex-col items-center gap-1 px-2 py-2.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed border border-slate-200 col-span-2"
+                  >
+                    <BookOpen className="w-4 h-4" />
+                    本地相似案例
+                  </button>
+                </div>
+              </div>
+              {/* RuntimeActivityPanel */}
+              <RuntimeActivityPanel
+                runs={runtimePanelRuns}
+                disabled={followUpLoading || approvalDialogSubmitting}
+                onApprove={openRuntimeApprovalDialog}
+                onSubmitUserInput={(params) => {
+                  return handleContinueRuntimeUserInput({
+                    runId: params.runId,
+                    text: params.text,
+                    source: params.source,
+                  });
+                }}
+                onCancelRun={(runId) => {
+                  void handleCancelRuntimeRun(runId);
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
       {approvalDialog && (
