@@ -25,6 +25,7 @@ metadata:
   name: neo4j-pvc
   namespace: islap
 spec:
+  storageClassName: local-path
   accessModes:
     - ReadWriteOnce
   resources:
@@ -50,7 +51,7 @@ spec:
     spec:
       containers:
       - name: neo4j
-        image: localhost:5000/logoscope/neo4j:4.4-community
+        image: crpi-69dqzledzukvkhrd.cn-beijing.personal.cr.aliyuncs.com/logoscope/neo4j:4.4-community
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 7474

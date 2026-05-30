@@ -113,26 +113,27 @@ class HybridTopologyBuilder:
             }
         """
         try:
-            safe_time_window = _sanitize_interval(time_window, default_value="1 HOUR")
-            logger.info(f"Building hybrid topology with time_window={safe_time_window}")
+            requested_time_window = _sanitize_interval(time_window, default_value="1 HOUR")
+            effective_time_window = requested_time_window
+            logger.info("Building hybrid topology with time_window=%s", requested_time_window)
 
             # 1. 从三个数据源收集数据
             try:
-                traces_data = self._get_traces_topology(safe_time_window, namespace)
+                traces_data = self._get_traces_topology(effective_time_window, namespace)
                 logger.debug("traces_data nodes=%s", len(traces_data.get("nodes", [])))
             except Exception as e:
                 logger.exception(f"Error in _get_traces_topology: {e}")
                 traces_data = {"nodes": [], "edges": []}
 
             try:
-                logs_data = self._get_logs_topology(safe_time_window, namespace)
+                logs_data = self._get_logs_topology(effective_time_window, namespace)
                 logger.debug("logs_data nodes=%s", len(logs_data.get("nodes", [])))
             except Exception as e:
                 logger.exception(f"Error in _get_logs_topology: {e}")
                 logs_data = {"nodes": [], "edges": []}
 
             try:
-                metrics_data = self._get_metrics_topology(safe_time_window, namespace)
+                metrics_data = self._get_metrics_topology(effective_time_window, namespace)
                 logger.debug("metrics_data nodes=%s", len(metrics_data.get("nodes", [])))
             except Exception as e:
                 logger.exception(f"Error in _get_metrics_topology: {e}")
@@ -145,23 +146,23 @@ class HybridTopologyBuilder:
                 len(metrics_data.get("nodes", []))
             )
 
-            if total_nodes == 0 and safe_time_window != "24 HOUR":
-                logger.warning(f"No data found in {safe_time_window}, expanding to 24 HOUR")
-                safe_time_window = "24 HOUR"
+            if total_nodes == 0 and effective_time_window != "24 HOUR":
+                logger.warning("No data found in %s, expanding to 24 HOUR", effective_time_window)
+                effective_time_window = "24 HOUR"
                 try:
-                    traces_data = self._get_traces_topology(safe_time_window, namespace)
+                    traces_data = self._get_traces_topology(effective_time_window, namespace)
                 except Exception as e:
                     logger.error(f"Error in _get_traces_topology (24H): {e}")
                     traces_data = {"nodes": [], "edges": []}
 
                 try:
-                    logs_data = self._get_logs_topology(safe_time_window, namespace)
+                    logs_data = self._get_logs_topology(effective_time_window, namespace)
                 except Exception as e:
                     logger.error(f"Error in _get_logs_topology (24H): {e}")
                     logs_data = {"nodes": [], "edges": []}
 
                 try:
-                    metrics_data = self._get_metrics_topology(safe_time_window, namespace)
+                    metrics_data = self._get_metrics_topology(effective_time_window, namespace)
                 except Exception as e:
                     logger.error(f"Error in _get_metrics_topology (24H): {e}")
                     metrics_data = {"nodes": [], "edges": []}
@@ -221,7 +222,8 @@ class HybridTopologyBuilder:
 
             metadata = {
                 "data_sources": self._get_data_sources(traces_data, logs_data, metrics_data),
-                "time_window": safe_time_window,
+                "time_window": requested_time_window,
+                "effective_time_window": effective_time_window,
                 "namespace": namespace,
                 "node_count": len(merged_nodes),
                 "edge_count": len(filtered_edges),
@@ -285,7 +287,7 @@ class HybridTopologyBuilder:
             # 查询 traces 表获取调用链
             prewhere_conditions = [f"timestamp > now() - INTERVAL {safe_time_window}"]
             if safe_namespace:
-                prewhere_conditions.append(f"namespace = '{safe_namespace}'")
+                prewhere_conditions.append(f"traces_namespace = '{safe_namespace}'")
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
 
             # 查询 span 关系（通过 trace_id 和 parent_span_id）

@@ -2,7 +2,7 @@
  * 标签发现页面
  * 参考 Datadog 设计风格
  */
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useEvents } from '../hooks/useApi';
 import LoadingState from '../components/common/LoadingState';
 import EmptyState from '../components/common/EmptyState';
@@ -15,6 +15,10 @@ interface DiscoveredLabel {
   count: number;
 }
 
+type EventLike = Record<string, unknown> & {
+  attributes?: Record<string, unknown>;
+};
+
 const LabelsDiscovery: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [discoveredLabels, setDiscoveredLabels] = useState<DiscoveredLabel[]>([]);
@@ -25,7 +29,7 @@ const LabelsDiscovery: React.FC = () => {
   const { data: eventsData, refetch } = useEvents({ limit: 500 });
 
   // 从事件中提取标签
-  const extractLabels = () => {
+  const extractLabels = useCallback(() => {
     if (!eventsData?.events) return;
 
     setLoading(true);
@@ -33,21 +37,24 @@ const LabelsDiscovery: React.FC = () => {
       const labelMap: Record<string, { values: Set<string>; count: number }> = {};
 
       eventsData.events.forEach((event) => {
+        const eventRecord = event as unknown as EventLike;
+
         // 基础字段
         ['service_name', 'namespace', 'pod_name', 'level'].forEach((key) => {
-          const value = (event as any)[key];
+          const value = eventRecord[key];
           if (value) {
             if (!labelMap[key]) {
               labelMap[key] = { values: new Set(), count: 0 };
             }
-            labelMap[key].values.add(value);
+            labelMap[key].values.add(String(value));
             labelMap[key].count++;
           }
         });
 
         // 属性字段
-        if (event.attributes) {
-          Object.entries(event.attributes).forEach(([key, value]) => {
+        const attributes = eventRecord.attributes;
+        if (attributes && typeof attributes === 'object') {
+          Object.entries(attributes).forEach(([key, value]) => {
             if (typeof value === 'string' || typeof value === 'number') {
               if (!labelMap[key]) {
                 labelMap[key] = { values: new Set(), count: 0 };
@@ -68,18 +75,16 @@ const LabelsDiscovery: React.FC = () => {
         .sort((a, b) => b.count - a.count);
 
       setDiscoveredLabels(labels);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [eventsData?.events]);
 
   React.useEffect(() => {
-    if (eventsData?.events) {
-      extractLabels();
-    }
-  }, [eventsData]);
+    extractLabels();
+  }, [extractLabels]);
 
   const copyToClipboard = async (text: string, key: string) => {
     const copied = await copyTextToClipboard(text);

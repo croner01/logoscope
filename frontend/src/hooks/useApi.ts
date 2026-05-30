@@ -10,9 +10,14 @@ import type {
   AggregatedLogsParams,
   LogsQueryParams,
   LogsFacetQueryParams,
+  TopologyGraph,
 } from '../utils/api';
+import type { Span as TraceTimelineSpan } from '../components/traces/TraceTimeline';
 import { parseLogMessage } from '../utils/logMessage';
 import { isHealthCheckMessage } from '../utils/healthCheck';
+import { resolveCanonicalServiceName } from '../utils/serviceName';
+
+const TOPOLOGY_WS_RECONNECT_DELAY_MS = 2000;
 
 /**
  * API 调用状态
@@ -21,6 +26,10 @@ export interface ApiState<T> {
   data: T | null;
   loading: boolean;
   error: Error | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
 function stableSerialize(value: unknown): string {
@@ -74,7 +83,7 @@ function stableSerialize(value: unknown): string {
 /**
  * 通用 Hook 创建函数
  */
-function createApiHook<T, P extends Record<string, any> | undefined>(
+function createApiHook<T, P extends object | undefined>(
   apiFunc: (params: P) => Promise<T>,
   initialParams: P
 ): (params?: P) => ApiState<T> & { refetch: () => void } {
@@ -104,7 +113,7 @@ function createApiHook<T, P extends Record<string, any> | undefined>(
         }
         setState(prev => ({ ...prev, loading: false, error: error as Error }));
       }
-    }, [apiFunc]);
+    }, []);
 
     useEffect(() => {
       fetchData();
@@ -157,8 +166,8 @@ export const useMetrics = createApiHook(
 /**
  * 使用指标统计
  */
-export function useMetricStats(): ApiState<Record<string, any>> & { refetch: () => void } {
-  const [state, setState] = useState<ApiState<Record<string, any>>>({ data: null, loading: true, error: null });
+export function useMetricStats(): ApiState<Record<string, unknown>> & { refetch: () => void } {
+  const [state, setState] = useState<ApiState<Record<string, unknown>>>({ data: null, loading: true, error: null });
 
   const fetchData = useCallback(async () => {
     try {
@@ -172,8 +181,7 @@ export function useMetricStats(): ApiState<Record<string, any>> & { refetch: () 
 
   useEffect(() => {
     fetchData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchData]);
 
   return { ...state, refetch: fetchData };
 }
@@ -183,14 +191,22 @@ export function useMetricStats(): ApiState<Record<string, any>> & { refetch: () 
  */
 export const useTraces = createApiHook(
   (params) => api.getTraces(params),
-  {} as { limit?: number; service_name?: string; trace_id?: string }
+  {} as {
+    limit?: number;
+    offset?: number;
+    service_name?: string;
+    trace_id?: string;
+    start_time?: string;
+    end_time?: string;
+    time_window?: string;
+  }
 );
 
 /**
  * 使用追踪的所有 spans
  */
 export function useTraceSpans(traceId: string | null) {
-  const [state, setState] = useState<{ data: any[] | null; loading: boolean; error: Error | null }>({
+  const [state, setState] = useState<{ data: TraceTimelineSpan[] | null; loading: boolean; error: Error | null }>({
     data: null,
     loading: false,
     error: null
@@ -206,7 +222,7 @@ export function useTraceSpans(traceId: string | null) {
       try {
         setState(prev => ({ ...prev, loading: true, error: null }));
         const result = await api.getTraceSpans(traceId);
-        setState({ data: result, loading: false, error: null });
+        setState({ data: result as TraceTimelineSpan[], loading: false, error: null });
       } catch (error) {
         setState({ data: null, loading: false, error: error as Error });
       }
@@ -221,13 +237,17 @@ export function useTraceSpans(traceId: string | null) {
 /**
  * 使用追踪统计
  */
-export function useTraceStats(): ApiState<Record<string, any>> & { refetch: () => void } {
-  const [state, setState] = useState<ApiState<Record<string, any>>>({ data: null, loading: true, error: null });
+export function useTraceStats(
+  params: { time_window?: string; start_time?: string; end_time?: string } = {}
+): ApiState<Record<string, unknown>> & { refetch: () => void } {
+  const [state, setState] = useState<ApiState<Record<string, unknown>>>({ data: null, loading: true, error: null });
+  const paramsRef = useRef(params);
+  const paramsKey = useMemo(() => stableSerialize(params), [params]);
 
   const fetchData = useCallback(async () => {
     try {
       setState(prev => ({ ...prev, loading: true, error: null }));
-      const result = await api.getTraceStats();
+      const result = await api.getTraceStats(paramsRef.current);
       setState({ data: result, loading: false, error: null });
     } catch (error) {
       setState({ data: null, loading: false, error: error as Error });
@@ -235,9 +255,12 @@ export function useTraceStats(): ApiState<Record<string, any>> & { refetch: () =
   }, []);
 
   useEffect(() => {
+    paramsRef.current = params;
+  }, [params, paramsKey]);
+
+  useEffect(() => {
     fetchData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchData, paramsKey]);
 
   return { ...state, refetch: fetchData };
 }
@@ -255,16 +278,26 @@ export const useTopology = createApiHook(
  */
 export const useTraceLiteInferred = createApiHook(
   (params) => api.getTraceLiteInferred(params),
-  {} as { time_window?: string; source_service?: string; target_service?: string; namespace?: string; limit?: number }
+  {} as { time_window?: string; source_service?: string; target_service?: string; namespace?: string; source_namespace?: string; target_namespace?: string; limit?: number }
 );
 
 /**
  * 使用拓扑链路问题日志预览
  */
 export function useTopologyEdgeLogPreview(
-  params: { source_service?: string; target_service?: string; time_window?: string; limit?: number; exclude_health_check?: boolean } | null
-): ApiState<{ data: Event[]; count: number; limit: number; context?: Record<string, any> }> & { refetch: () => void } {
-  const [state, setState] = useState<ApiState<{ data: Event[]; count: number; limit: number; context?: Record<string, any> }>>({
+  params: {
+    source_service?: string;
+    target_service?: string;
+    namespace?: string;
+    source_namespace?: string;
+    target_namespace?: string;
+    time_window?: string;
+    anchor_time?: string;
+    limit?: number;
+    exclude_health_check?: boolean;
+  } | null
+): ApiState<{ data: Event[]; count: number; limit: number; context?: Record<string, unknown> }> & { refetch: () => void } {
+  const [state, setState] = useState<ApiState<{ data: Event[]; count: number; limit: number; context?: Record<string, unknown> }>>({
     data: null,
     loading: false,
     error: null,
@@ -287,7 +320,11 @@ export function useTopologyEdgeLogPreview(
       const result = await api.getTopologyEdgeLogPreview({
         source_service: current.source_service,
         target_service: current.target_service,
+        namespace: current.namespace,
+        source_namespace: current.source_namespace,
+        target_namespace: current.target_namespace,
         time_window: current.time_window || '1 HOUR',
+        anchor_time: current.anchor_time,
         limit: current.limit || 8,
         exclude_health_check: current.exclude_health_check ?? true,
       });
@@ -372,8 +409,7 @@ export function useAlertRules(): ApiState<{ total: number; rules: AlertRule[] }>
 
   useEffect(() => {
     fetchData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchData]);
 
   return { ...state, refetch: fetchData };
 }
@@ -383,7 +419,7 @@ export function useAlertRules(): ApiState<{ total: number; rules: AlertRule[] }>
  */
 export const useAlertEvents = createApiHook(
   (params) => api.getAlertEvents(params),
-  {} as { limit?: number; status?: string; severity?: string; cursor?: string; service_name?: string; search?: string }
+  {} as { limit?: number; status?: string; severity?: string; cursor?: string; service_name?: string; source_service?: string; target_service?: string; namespace?: string; search?: string; scope?: 'all' | 'edge' | 'service' }
 );
 
 /**
@@ -391,7 +427,7 @@ export const useAlertEvents = createApiHook(
  */
 export const useAlertRuleTemplates = createApiHook(
   () => api.getAlertRuleTemplates(),
-  undefined as unknown as undefined
+  undefined
 );
 
 /**
@@ -405,8 +441,8 @@ export const useAlertNotifications = createApiHook(
 /**
  * 使用告警统计
  */
-export function useAlertStats(): ApiState<Record<string, any>> & { refetch: () => void } {
-  const [state, setState] = useState<ApiState<Record<string, any>>>({ data: null, loading: true, error: null });
+export function useAlertStats(): ApiState<Record<string, unknown>> & { refetch: () => void } {
+  const [state, setState] = useState<ApiState<Record<string, unknown>>>({ data: null, loading: true, error: null });
 
   const fetchData = useCallback(async () => {
     try {
@@ -420,8 +456,7 @@ export function useAlertStats(): ApiState<Record<string, any>> & { refetch: () =
 
   useEffect(() => {
     fetchData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchData]);
 
   return { ...state, refetch: fetchData };
 }
@@ -429,12 +464,63 @@ export function useAlertStats(): ApiState<Record<string, any>> & { refetch: () =
 /**
  * 使用日志上下文
  */
-export function useLogContext(params: { log_id?: string; trace_id?: string; pod_name?: string; namespace?: string; timestamp?: string; before_count?: number; after_count?: number; limit?: number } | null): ApiState<{ log_id?: string; trace_id?: string; data?: any[]; count?: number; limit?: number; before?: any[]; after?: any[]; current?: any }> & { refetch: () => void } {
-  const [state, setState] = useState<ApiState<{ log_id?: string; trace_id?: string; data?: any[]; count?: number; limit?: number; before?: any[]; after?: any[]; current?: any }>>({ data: null, loading: false, error: null });
+type LogContextItem = {
+  id?: string;
+  timestamp?: string;
+  level?: string;
+  message?: string;
+  service_name?: string;
+  pod_name?: string;
+  [key: string]: unknown;
+};
+
+type LogContextResponse = {
+  log_id?: string;
+  trace_id?: string;
+  pod_name?: string;
+  namespace?: string;
+  container_name?: string;
+  data?: LogContextItem[];
+  count?: number;
+  limit?: number;
+  before?: LogContextItem[];
+  after?: LogContextItem[];
+  current?: LogContextItem;
+  current_matches?: LogContextItem[];
+  current_count?: number;
+};
+
+function normalizeLogContextParams(
+  params: { log_id?: string; trace_id?: string; pod_name?: string; namespace?: string; container_name?: string; timestamp?: string; before_count?: number; after_count?: number; limit?: number } | null
+): { log_id?: string; trace_id?: string; pod_name?: string; namespace?: string; container_name?: string; timestamp?: string; before_count?: number; after_count?: number; limit?: number } | null {
+  if (!params) {
+    return null;
+  }
+  const logId = String(params.log_id || '').trim();
+  const traceId = String(params.trace_id || '').trim();
+  const podName = String(params.pod_name || '').trim();
+  const namespace = String(params.namespace || '').trim();
+  const containerName = String(params.container_name || '').trim();
+  const timestamp = String(params.timestamp || '').trim();
+  return {
+    log_id: logId || undefined,
+    trace_id: traceId || undefined,
+    pod_name: podName || undefined,
+    namespace: namespace || undefined,
+    container_name: containerName || undefined,
+    timestamp: timestamp || undefined,
+    before_count: params.before_count,
+    after_count: params.after_count,
+    limit: params.limit,
+  };
+}
+
+export function useLogContext(params: { log_id?: string; trace_id?: string; pod_name?: string; namespace?: string; container_name?: string; timestamp?: string; before_count?: number; after_count?: number; limit?: number } | null): ApiState<LogContextResponse> & { refetch: () => void } {
+  const [state, setState] = useState<ApiState<LogContextResponse>>({ data: null, loading: false, error: null });
   const paramsRef = useRef(params);
 
   useEffect(() => {
-    paramsRef.current = params;
+    paramsRef.current = normalizeLogContextParams(params);
   }, [params]);
 
   const fetchData = useCallback(async () => {
@@ -456,16 +542,17 @@ export function useLogContext(params: { log_id?: string; trace_id?: string; pod_
     try {
       setState(prev => ({ ...prev, loading: true, error: null }));
       const result = await api.getLogContext(paramsRef.current);
-      setState({ data: result, loading: false, error: null });
+      setState({ data: result as LogContextResponse, loading: false, error: null });
     } catch (error) {
       setState({ data: null, loading: false, error: error as Error });
     }
   }, []);
 
   useEffect(() => {
-    const hasLogId = params?.log_id;
-    const hasTraceId = params?.trace_id;
-    const hasPodTimestamp = params?.pod_name && params?.timestamp;
+    const normalized = normalizeLogContextParams(params);
+    const hasLogId = normalized?.log_id;
+    const hasTraceId = normalized?.trace_id;
+    const hasPodTimestamp = normalized?.pod_name && normalized?.timestamp;
     if (hasLogId || hasTraceId || hasPodTimestamp) {
       fetchData();
     } else {
@@ -495,8 +582,7 @@ export function useHealth(): ApiState<{ status: string; service: string; version
 
   useEffect(() => {
     fetchData();
-  // eslint-disable-next-line react-hooks/exhaust-deps
-  }, []);
+  }, [fetchData]);
 
   return { ...state, refetch: fetchData };
 }
@@ -659,13 +745,14 @@ export interface RealtimeLog {
   message: string;
   pod_name?: string;
   namespace?: string;
+  attributes?: Record<string, unknown>;
   log_meta?: {
     wrapped: boolean;
     stream?: string;
     collector_time?: string;
     line_count: number;
   };
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface UseRealtimeLogsOptions {
@@ -673,6 +760,8 @@ export interface UseRealtimeLogsOptions {
   maxLogs?: number;
   filters?: {
     service_name?: string;
+    namespace?: string;
+    container_name?: string;
     level?: string;
     exclude_health_check?: boolean;
   };
@@ -696,7 +785,7 @@ function normalizeRealtimeLevel(rawLevel: unknown, message: unknown): 'TRACE' | 
     const prefixMatched = text.match(
       /^\[?(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL)\]?(?:\s+|:|-)/i
     ) || text.match(
-      /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s+(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL)\b/i
+      /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL)\b/i
     );
     const resolved = String(prefixMatched?.[1] || '').toUpperCase();
     if (resolved === 'WARNING') {
@@ -708,13 +797,57 @@ function normalizeRealtimeLevel(rawLevel: unknown, message: unknown): 'TRACE' | 
     return '';
   };
 
+  const resolveStructuredLevel = (value: unknown): 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL' | '' => {
+    const text = String(value || '').trim();
+    if (!text) {
+      return '';
+    }
+    const match = text.match(
+      /(?:^|[\s,{])"?(?:level|log_level|severity|severity_text)"?\s*[:=]\s*"?(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL)\b/i,
+    );
+    if (!match?.[1]) {
+      return '';
+    }
+    const normalized = String(match[1]).toUpperCase();
+    if (normalized === 'WARNING') {
+      return 'WARN';
+    }
+    if (['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'].includes(normalized)) {
+      return normalized as 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL';
+    }
+    return '';
+  };
+
+  const resolveWrappedLogLevel = (value: unknown): 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL' | '' => {
+    const text = String(value || '').trim();
+    if (!text || !text.startsWith('{')) {
+      return '';
+    }
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object') {
+        return '';
+      }
+      const nestedRaw = (parsed as Record<string, unknown>).log
+        ?? (parsed as Record<string, unknown>).message
+        ?? (parsed as Record<string, unknown>).msg;
+      const nestedText = typeof nestedRaw === 'string' ? nestedRaw : '';
+      if (!nestedText) {
+        return '';
+      }
+      return resolveStrictLevel(nestedText) || resolveStructuredLevel(nestedText);
+    } catch {
+      return '';
+    }
+  };
+
   const rawLevelResolved = resolveStrictLevel(rawLevel);
   if (rawLevelResolved && rawLevelResolved !== 'INFO') {
     return rawLevelResolved;
   }
 
   const text = String(message || '').trim();
-  const messageResolved = resolveStrictLevel(text);
+  const messageResolved = resolveStrictLevel(text) || resolveStructuredLevel(text) || resolveWrappedLogLevel(text);
   if (messageResolved && (!rawLevelResolved || rawLevelResolved === 'INFO')) {
     return messageResolved;
   }
@@ -750,32 +883,53 @@ function hashText(input: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function buildRealtimeLogId(log: Partial<RealtimeLog>): string {
-  if (log.id && String(log.id).trim()) {
-    return String(log.id).trim();
+function parseRealtimeLogMeta(raw: unknown): Record<string, unknown> {
+  if (!raw) {
+    return {};
   }
-  const ts = String(log.timestamp || '');
-  const service = String(log.service_name || 'unknown');
-  const level = String(log.level || 'INFO');
-  const message = String(log.message || '');
-  return `${ts}-${service}-${level}-${hashText(message)}`;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  return {};
 }
 
-function resolveRealtimeLogPayload(message: any): RealtimeLog | null {
-  if (message?.type === 'log' && message?.data && typeof message.data === 'object') {
-    return message.data as RealtimeLog;
+function buildRealtimeLogId(log: Partial<RealtimeLog>): string {
+  const rawId = String(log.id || '').trim();
+  const ts = String(log.timestamp || '');
+  const service = resolveCanonicalServiceName(log.service_name, log.pod_name);
+  const pod = String(log.pod_name || '');
+  const namespace = String(log.namespace || '');
+  const level = String(log.level || 'INFO');
+  const traceId = String(log.trace_id || log.attributes?.trace_id || '');
+  const message = String(log.message || '');
+  return `${rawId}-${ts}-${service}-${pod}-${namespace}-${level}-${traceId}-${hashText(message)}`;
+}
+
+function resolveRealtimeLogPayload(message: unknown): RealtimeLog | null {
+  const messageRecord = asRecord(message);
+  if (messageRecord.type === 'log' && messageRecord.data && typeof messageRecord.data === 'object') {
+    return messageRecord.data as RealtimeLog;
   }
-  if (message?.log && typeof message.log === 'object') {
-    return message.log as RealtimeLog;
+  if (messageRecord.log && typeof messageRecord.log === 'object') {
+    return messageRecord.log as RealtimeLog;
   }
   if (
-    message &&
-    typeof message === 'object' &&
-    typeof message.message === 'string' &&
-    message.timestamp &&
-    (message.service_name || message.level || message.pod_name || message.trace_id || message.id)
+    typeof messageRecord.message === 'string' &&
+    messageRecord.timestamp &&
+    (messageRecord.service_name || messageRecord.level || messageRecord.pod_name || messageRecord.trace_id || messageRecord.id)
   ) {
-    return message as RealtimeLog;
+    return messageRecord as RealtimeLog;
   }
   return null;
 }
@@ -831,18 +985,36 @@ export function useRealtimeLogs(options: UseRealtimeLogsOptions = {}) {
           if (rawLog) {
             const parsedMessage = parseLogMessage(rawLog.message || '');
             const resolvedLevel = normalizeRealtimeLevel(rawLog.level, parsedMessage.message);
+            const resolvedServiceName = resolveCanonicalServiceName(rawLog.service_name, rawLog.pod_name);
+            const rawLogMeta = parseRealtimeLogMeta(rawLog.log_meta);
             const newLog: RealtimeLog = {
               ...rawLog,
               id: buildRealtimeLogId(rawLog),
+              service_name: resolvedServiceName,
               level: resolvedLevel,
               message: parsedMessage.message,
               log_meta: {
-                ...(rawLog.log_meta || {}),
                 ...parsedMessage.meta,
+                ...rawLogMeta,
               },
             };
 
-            if (filters?.service_name && newLog.service_name !== filters.service_name) {
+            if (
+              filters?.service_name
+              && resolveCanonicalServiceName(newLog.service_name, newLog.pod_name) !== resolveCanonicalServiceName(filters.service_name)
+            ) {
+              return;
+            }
+            if (
+              filters?.namespace
+              && String(newLog.namespace || '').trim() !== String(filters.namespace || '').trim()
+            ) {
+              return;
+            }
+            if (
+              filters?.container_name
+              && String(newLog.container_name || '').trim() !== String(filters.container_name || '').trim()
+            ) {
               return;
             }
             if (filters?.level && newLog.level !== normalizeRealtimeLevel(filters.level, '')) {
@@ -954,17 +1126,21 @@ export interface UseRealtimeTopologyOptions {
     message_target_min_support?: number;
     message_target_max_per_log?: number;
   };
-  onUpdate?: (topology: any) => void;
+  onUpdate?: (topology: TopologyGraph | null) => void;
   onError?: (error: Error) => void;
 }
 
 export function useRealtimeTopology(options: UseRealtimeTopologyOptions = {}) {
   const { enabled = true, subscription, onUpdate, onError } = options;
 
-  const [topology, setTopology] = useState<any>(null);
+  const [topology, setTopology] = useState<TopologyGraph | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const pendingTopologyRef = useRef<TopologyGraph | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const shouldReconnectRef = useRef(enabled);
   const subscriptionRef = useRef({
     time_window: '1 HOUR',
     namespace: null as string | null,
@@ -1028,14 +1204,34 @@ export function useRealtimeTopology(options: UseRealtimeTopologyOptions = {}) {
         action: 'subscribe',
         params: normalizedSubscription,
       }));
-      wsRef.current.send(JSON.stringify({ action: 'get' }));
     }
   }, [normalizedSubscription]);
 
-  const connect = useCallback(() => {
-    if (!enabled || wsRef.current?.readyState === WebSocket.OPEN) {
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const flushTopologyUpdate = useCallback(() => {
+    animationFrameRef.current = null;
+    const nextTopology = pendingTopologyRef.current;
+    if (!nextTopology) {
       return;
     }
+    pendingTopologyRef.current = null;
+    setTopology(nextTopology);
+    onUpdate?.(nextTopology);
+  }, [onUpdate]);
+
+  const connect = useCallback(() => {
+    const readyState = wsRef.current?.readyState;
+    if (!enabled || readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    shouldReconnectRef.current = enabled;
 
     try {
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1047,15 +1243,15 @@ export function useRealtimeTopology(options: UseRealtimeTopologyOptions = {}) {
 
       ws.onopen = () => {
         console.log('[WebSocket] Connected to topology stream');
+        clearReconnectTimer();
         setIsConnected(true);
         setError(null);
 
-        // 首次连接时立即同步当前订阅参数并拉取一次数据。
+        // 首次连接时仅订阅，避免与服务端初始推送/轮询形成重复构建。
         ws.send(JSON.stringify({
           action: 'subscribe',
           params: subscriptionRef.current,
         }));
-        ws.send(JSON.stringify({ action: 'get' }));
       };
 
       ws.onmessage = (event) => {
@@ -1063,8 +1259,10 @@ export function useRealtimeTopology(options: UseRealtimeTopologyOptions = {}) {
           const message = JSON.parse(event.data);
 
           if (message.type === 'topology_update' && message.data) {
-            setTopology(message.data);
-            onUpdate?.(message.data);
+            pendingTopologyRef.current = message.data as TopologyGraph;
+            if (animationFrameRef.current === null) {
+              animationFrameRef.current = window.requestAnimationFrame(flushTopologyUpdate);
+            }
           } else if (message.type === 'ping') {
             ws.send(JSON.stringify({ action: 'pong' }));
           }
@@ -1082,8 +1280,21 @@ export function useRealtimeTopology(options: UseRealtimeTopologyOptions = {}) {
 
       ws.onclose = () => {
         console.log('[WebSocket] Topology disconnected');
+        if (animationFrameRef.current !== null) {
+          window.cancelAnimationFrame(animationFrameRef.current);
+          animationFrameRef.current = null;
+        }
+        pendingTopologyRef.current = null;
         setIsConnected(false);
         wsRef.current = null;
+        if (shouldReconnectRef.current && reconnectTimerRef.current === null) {
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            if (shouldReconnectRef.current) {
+              connect();
+            }
+          }, TOPOLOGY_WS_RECONNECT_DELAY_MS);
+        }
       };
 
     } catch (e) {
@@ -1092,17 +1303,25 @@ export function useRealtimeTopology(options: UseRealtimeTopologyOptions = {}) {
       setError(err);
       onError?.(err);
     }
-  }, [enabled, onUpdate, onError]);
+  }, [clearReconnectTimer, enabled, flushTopologyUpdate, onError]);
 
   const disconnect = useCallback(() => {
+    shouldReconnectRef.current = false;
+    clearReconnectTimer();
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    pendingTopologyRef.current = null;
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
     setIsConnected(false);
-  }, []);
+  }, [clearReconnectTimer]);
 
   useEffect(() => {
+    shouldReconnectRef.current = enabled;
     if (enabled) {
       connect();
     } else {

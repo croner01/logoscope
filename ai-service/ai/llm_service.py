@@ -17,7 +17,8 @@ import logging
 import hashlib
 import asyncio
 import re
-from typing import Dict, Any, List, Optional, Literal
+from collections import OrderedDict
+from typing import Dict, Any, List, Optional, Literal, AsyncIterator
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
@@ -180,7 +181,9 @@ class LLMConfig:
     timeout: int = 60
     cache_enabled: bool = True
     cache_ttl: int = 3600  # 1 hour
+    cache_max_entries: int = 2048
     rate_limit: int = 60  # requests per minute
+    response_format: Optional[Dict[str, Any]] = None  # {"type": "json_object"} etc.
 
 
 @dataclass
@@ -200,7 +203,7 @@ class BaseLLMProvider(ABC):
 
     def __init__(self, config: LLMConfig):
         self.config = config
-        self._cache: Dict[str, tuple[str, datetime]] = {}
+        self._cache: "OrderedDict[str, tuple[str, datetime]]" = OrderedDict()
 
     def _get_cache_key(self, prompt: str, system_prompt: str = "") -> str:
         """生成缓存键"""
@@ -216,6 +219,7 @@ class BaseLLMProvider(ABC):
         if cached:
             content, timestamp = cached
             if datetime.now() - timestamp < timedelta(seconds=self.config.cache_ttl):
+                self._cache.move_to_end(key)
                 return content
             else:
                 del self._cache[key]
@@ -225,6 +229,10 @@ class BaseLLMProvider(ABC):
         """设置缓存"""
         if self.config.cache_enabled:
             self._cache[key] = (content, datetime.now())
+            self._cache.move_to_end(key)
+            max_entries = max(1, int(self.config.cache_max_entries or 1))
+            while len(self._cache) > max_entries:
+                self._cache.popitem(last=False)
 
     @abstractmethod
     async def generate(
@@ -235,6 +243,18 @@ class BaseLLMProvider(ABC):
     ) -> LLMResponse:
         """生成响应"""
         pass
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        **kwargs
+    ) -> AsyncIterator[str]:
+        """流式生成响应，默认降级为一次性返回。"""
+        response = await self.generate(prompt, system_prompt, **kwargs)
+        content = str(response.content or "")
+        if content:
+            yield content
 
 
 class OpenAIProvider(BaseLLMProvider):
@@ -297,12 +317,16 @@ class OpenAIProvider(BaseLLMProvider):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
-            response = await client.chat.completions.create(
+            create_kwargs = dict(
                 model=kwargs.get("model", self.config.model),
                 messages=messages,
                 max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
                 temperature=kwargs.get("temperature", self.config.temperature),
             )
+            response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
+            response = await client.chat.completions.create(**create_kwargs)
 
             content = response.choices[0].message.content
             latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -325,6 +349,62 @@ class OpenAIProvider(BaseLLMProvider):
                 provider=self.provider_name,
                 error=str(e),
             )
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        **kwargs
+    ) -> AsyncIterator[str]:
+        """流式生成响应（OpenAI compatible providers）。"""
+        start_time = datetime.now()
+        chunks: List[str] = []
+        try:
+            client = await self._get_client()
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            create_kwargs = dict(
+                model=kwargs.get("model", self.config.model),
+                messages=messages,
+                max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
+                temperature=kwargs.get("temperature", self.config.temperature),
+                stream=True,
+            )
+            response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
+            stream = await client.chat.completions.create(**create_kwargs)
+            async for event in stream:
+                try:
+                    delta = event.choices[0].delta.content
+                except Exception:
+                    delta = ""
+                text = str(delta or "")
+                if not text:
+                    continue
+                chunks.append(text)
+                yield text
+            final_text = "".join(chunks)
+            if final_text:
+                cache_key = self._get_cache_key(prompt, system_prompt)
+                self._set_cache(cache_key, final_text)
+            latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            logger.debug(
+                "%s stream completed, latency_ms=%s, chunks=%s",
+                self.provider_name,
+                latency_ms,
+                len(chunks),
+            )
+        except Exception as e:
+            logger.error(f"{self.provider_name} stream API error: {e}")
+            if chunks:
+                return
+            response = await self.generate(prompt, system_prompt, **kwargs)
+            content = str(response.content or "")
+            if content:
+                yield content
 
 
 class ClaudeProvider(BaseLLMProvider):
@@ -398,6 +478,18 @@ class ClaudeProvider(BaseLLMProvider):
                 provider="claude",
                 error=str(e),
             )
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        **kwargs
+    ) -> AsyncIterator[str]:
+        """Claude SDK 流式在当前工程先降级到一次性响应。"""
+        response = await self.generate(prompt, system_prompt, **kwargs)
+        content = str(response.content or "")
+        if content:
+            yield content
 
 
 class LocalModelProvider(BaseLLMProvider):
@@ -488,6 +580,57 @@ class LocalModelProvider(BaseLLMProvider):
                 error=str(e),
             )
 
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        **kwargs
+    ) -> AsyncIterator[str]:
+        """流式生成响应（本地 OpenAI compatible）。"""
+        start_time = datetime.now()
+        chunks: List[str] = []
+        try:
+            client = await self._get_client()
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            create_kwargs = dict(
+                model=kwargs.get("model", self.config.model),
+                messages=messages,
+                max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
+                temperature=kwargs.get("temperature", self.config.temperature),
+                stream=True,
+            )
+            response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
+            stream = await client.chat.completions.create(**create_kwargs)
+            async for event in stream:
+                try:
+                    delta = event.choices[0].delta.content
+                except Exception:
+                    delta = ""
+                text = str(delta or "")
+                if not text:
+                    continue
+                chunks.append(text)
+                yield text
+            final_text = "".join(chunks)
+            if final_text:
+                cache_key = self._get_cache_key(prompt, system_prompt)
+                self._set_cache(cache_key, final_text)
+            latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            logger.debug("local stream completed, latency_ms=%s, chunks=%s", latency_ms, len(chunks))
+        except Exception as e:
+            logger.error(f"Local model stream API error: {e}")
+            if chunks:
+                return
+            response = await self.generate(prompt, system_prompt, **kwargs)
+            content = str(response.content or "")
+            if content:
+                yield content
+
 
 class DeepSeekProvider(OpenAIProvider):
     """DeepSeek 提供者（OpenAI 兼容 API）。"""
@@ -529,28 +672,55 @@ class LLMService:
         context: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """分析日志"""
-        system_prompt = """你是一个专业的日志分析专家。你的任务是分析日志内容，识别问题类型、根本原因，并提供解决方案。
+        system_prompt = """你是资深运维架构师（10年以上经验），精通 OpenStack、Kubernetes、MariaDB、Linux 故障诊断与修复落地。请严格按以下顺序输出分析：
+1) 先分析请求/数据路径（数据如何在组件间流转）；
+2) 再给出具体问题原因；
+3) 然后给出处理思路；
+4) 最后给出可执行建议与步骤。
 
-请以 JSON 格式返回分析结果，包含以下字段：
+你必须返回严格 JSON（不要 markdown、不要额外解释），字段如下：
 {
-    "problem_type": "问题类型（database/memory/network/performance/disk/auth/other）",
-    "severity": "严重程度（critical/high/medium/low）",
-    "summary": "问题摘要（一句话描述）",
-    "root_causes": ["根因1", "根因2"],
-    "solutions": [
-        {
-            "title": "解决方案标题",
-            "description": "详细描述",
-            "steps": ["步骤1", "步骤2"]
-        }
+  "problem_type": "database|memory|network|performance|disk|auth|dependency|timeout|other",
+  "severity": "critical|high|medium|low",
+  "summary": "一句话摘要",
+  "data_flow": {
+    "summary": "数据路径与关键流转说明",
+    "path": [
+      {
+        "step": 1,
+        "component": "组件/服务名",
+        "operation": "操作或调用",
+        "evidence": "日志/trace 证据",
+        "latency_ms": 0,
+        "status": "ok|warning|error|unknown"
+      }
     ],
-    "similar_cases": ["相似案例描述"],
-    "confidence": 0.85
+    "evidence": ["关键证据1", "关键证据2"],
+    "confidence": 0.0
+  },
+  "root_causes": ["原因1", "原因2"],
+  "handling_ideas": ["处理思路1", "处理思路2"],
+  "solutions": [
+    {
+      "title": "建议标题",
+      "description": "建议说明",
+      "steps": ["步骤1", "步骤2"]
+    }
+  ],
+  "similar_cases": ["相似案例描述"],
+  "confidence": 0.0
 }
 
-请确保返回有效的 JSON 格式。"""
+约束：
+- 如果证据不足，也要给出 data_flow.summary，并在 evidence 中说明假设点。
+- handling_ideas 偏方法论（先查什么、如何缩小范围），solutions 偏执行动作。
+- 如果日志上下文显示技术栈特征，优先按对应场景聚焦分析：
+  - Kubernetes: 优先检查 Pod 启动/调度/事件/资源约束；
+  - OpenStack: 优先检查 Nova/Neutron/Cinder 组件间调用与失败链；
+  - MariaDB: 优先检查连接、锁等待、慢查询、主从复制异常；
+  - Linux: 优先检查进程、端口、磁盘、权限与系统日志。"""
 
-        prompt = f"""请分析以下日志内容：
+        prompt = f"""请分析以下日志内容。
 
 服务名称: {service_name}
 日志内容:
@@ -560,7 +730,7 @@ class LLMService:
 
 {f'上下文信息: {json.dumps(context, ensure_ascii=False)}' if context else ''}
 
-请识别问题类型、分析根本原因，并提供解决方案。"""
+请先还原并说明数据路径，再给出根因、处理思路与建议举措。"""
 
         response = await self._provider.generate(prompt, system_prompt)
 
@@ -600,17 +770,44 @@ class LLMService:
         service_name: str = "",
     ) -> Dict[str, Any]:
         """分析追踪链路"""
-        system_prompt = """你是一个专业的分布式系统追踪分析专家。你的任务是分析分布式追踪数据，识别性能瓶颈、异常调用和潜在问题。
+        system_prompt = """你是一个专业的分布式追踪分析专家。请严格按以下顺序输出：
+1) 先还原调用/数据路径（入口、关键跳转、出口）；
+2) 再说明问题原因（错误与瓶颈）；
+3) 给出处理思路（排查优先级与验证路径）；
+4) 给出可执行建议（短期止血 + 中长期优化）。
 
-请以 JSON 格式返回分析结果，包含以下字段：
+你必须返回严格 JSON（不要 markdown、不要额外解释），字段如下：
 {
-    "summary": "链路分析摘要",
-    "total_duration_ms": 总耗时毫秒,
-    "bottleneck_spans": ["瓶颈节点"],
-    "error_spans": ["错误节点"],
-    "recommendations": ["优化建议"],
-    "confidence": 0.85
-}"""
+  "summary": "链路分析摘要",
+  "problem_type": "trace|timeout|dependency|performance|other",
+  "severity": "critical|high|medium|low",
+  "data_flow": {
+    "summary": "调用链/数据流转说明",
+    "path": [
+      {
+        "step": 1,
+        "component": "服务名",
+        "operation": "span 或调用描述",
+        "evidence": "trace/span 证据",
+        "latency_ms": 0,
+        "status": "ok|warning|error|unknown"
+      }
+    ],
+    "evidence": ["证据1", "证据2"],
+    "confidence": 0.0
+  },
+  "total_duration_ms": 0,
+  "bottleneck_spans": ["瓶颈节点"],
+  "error_spans": ["错误节点"],
+  "root_causes": ["根因1", "根因2"],
+  "handling_ideas": ["处理思路1", "处理思路2"],
+  "recommendations": ["建议1", "建议2"],
+  "confidence": 0.0
+}
+
+约束：
+- data_flow.path 至少给出 2 个关键节点（若数据不足可标注 unknown）。
+- handling_ideas 强调诊断路径，recommendations 强调执行动作。"""
 
         prompt = f"""请分析以下分布式追踪数据：
 
@@ -620,7 +817,7 @@ class LLMService:
 {trace_data}
 ```
 
-请识别性能瓶颈、异常调用，并提供优化建议。"""
+请先还原调用链和数据流，再给出根因、处理思路与优化建议。"""
 
         response = await self._provider.generate(prompt, system_prompt)
 
@@ -644,16 +841,39 @@ class LLMService:
         self,
         message: str,
         context: Dict[str, Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> str:
         """通用对话"""
         system_prompt = "你是一个专业的可观测性和日志分析助手。"
-        
+
         prompt = message
         if context:
             prompt = f"上下文信息:\n{json.dumps(context, ensure_ascii=False)}\n\n{message}"
 
-        response = await self._provider.generate(prompt, system_prompt)
+        response = await self._provider.generate(
+            prompt, system_prompt, response_format=response_format or self.config.response_format,
+        )
         return response.content
+
+    async def chat_stream(
+        self,
+        message: str,
+        context: Dict[str, Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """通用对话（流式）。"""
+        system_prompt = "你是一个专业的可观测性和日志分析助手。"
+
+        prompt = message
+        if context:
+            prompt = f"上下文信息:\n{json.dumps(context, ensure_ascii=False)}\n\n{message}"
+
+        async for chunk in self._provider.generate_stream(
+            prompt, system_prompt, response_format=response_format or self.config.response_format,
+        ):
+            text = str(chunk or "")
+            if text:
+                yield text
 
 
 _llm_service: Optional[LLMService] = None
@@ -672,6 +892,7 @@ def get_llm_service() -> LLMService:
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2000")),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             cache_enabled=os.getenv("LLM_CACHE_ENABLED", "true").lower() == "true",
+            cache_max_entries=max(1, int(os.getenv("LLM_CACHE_MAX_ENTRIES", "2048"))),
         )
         _llm_service = LLMService(config)
     return _llm_service

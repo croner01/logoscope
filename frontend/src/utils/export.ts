@@ -14,7 +14,7 @@ export interface ExportOptions {
 }
 
 export function exportToCSV(
-  data: Record<string, any>[],
+  data: Array<Record<string, unknown>>,
   columns: string[],
   filename: string = 'export.csv'
 ): void {
@@ -40,14 +40,14 @@ export function exportToCSV(
 }
 
 export function exportToJSON(
-  data: Record<string, any>[] | Record<string, any>,
+  data: unknown,
   filename: string = 'export.json'
 ): void {
   const json = JSON.stringify(data, null, 2);
   downloadFile(json, filename, 'application/json');
 }
 
-export function exportLogsToCSV(logs: any[], filename: string = 'logs.csv'): void {
+export function exportLogsToCSV(logs: Array<Record<string, unknown>>, filename: string = 'logs.csv'): void {
   const columns = [
     'timestamp',
     'service_name',
@@ -60,18 +60,18 @@ export function exportLogsToCSV(logs: any[], filename: string = 'logs.csv'): voi
 
   const formattedLogs = logs.map(log => ({
     ...log,
-    timestamp: formatTimestamp(log.timestamp),
-    message: log.message?.substring(0, 500),
+    timestamp: formatTimestamp(String(log.timestamp || '')),
+    message: String(log.message || '').substring(0, 500),
   }));
 
   exportToCSV(formattedLogs, columns, filename);
 }
 
-export function exportTopologyToJSON(topology: any, filename: string = 'topology.json'): void {
+export function exportTopologyToJSON(topology: Record<string, unknown>, filename: string = 'topology.json'): void {
   exportToJSON(topology, filename);
 }
 
-export function exportAnalysisToJSON(analysis: any, filename: string = 'analysis.json'): void {
+export function exportAnalysisToJSON(analysis: Record<string, unknown>, filename: string = 'analysis.json'): void {
   exportToJSON(analysis, filename);
 }
 

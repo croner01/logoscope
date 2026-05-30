@@ -12,10 +12,14 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 _QUERY_SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_REPO_ROOT = os.path.dirname(_QUERY_SERVICE_DIR)
-_SHARED_SRC_DIR = os.path.join(_REPO_ROOT, "shared_src")
-if _SHARED_SRC_DIR not in sys.path:
-    sys.path.insert(0, _SHARED_SRC_DIR)
+_SHARED_LIB_CANDIDATES = (
+    os.getenv("LOGOSCOPE_SHARED_LIB", ""),
+    os.path.abspath(os.path.join(_QUERY_SERVICE_DIR, "..", "shared_src")),
+    "/app/shared_lib",
+)
+for _candidate in _SHARED_LIB_CANDIDATES:
+    if _candidate and os.path.isdir(_candidate) and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
 
 import platform_kernel.fastapi_kernel as fastapi_kernel
 import utils.logging_config as logging_config

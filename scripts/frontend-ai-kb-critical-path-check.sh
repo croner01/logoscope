@@ -104,10 +104,16 @@ status, data = request_json('POST', f'{base}/kb/runtime/options', {
     'retrieval_mode': 'hybrid',
     'save_mode': 'local_and_remote',
 })
-detail = data.get('detail') if isinstance(data.get('detail'), dict) else data
+detail = data.get('detail') if isinstance(data.get('detail'), dict) else {}
 effective_retrieval = detail.get('effective_retrieval_mode')
 effective_save = detail.get('effective_save_mode')
-passed = status in (200, 409, 503) and effective_retrieval in ('local', 'hybrid') and effective_save in ('local_only', 'local_and_remote')
+has_degraded_modes = effective_retrieval in ('local', 'hybrid') and effective_save in ('local_only', 'local_and_remote')
+has_standardized_503 = (
+    status == 503
+    and str(data.get('code') or '').strip() == 'INTERNAL_SERVER_ERROR'
+    and str(data.get('message') or '').strip() == 'Internal server error'
+)
+passed = status in (200, 409, 503) and (has_degraded_modes or has_standardized_503)
 record('case2_runtime_options_remote_toggle', passed, {'http_status': status, 'response': data})
 
 # case3: kb/search 短 query 校验

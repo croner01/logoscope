@@ -358,3 +358,8 @@ Images:
 - Always run `npm run lint` and `npm run typecheck` before committing frontend changes
 - Run `pytest` with coverage before committing Python changes
 - Health check endpoints (`/health`) must not create OpenTelemetry spans to avoid blocking
+- 以第一性原因！从原始需要和问题的本质出发，不从惯例和模版出发。
+- 不要假设我清楚自己想要什么，动机或者目标不定时，停下来讨论
+- 目标清晰但路径不是最短的，直接告诉我并建议更好的办法
+- 遇到问题追溯根因，不打补丁。每个决策都要能回答“为什么”
+- 输出说重点，砍掉一切不改变决策的信息。

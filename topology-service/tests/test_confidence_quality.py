@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 
 # 添加 topology-service 根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from graph.confidence_calculator import get_confidence_calculator
+from shared_src.graph.confidence_calculator import get_confidence_calculator as get_shared_confidence_calculator
 
 
 class TestConfidenceQuality:
@@ -107,3 +109,39 @@ class TestConfidenceQuality:
         # 单源时约 0.3，多源至少应触发 +0.2 加分。
         assert edge_metrics["confidence"] >= 0.5
         assert set(edge_metrics["confidence_details"]["data_sources"]) == {"logs_heuristic", "metrics"}
+
+    def test_recalculate_topology_confidence_calculated_at_is_valid_iso8601(self):
+        """calculated_at 应为可解析 ISO8601，不能出现 +00:00Z。"""
+        calculator = get_confidence_calculator(datetime(2026, 2, 26, tzinfo=timezone.utc))
+        topology = {
+            "nodes": [{"id": "a", "metrics": {"data_sources": ["logs"]}}],
+            "edges": [{"source": "a", "target": "b", "metrics": {"data_source": "logs"}}],
+            "metadata": {},
+        }
+
+        result = calculator.recalculate_topology_confidence(topology)
+        node_ts = result["nodes"][0]["metrics"]["confidence_details"]["calculated_at"]
+        edge_ts = result["edges"][0]["metrics"]["confidence_details"]["calculated_at"]
+
+        assert not str(node_ts).endswith("+00:00Z")
+        assert not str(edge_ts).endswith("+00:00Z")
+        assert datetime.fromisoformat(str(node_ts).replace("Z", "+00:00")).tzinfo is not None
+        assert datetime.fromisoformat(str(edge_ts).replace("Z", "+00:00")).tzinfo is not None
+
+    def test_shared_confidence_calculator_calculated_at_is_valid_iso8601(self):
+        """shared_src 版本也应输出合法 calculated_at。"""
+        calculator = get_shared_confidence_calculator(datetime(2026, 2, 26, tzinfo=timezone.utc))
+        topology = {
+            "nodes": [{"id": "a", "metrics": {"data_sources": ["logs"]}}],
+            "edges": [{"source": "a", "target": "b", "metrics": {"data_source": "logs"}}],
+            "metadata": {},
+        }
+
+        result = calculator.recalculate_topology_confidence(topology)
+        node_ts = result["nodes"][0]["metrics"]["confidence_details"]["calculated_at"]
+        edge_ts = result["edges"][0]["metrics"]["confidence_details"]["calculated_at"]
+
+        assert not str(node_ts).endswith("+00:00Z")
+        assert not str(edge_ts).endswith("+00:00Z")
+        assert datetime.fromisoformat(str(node_ts).replace("Z", "+00:00")).tzinfo is not None
+        assert datetime.fromisoformat(str(edge_ts).replace("Z", "+00:00")).tzinfo is not None

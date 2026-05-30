@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from api.query_params import sanitize_interval
+
+logger = logging.getLogger(__name__)
 
 _PREAGG_TABLE_CACHE: Dict[str, Any] = {
     "expires_at": 0.0,
@@ -51,49 +55,60 @@ _QUERY_TRACES_STATS_DEFAULT_TIME_WINDOW = sanitize_interval(
     os.getenv("QUERY_TRACES_STATS_DEFAULT_TIME_WINDOW", "24 HOUR"),
     default_value="24 HOUR",
 )
-_TRACE_STATS_DURATION_SAMPLE_LIMIT = _read_positive_int_env("TRACE_STATS_DURATION_SAMPLE_LIMIT", 20000)
+_TRACE_STATS_DURATION_SAMPLE_LIMIT = _read_positive_int_env("TRACE_STATS_DURATION_SAMPLE_LIMIT", 8000)
 _TRACE_QUERY_RECENT_SPAN_SCAN_LIMIT = _read_positive_int_env(
     "TRACE_QUERY_RECENT_SPAN_SCAN_LIMIT",
-    20000,
+    8000,
     min_value=1000,
     max_value=500000,
 )
 _TRACE_QUERY_RECENT_SPAN_HARD_LIMIT = _read_positive_int_env(
     "TRACE_QUERY_RECENT_SPAN_HARD_LIMIT",
-    40000,
+    16000,
     min_value=5000,
     max_value=1000000,
 )
 _TRACE_QUERY_RECENT_SPAN_SCAN_FACTOR = _read_positive_int_env(
     "TRACE_QUERY_RECENT_SPAN_SCAN_FACTOR",
-    30,
+    12,
     min_value=2,
     max_value=200,
 )
 _TRACE_QUERY_RECENT_SPAN_SHORT_WINDOW_CAP = _read_positive_int_env(
     "TRACE_QUERY_RECENT_SPAN_SHORT_WINDOW_CAP",
-    20000,
+    12000,
     min_value=2000,
     max_value=500000,
 )
 _TRACE_QUERY_RECENT_SPAN_MEDIUM_WINDOW_CAP = _read_positive_int_env(
     "TRACE_QUERY_RECENT_SPAN_MEDIUM_WINDOW_CAP",
-    30000,
+    16000,
     min_value=5000,
     max_value=800000,
 )
 _TRACE_STATS_DURATION_SCAN_FACTOR = _read_positive_int_env(
     "TRACE_STATS_DURATION_SCAN_FACTOR",
-    20,
+    8,
     min_value=2,
     max_value=200,
 )
 _TRACE_STATS_DURATION_SCAN_HARD_LIMIT = _read_positive_int_env(
     "TRACE_STATS_DURATION_SCAN_HARD_LIMIT",
-    300000,
+    80000,
     min_value=20000,
     max_value=2000000,
 )
+
+
+def _sanitize_json_float(value: Any, default: float = 0.0) -> float:
+    """Return a finite float for JSON responses."""
+    try:
+        numeric = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(numeric):
+        return default
+    return numeric
 
 
 def _read_preagg_schema_version() -> str:
@@ -168,6 +183,16 @@ def _build_level_bucket_expr(column_name: str) -> str:
     )
 
 
+def _row_level_bucket(row: Dict[str, Any]) -> str:
+    """Read grouped level bucket from query rows with backward-compatible aliases."""
+    value = str(row.get("level_bucket") or row.get("level") or "OTHER").strip().upper()
+    if not value:
+        return "OTHER"
+    if value == "WARNING":
+        return "WARN"
+    return value
+
+
 def _interval_to_minutes(interval_text: str) -> int:
     """Convert sanitized interval text (e.g. '1 HOUR') into minutes."""
     try:
@@ -210,7 +235,9 @@ def _compute_recent_span_scan_limit(
     if has_service_name:
         hard_limit = min(hard_limit, int(_TRACE_QUERY_RECENT_SPAN_MEDIUM_WINDOW_CAP))
 
-    dynamic_limit = max(safe_limit * factor, floor_limit)
+    # 小页查询采用自适应 floor，避免固定 floor 导致过扫。
+    adaptive_floor = min(floor_limit, max(3000, safe_limit * 12))
+    dynamic_limit = max(safe_limit * factor, adaptive_floor)
 
     window_minutes = _interval_to_minutes(safe_window)
     if window_minutes <= 60:
@@ -257,8 +284,8 @@ def _parse_start_time_epoch_ms(raw_value: Any) -> float:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp() * 1000.0
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to parse start_time as ISO8601: %r (%s)", raw_value, exc)
 
     for pattern in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
         try:
@@ -363,15 +390,17 @@ def _query_logs_stats_preaggregated_v2(storage_adapter: Any, time_window: str) -
     )
     by_service_rows = storage_adapter.execute_query(
         f"""
+        WITH { _build_level_bucket_expr("dim_value") } AS level_bucket
         SELECT
             service_name,
-            sum(count) AS count
+            sum(count) AS total_count,
+            sumIf(logs.obs_counts_1m.count, level_bucket IN ('ERROR', 'FATAL', 'CRITICAL')) AS error_count
         FROM logs.obs_counts_1m
         PREWHERE signal = 'log'
              AND dim_name = 'level'
              AND ts_minute > now() - INTERVAL {time_window}
         GROUP BY service_name
-        ORDER BY count DESC
+        ORDER BY total_count DESC
         LIMIT 20
         """
     )
@@ -379,7 +408,7 @@ def _query_logs_stats_preaggregated_v2(storage_adapter: Any, time_window: str) -
     by_level_rows = storage_adapter.execute_query(
         f"""
         SELECT
-            {level_bucket_expr} AS level,
+            {level_bucket_expr} AS level_bucket,
             sum(count) AS count
         FROM logs.obs_counts_1m
         PREWHERE signal = 'log'
@@ -393,16 +422,21 @@ def _query_logs_stats_preaggregated_v2(storage_adapter: Any, time_window: str) -
 
     total = int(total_rows[0].get("total", 0)) if total_rows else 0
     by_service = {
-        str(row.get("service_name") or "unknown"): int(row.get("count", 0))
+        str(row.get("service_name") or "unknown"): int(row.get("total_count", row.get("count", 0)))
         for row in by_service_rows
     }
-    by_level = {str(row.get("level") or "OTHER"): int(row.get("count", 0)) for row in by_level_rows}
+    by_service_errors = {
+        str(row.get("service_name") or "unknown"): int(row.get("error_count", 0))
+        for row in by_service_rows
+    }
+    by_level = {_row_level_bucket(row): int(row.get("count", 0)) for row in by_level_rows}
 
     if total <= 0 and not by_service and not by_level:
         return None
     return {
         "total": total,
         "byService": by_service,
+        "byServiceErrors": by_service_errors,
         "byLevel": by_level,
     }
 
@@ -416,13 +450,15 @@ def _query_logs_stats_preaggregated_legacy(storage_adapter: Any, time_window: st
     )
     by_service_rows = storage_adapter.execute_query(
         f"""
+        WITH { _build_level_bucket_expr("level") } AS level_bucket
         SELECT
             service_name,
-            sum(count) AS count
+            sum(count) AS total_count,
+            sumIf(logs.logs_stats_1m.count, level_bucket IN ('ERROR', 'FATAL', 'CRITICAL')) AS error_count
         FROM logs.logs_stats_1m
         PREWHERE ts_minute > now() - INTERVAL {time_window}
         GROUP BY service_name
-        ORDER BY count DESC
+        ORDER BY total_count DESC
         LIMIT 20
         """
     )
@@ -430,7 +466,7 @@ def _query_logs_stats_preaggregated_legacy(storage_adapter: Any, time_window: st
     by_level_rows = storage_adapter.execute_query(
         f"""
         SELECT
-            {level_bucket_expr} AS level,
+            {level_bucket_expr} AS level_bucket,
             sum(count) AS count
         FROM logs.logs_stats_1m
         PREWHERE ts_minute > now() - INTERVAL {time_window}
@@ -442,16 +478,21 @@ def _query_logs_stats_preaggregated_legacy(storage_adapter: Any, time_window: st
 
     total = int(total_rows[0].get("total", 0)) if total_rows else 0
     by_service = {
-        str(row.get("service_name") or "unknown"): int(row.get("count", 0))
+        str(row.get("service_name") or "unknown"): int(row.get("total_count", row.get("count", 0)))
         for row in by_service_rows
     }
-    by_level = {str(row.get("level") or "OTHER"): int(row.get("count", 0)) for row in by_level_rows}
+    by_service_errors = {
+        str(row.get("service_name") or "unknown"): int(row.get("error_count", 0))
+        for row in by_service_rows
+    }
+    by_level = {_row_level_bucket(row): int(row.get("count", 0)) for row in by_level_rows}
 
     if total <= 0 and not by_service and not by_level:
         return None
     return {
         "total": total,
         "byService": by_service,
+        "byServiceErrors": by_service_errors,
         "byLevel": by_level,
     }
 
@@ -510,7 +551,7 @@ def _query_metrics_stats_preaggregated_v2(storage_adapter: Any, time_window: str
 
     total = int(total_rows[0].get("total", 0)) if total_rows else 0
     by_service = {
-        str(row.get("service_name") or "unknown"): int(row.get("count", 0))
+        str(row.get("service_name") or "unknown"): int(row.get("total_count", row.get("count", 0)))
         for row in by_service_rows
     }
     by_metric = {
@@ -561,7 +602,7 @@ def _query_metrics_stats_preaggregated_legacy(storage_adapter: Any, time_window:
 
     total = int(total_rows[0].get("total", 0)) if total_rows else 0
     by_service = {
-        str(row.get("service_name") or "unknown"): int(row.get("count", 0))
+        str(row.get("service_name") or "unknown"): int(row.get("total_count", row.get("count", 0)))
         for row in by_service_rows
     }
     by_metric = {
@@ -640,7 +681,7 @@ def _query_traces_stats_preaggregated_v2(
     trace_count = int(row.get("trace_count", 0) or 0)
     error_trace_count = int(row.get("error_trace_count", 0) or 0)
     by_service = {
-        str(row.get("service_name") or "unknown"): int(row.get("count", 0))
+        str(row.get("service_name") or "unknown"): int(row.get("total_count", row.get("count", 0)))
         for row in by_service_rows
     }
     by_operation = {
@@ -700,7 +741,7 @@ def _query_traces_stats_preaggregated_legacy(
 
     span_count = int(span_rows[0].get("span_count", 0)) if span_rows else 0
     by_service = {
-        str(row.get("service_name") or "unknown"): int(row.get("count", 0))
+        str(row.get("service_name") or "unknown"): int(row.get("total_count", row.get("count", 0)))
         for row in by_service_rows
     }
     by_operation = {
@@ -746,10 +787,12 @@ def query_logs_stats(storage_adapter: Any, time_window: Optional[str] = None) ->
     total_result = storage_adapter.execute_query(total_query)
     total = total_result[0]["total"] if total_result else 0
 
+    level_bucket_expr = _build_level_bucket_expr("level")
     service_query = f"""
     SELECT
         service_name,
-        COUNT(*) as count
+        COUNT(*) as count,
+        countIf({level_bucket_expr} IN ('ERROR', 'FATAL', 'CRITICAL')) as error_count
     FROM logs.logs
     PREWHERE timestamp > now() - INTERVAL {safe_window}
     GROUP BY service_name
@@ -758,11 +801,14 @@ def query_logs_stats(storage_adapter: Any, time_window: Optional[str] = None) ->
     """
     service_results = storage_adapter.execute_query(service_query)
     by_service = {row["service_name"]: row["count"] for row in service_results}
+    by_service_errors = {
+        str(row.get("service_name") or "unknown"): int(row.get("error_count", 0))
+        for row in service_results
+    }
 
-    level_bucket_expr = _build_level_bucket_expr("level")
     level_query = f"""
     SELECT
-        {level_bucket_expr} AS level,
+        {level_bucket_expr} AS level_bucket,
         COUNT(*) as count
     FROM logs.logs
     PREWHERE timestamp > now() - INTERVAL {safe_window}
@@ -771,11 +817,12 @@ def query_logs_stats(storage_adapter: Any, time_window: Optional[str] = None) ->
     LIMIT {_LOG_LEVEL_BUCKET_LIMIT}
     """
     level_results = storage_adapter.execute_query(level_query)
-    by_level = {str(row.get("level") or "OTHER"): int(row.get("count", 0)) for row in level_results}
+    by_level = {_row_level_bucket(row): int(row.get("count", 0)) for row in level_results}
 
     return {
         "total": total,
         "byService": by_service,
+        "byServiceErrors": by_service_errors,
         "byLevel": by_level,
     }
 
@@ -801,15 +848,15 @@ def query_metrics(
         params["metric_name"] = metric_name
     if start_time:
         ch_start_time = convert_timestamp_fn(start_time)
-        prewhere_conditions.append("timestamp >= toDateTime64({start_time:String}, 9)")
+        prewhere_conditions.append("timestamp >= toDateTime64({start_time:String}, 9, 'UTC')")
         params["start_time"] = ch_start_time
     if end_time:
         ch_end_time = convert_timestamp_fn(end_time)
-        prewhere_conditions.append("timestamp <= toDateTime64({end_time:String}, 9)")
+        prewhere_conditions.append("timestamp <= toDateTime64({end_time:String}, 9, 'UTC')")
         params["end_time"] = ch_end_time
         if not start_time:
             prewhere_conditions.append(
-                f"timestamp > toDateTime64({{end_time:String}}, 9) - INTERVAL {_QUERY_METRICS_DEFAULT_TIME_WINDOW}"
+                f"timestamp > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {_QUERY_METRICS_DEFAULT_TIME_WINDOW}"
             )
     if not start_time and not end_time:
         safe_window = sanitize_interval(_QUERY_METRICS_DEFAULT_TIME_WINDOW, default_value="24 HOUR")
@@ -898,40 +945,44 @@ def query_traces(
     normalize_trace_status_fn: Callable[[Any], str],
     convert_timestamp_fn: Callable[[Optional[str]], Optional[str]],
     time_window: Optional[str] = None,
+    offset: int = 0,
 ) -> Dict[str, Any]:
     """Query traces grouped by trace_id."""
     schema = resolve_trace_schema_fn()
     time_col = _resolve_safe_trace_time_column(schema)
     if not time_col:
         raise ValueError("logs.traces 表缺少 timestamp/start_time 字段")
+    page_limit = max(int(limit), 1)
+    page_offset = max(int(offset), 0)
+    page_upper_bound = page_limit + page_offset
     safe_window = sanitize_interval(time_window or _QUERY_TRACES_DEFAULT_TIME_WINDOW, default_value="24 HOUR")
 
     base_conditions: List[str] = []
     detail_conditions: List[str] = []
-    params: Dict[str, Any] = {"limit": limit}
+    filter_params: Dict[str, Any] = {}
 
     if service_name:
         base_conditions.append("service_name = {service_name:String}")
         detail_conditions.append("t.service_name = {service_name:String}")
-        params["service_name"] = service_name
+        filter_params["service_name"] = service_name
     if trace_id:
         base_conditions.append("trace_id = {trace_id:String}")
         detail_conditions.append("t.trace_id = {trace_id:String}")
-        params["trace_id"] = trace_id
+        filter_params["trace_id"] = trace_id
     if start_time:
-        base_conditions.append(f"{time_col} >= toDateTime64({{start_time:String}}, 9)")
-        detail_conditions.append(f"t.{time_col} >= toDateTime64({{start_time:String}}, 9)")
-        params["start_time"] = convert_timestamp_fn(start_time)
+        base_conditions.append(f"{time_col} >= toDateTime64({{start_time:String}}, 9, 'UTC')")
+        detail_conditions.append(f"t.{time_col} >= toDateTime64({{start_time:String}}, 9, 'UTC')")
+        filter_params["start_time"] = convert_timestamp_fn(start_time)
     if end_time:
-        base_conditions.append(f"{time_col} <= toDateTime64({{end_time:String}}, 9)")
-        detail_conditions.append(f"t.{time_col} <= toDateTime64({{end_time:String}}, 9)")
-        params["end_time"] = convert_timestamp_fn(end_time)
+        base_conditions.append(f"{time_col} <= toDateTime64({{end_time:String}}, 9, 'UTC')")
+        detail_conditions.append(f"t.{time_col} <= toDateTime64({{end_time:String}}, 9, 'UTC')")
+        filter_params["end_time"] = convert_timestamp_fn(end_time)
         if not start_time and not trace_id:
             base_conditions.append(
-                f"{time_col} > toDateTime64({{end_time:String}}, 9) - INTERVAL {safe_window}"
+                f"{time_col} > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {safe_window}"
             )
             detail_conditions.append(
-                f"t.{time_col} > toDateTime64({{end_time:String}}, 9) - INTERVAL {safe_window}"
+                f"t.{time_col} > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {safe_window}"
             )
     if not trace_id and not start_time and not end_time:
         base_conditions.append(f"{time_col} > now() - INTERVAL {safe_window}")
@@ -943,13 +994,29 @@ def query_traces(
     base_prewhere_clause = f"PREWHERE {' AND '.join(base_conditions)}" if base_conditions else ""
     detail_prewhere_clause = f"PREWHERE {' AND '.join(detail_conditions)}" if detail_conditions else ""
     duration_expr = build_grouped_trace_duration_expr_fn(schema)
+
+    total_query = f"""
+    SELECT
+        toUInt64(uniqCombined64(trace_id)) AS total
+    FROM logs.traces
+    {base_prewhere_clause}
+    """
+    total_result = storage_adapter.execute_query(total_query, filter_params)
+    total = int((total_result[0] or {}).get("total", 0)) if total_result else 0
+
     recent_span_scan_limit = _compute_recent_span_scan_limit(
-        limit=int(limit),
+        limit=page_upper_bound,
         safe_window=safe_window,
         has_trace_id=bool(trace_id),
         has_service_name=bool(service_name),
     )
-    params["recent_span_scan_limit"] = int(recent_span_scan_limit)
+    params = {
+        **filter_params,
+        "limit": page_limit,
+        "offset": page_offset,
+        "page_span_limit": page_upper_bound,
+        "recent_span_scan_limit": int(recent_span_scan_limit),
+    }
 
     query = f"""
     WITH recent_spans AS (
@@ -968,7 +1035,7 @@ def query_traces(
         FROM recent_spans
         GROUP BY trace_id
         ORDER BY last_seen DESC
-        LIMIT {{limit:Int32}}
+        LIMIT {{page_span_limit:Int32}}
     )
     SELECT
         t.trace_id AS trace_id,
@@ -982,12 +1049,13 @@ def query_traces(
             'STATUS_CODE_UNSET'
         ) AS status
     FROM logs.traces AS t
-    INNER JOIN recent_trace_ids AS r ON t.trace_id = r.trace_id
+    ANY INNER JOIN recent_trace_ids AS r ON t.trace_id = r.trace_id
     {detail_prewhere_clause}
     GROUP BY t.trace_id, r.last_seen
     ORDER BY r.last_seen DESC
     LIMIT {{limit:Int32}}
-    SETTINGS optimize_use_projections = 1
+    OFFSET {{offset:Int32}}
+    SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1
     """
 
     results = storage_adapter.execute_query(query, params)
@@ -997,7 +1065,11 @@ def query_traces(
     return {
         "data": results,
         "count": len(results),
-        "limit": limit,
+        "limit": page_limit,
+        "offset": page_offset,
+        "total": total,
+        "has_more": bool(page_offset + len(results) < total),
+        "next_offset": page_offset + len(results) if page_offset + len(results) < total else None,
     }
 
 
@@ -1103,18 +1175,18 @@ def query_traces_stats(
     trace_conditions: List[str] = []
     params: Dict[str, Any] = {}
     if start_time:
-        trace_conditions.append(f"{time_col} >= toDateTime64({{stats_start:String}}, 9)")
+        trace_conditions.append(f"{time_col} >= toDateTime64({{stats_start:String}}, 9, 'UTC')")
         params["stats_start"] = (
             convert_timestamp_fn(start_time) if convert_timestamp_fn else start_time
         )
     if end_time:
-        trace_conditions.append(f"{time_col} <= toDateTime64({{stats_end:String}}, 9)")
+        trace_conditions.append(f"{time_col} <= toDateTime64({{stats_end:String}}, 9, 'UTC')")
         params["stats_end"] = (
             convert_timestamp_fn(end_time) if convert_timestamp_fn else end_time
         )
         if not start_time:
             trace_conditions.append(
-                f"{time_col} > toDateTime64({{stats_end:String}}, 9) - INTERVAL {safe_window}"
+                f"{time_col} > toDateTime64({{stats_end:String}}, 9, 'UTC') - INTERVAL {safe_window}"
             )
     if not start_time and not end_time:
         trace_conditions.append(f"{time_col} > now() - INTERVAL {safe_window}")
@@ -1122,12 +1194,12 @@ def query_traces_stats(
 
     preagg_conditions: List[str] = []
     if "stats_start" in params:
-        preagg_conditions.append("ts_minute >= toDateTime(parseDateTimeBestEffort({stats_start:String}))")
+        preagg_conditions.append("ts_minute >= toDateTime(parseDateTimeBestEffort({stats_start:String}, 'UTC'))")
     if "stats_end" in params:
-        preagg_conditions.append("ts_minute <= toDateTime(parseDateTimeBestEffort({stats_end:String}))")
+        preagg_conditions.append("ts_minute <= toDateTime(parseDateTimeBestEffort({stats_end:String}, 'UTC'))")
         if "stats_start" not in params:
             preagg_conditions.append(
-                f"ts_minute > toDateTime(parseDateTimeBestEffort({{stats_end:String}})) - INTERVAL {safe_window}"
+                f"ts_minute > toDateTime(parseDateTimeBestEffort({{stats_end:String}}, 'UTC')) - INTERVAL {safe_window}"
             )
     if not preagg_conditions:
         preagg_conditions.append(f"ts_minute > now() - INTERVAL {safe_window}")
@@ -1214,7 +1286,7 @@ def query_traces_stats(
         FROM (
             SELECT
                 trace_id,
-                trace_duration
+                argMax(trace_duration, trace_ts) AS trace_duration
             FROM (
                 SELECT
                     trace_id,
@@ -1225,7 +1297,7 @@ def query_traces_stats(
                 ORDER BY trace_ts DESC
                 LIMIT {{duration_scan_limit:Int32}}
             )
-            LIMIT 1 BY trace_id
+            GROUP BY trace_id
             LIMIT {{duration_sample_limit:Int32}}
         )
         """
@@ -1255,8 +1327,8 @@ def query_traces_stats(
         duration_query = "SELECT 0.0 AS avg_duration, 0.0 AS p99_duration"
 
     duration_result = storage_adapter.execute_query(duration_query, duration_params)
-    avg_duration = float(duration_result[0]["avg_duration"] or 0.0) if duration_result else 0.0
-    p99_duration = float(duration_result[0]["p99_duration"] or 0.0) if duration_result else 0.0
+    avg_duration = _sanitize_json_float(duration_result[0]["avg_duration"], 0.0) if duration_result else 0.0
+    p99_duration = _sanitize_json_float(duration_result[0]["p99_duration"], 0.0) if duration_result else 0.0
 
     preagg_error_traces = int(preagg_stats.get("error_trace_count", 0) or 0) if preagg_stats else 0
     has_preagg_error_totals = bool(
@@ -1281,7 +1353,7 @@ def query_traces_stats(
         error_rate_result = storage_adapter.execute_query(error_rate_query, params)
         error_traces = int((error_rate_result[0].get("error_traces") if error_rate_result else 0) or 0)
         total_for_error = int((error_rate_result[0].get("total_traces") if error_rate_result else 0) or 0)
-    error_rate = (float(error_traces) / float(total_for_error)) if total_for_error else 0.0
+    error_rate = _sanitize_json_float((float(error_traces) / float(total_for_error)) if total_for_error else 0.0, 0.0)
 
     return {
         "total": total_traces,

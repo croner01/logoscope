@@ -14,7 +14,23 @@ export interface Span {
   start_time: string;
   duration_ms: number;
   status: string;
-  tags: Record<string, any>;
+  tags: Record<string, unknown>;
+  durationMs?: unknown;
+  duration?: unknown;
+  latency_ms?: unknown;
+  elapsed_ms?: unknown;
+  duration_us?: unknown;
+  latency_us?: unknown;
+  elapsed_us?: unknown;
+  duration_ns?: unknown;
+  latency_ns?: unknown;
+  elapsed_ns?: unknown;
+  start_time_unix_nano?: unknown;
+  start_unix_nano?: unknown;
+  start_ns?: unknown;
+  end_time_unix_nano?: unknown;
+  end_unix_nano?: unknown;
+  end_ns?: unknown;
 }
 
 interface TraceTimelineProps {
@@ -22,6 +38,13 @@ interface TraceTimelineProps {
   selectedSpanId: string | null;
   onSpanClick: (span: Span) => void;
 }
+
+type SpanNode = Span & {
+  children: SpanNode[];
+  level: number;
+  _start_ms?: number;
+  _duration_ms?: number;
+};
 
 const resolveSpanDurationMs = (span: Span): number => {
   const tryPositive = (value: unknown, scale = 1): number => {
@@ -34,10 +57,10 @@ const resolveSpanDurationMs = (span: Span): number => {
 
   const directMs = [
     span.duration_ms,
-    (span as any).durationMs,
-    (span as any).duration,
-    (span as any).latency_ms,
-    (span as any).elapsed_ms,
+    span.durationMs,
+    span.duration,
+    span.latency_ms,
+    span.elapsed_ms,
   ];
   for (const candidate of directMs) {
     const parsed = tryPositive(candidate);
@@ -47,9 +70,9 @@ const resolveSpanDurationMs = (span: Span): number => {
   }
 
   const directUs = [
-    (span as any).duration_us,
-    (span as any).latency_us,
-    (span as any).elapsed_us,
+    span.duration_us,
+    span.latency_us,
+    span.elapsed_us,
   ];
   for (const candidate of directUs) {
     const parsed = tryPositive(candidate, 1 / 1000);
@@ -59,9 +82,9 @@ const resolveSpanDurationMs = (span: Span): number => {
   }
 
   const directNs = [
-    (span as any).duration_ns,
-    (span as any).latency_ns,
-    (span as any).elapsed_ns,
+    span.duration_ns,
+    span.latency_ns,
+    span.elapsed_ns,
   ];
   for (const candidate of directNs) {
     const parsed = tryPositive(candidate, 1 / 1_000_000);
@@ -102,17 +125,17 @@ const resolveSpanDurationMs = (span: Span): number => {
   }
 
   const startNsCandidates = [
-    (span as any).start_time_unix_nano,
-    (span as any).start_unix_nano,
-    (span as any).start_ns,
+    span.start_time_unix_nano,
+    span.start_unix_nano,
+    span.start_ns,
     tags.start_time_unix_nano,
     tags.start_unix_nano,
     tags.start_ns,
   ];
   const endNsCandidates = [
-    (span as any).end_time_unix_nano,
-    (span as any).end_unix_nano,
-    (span as any).end_ns,
+    span.end_time_unix_nano,
+    span.end_unix_nano,
+    span.end_ns,
     tags.end_time_unix_nano,
     tags.end_unix_nano,
     tags.end_ns,
@@ -131,7 +154,7 @@ const resolveSpanDurationMs = (span: Span): number => {
 };
 
 const TraceTimeline: React.FC<TraceTimelineProps> = ({ spans, selectedSpanId, onSpanClick }) => {
-  const normalizedSpans = React.useMemo(() => {
+  const normalizedSpans = React.useMemo<Array<Span & { _start_ms: number; _duration_ms: number }>>(() => {
     return spans.map((span) => ({
       ...span,
       _start_ms: toEpochMs(span.start_time),
@@ -142,12 +165,12 @@ const TraceTimeline: React.FC<TraceTimelineProps> = ({ spans, selectedSpanId, on
   // 计算时间范围
   const minTime = React.useMemo(() => {
     if (normalizedSpans.length === 0) return 0;
-    return Math.min(...normalizedSpans.map((s: any) => s._start_ms));
+    return Math.min(...normalizedSpans.map((s) => s._start_ms));
   }, [normalizedSpans]);
 
   const maxTime = React.useMemo(() => {
     if (normalizedSpans.length === 0) return 0;
-    return Math.max(...normalizedSpans.map((s: any) => s._start_ms + s._duration_ms));
+    return Math.max(...normalizedSpans.map((s) => s._start_ms + s._duration_ms));
   }, [normalizedSpans]);
 
   const totalDuration = React.useMemo(() => {
@@ -155,22 +178,22 @@ const TraceTimeline: React.FC<TraceTimelineProps> = ({ spans, selectedSpanId, on
   }, [minTime, maxTime]);
 
   // 状态颜色
-  const getStatusColor = (status: string) => {
+  const getStatusColor = React.useCallback((status: string) => {
     const baseColor = 'border-blue-300';
     if (status === 'STATUS_CODE_ERROR') return `${baseColor} bg-red-50 text-red-700`;
     if (status === 'STATUS_CODE_OK') return `${baseColor} bg-green-50 text-green-700`;
     return `${baseColor} bg-gray-50 text-gray-700`;
-  };
+  }, []);
 
   // 构建层级树并渲染
   const renderSpanTree = React.useCallback(() => {
-    const spanMap = new Map<string, Span & { children: Span[]; level: number; _start_ms?: number; _duration_ms?: number }>();
-    normalizedSpans.forEach((span: any) => {
+    const spanMap = new Map<string, SpanNode>();
+    normalizedSpans.forEach((span) => {
       spanMap.set(span.span_id, { ...span, children: [], level: 0 });
     });
 
     // 建立父子关系
-    normalizedSpans.forEach((span: any) => {
+    normalizedSpans.forEach((span) => {
       const current = spanMap.get(span.span_id)!;
       if (span.parent_span_id && spanMap.has(span.parent_span_id)) {
         const parent = spanMap.get(span.parent_span_id)!;
@@ -183,7 +206,7 @@ const TraceTimeline: React.FC<TraceTimelineProps> = ({ spans, selectedSpanId, on
     const rootSpans = Array.from(spanMap.values()).filter(s => !s.parent_span_id);
 
     // 递归渲染函数
-    const renderSpan = (span: Span & { children: Span[]; level: number; _start_ms?: number; _duration_ms?: number }) => {
+    const renderSpan = (span: SpanNode) => {
       const start = Number(span._start_ms ?? toEpochMs(span.start_time));
       const durationMs = Number(span._duration_ms ?? resolveSpanDurationMs(span));
       const offset = start - minTime;
@@ -225,17 +248,17 @@ const TraceTimeline: React.FC<TraceTimelineProps> = ({ spans, selectedSpanId, on
           </div>
 
           {/* 子 Spans */}
-          {span.children.map(child => renderSpan(child as any))}
+          {span.children.map((child) => renderSpan(child))}
         </div>
       );
     };
 
     return (
       <div>
-        {rootSpans.map(span => renderSpan(span as any))}
+        {rootSpans.map((span) => renderSpan(span))}
       </div>
     );
-  }, [normalizedSpans, selectedSpanId, minTime, totalDuration, getStatusColor]);
+  }, [normalizedSpans, selectedSpanId, minTime, totalDuration, getStatusColor, onSpanClick]);
 
   if (spans.length === 0) {
     return (

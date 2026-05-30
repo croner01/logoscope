@@ -29,6 +29,7 @@ from api.websocket import (
     topology_poller,
     topology_manager
 )
+from api.topology_build_coordinator import configure_build_process_isolation
 from graph.hybrid_topology import get_hybrid_topology_builder
 from graph.enhanced_topology import get_enhanced_topology_builder
 from graph.service_sync import sync_services_from_logs
@@ -65,6 +66,26 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing Topology Builders...")
     _hybrid_builder = get_hybrid_topology_builder(_storage_adapter)
     _enhanced_builder = get_enhanced_topology_builder(_storage_adapter)
+    configure_build_process_isolation(
+        enabled=settings.TOPOLOGY_BUILD_PROCESS_ISOLATION_ENABLED,
+        storage_config=storage_config,
+        timeout_seconds=settings.TOPOLOGY_BUILD_PROCESS_TIMEOUT_SECONDS,
+        python_executable=settings.TOPOLOGY_BUILD_PROCESS_PYTHON,
+        fallback_local_on_error=settings.TOPOLOGY_BUILD_PROCESS_FALLBACK_LOCAL_ON_ERROR,
+        max_concurrency=settings.TOPOLOGY_BUILD_PROCESS_MAX_CONCURRENCY,
+        max_queue_size=settings.TOPOLOGY_BUILD_PROCESS_MAX_QUEUE_SIZE,
+        acquire_timeout_seconds=settings.TOPOLOGY_BUILD_PROCESS_ACQUIRE_TIMEOUT_SECONDS,
+    )
+    logger.info(
+        "Topology build process isolation: enabled=%s timeout=%ss python=%s fallback_local=%s max_concurrency=%s max_queue=%s acquire_timeout=%ss",
+        bool(settings.TOPOLOGY_BUILD_PROCESS_ISOLATION_ENABLED),
+        int(settings.TOPOLOGY_BUILD_PROCESS_TIMEOUT_SECONDS),
+        settings.TOPOLOGY_BUILD_PROCESS_PYTHON or "default",
+        bool(settings.TOPOLOGY_BUILD_PROCESS_FALLBACK_LOCAL_ON_ERROR),
+        int(settings.TOPOLOGY_BUILD_PROCESS_MAX_CONCURRENCY),
+        int(settings.TOPOLOGY_BUILD_PROCESS_MAX_QUEUE_SIZE),
+        int(settings.TOPOLOGY_BUILD_PROCESS_ACQUIRE_TIMEOUT_SECONDS),
+    )
 
     # 初始化 API 模块
     topology_routes.set_storage_and_builders(_storage_adapter, _hybrid_builder, _enhanced_builder)
@@ -125,6 +146,7 @@ async def lifespan(app: FastAPI):
             pass
     if _storage_adapter:
         _storage_adapter.close()
+    configure_build_process_isolation(enabled=False, storage_config=None)
     logger.info("Topology Service shutdown complete")
 
 

@@ -4,6 +4,7 @@
 验证 context 特征提取、上下文相似度计算与推荐器候选扩展逻辑。
 """
 import json
+import time
 from datetime import datetime, timezone
 
 from ai.similar_cases import Case, CaseStore, FeatureExtractor, SimilarCaseRecommender
@@ -217,3 +218,21 @@ class TestCaseStorePersistence:
     def test_to_iso_normalizes_legacy_double_suffix_text(self):
         """兼容历史脏数据字符串，移除重复的 Z 后缀。"""
         assert CaseStore._to_iso("2026-03-03T02:24:29.513000+00:00Z") == "2026-03-03T02:24:29.513000+00:00"
+
+    def test_case_read_source_cache_refreshes_after_ttl(self):
+        store = CaseStore(persistence_enabled=False)
+        store.clickhouse_table = "logs.ai_cases"
+        store.clickhouse_latest_view = "logs.v_ai_cases_latest"
+        store._read_source_cache_ttl_seconds = 1
+
+        store._table_exists = lambda table_name: False  # type: ignore[method-assign]
+        first_source = store._get_case_read_source()
+        assert first_source == ("logs.ai_cases", True)
+
+        store._table_exists = lambda table_name: True  # type: ignore[method-assign]
+        cached_source = store._get_case_read_source()
+        assert cached_source == ("logs.ai_cases", True)
+
+        store._case_read_source_cache_checked_at = time.time() - 5
+        refreshed_source = store._get_case_read_source()
+        assert refreshed_source == ("logs.v_ai_cases_latest", False)

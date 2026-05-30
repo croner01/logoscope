@@ -55,7 +55,7 @@ interface LLMRuntimeForm {
 interface LLMValidateResult {
   status: string;
   validated: boolean;
-  runtime: Record<string, any>;
+  runtime: Record<string, unknown>;
   note: string;
 }
 
@@ -78,7 +78,7 @@ interface KBRemoteRuntimeStatus {
     message?: string;
     outbox_queue_total?: number;
     outbox_failed?: number;
-    [key: string]: any;
+    [key: string]: unknown;
   };
   deployment_persistence: {
     deployment_file: string;
@@ -108,7 +108,7 @@ interface KBRemoteRuntimeForm {
 interface KBValidateResult {
   status: string;
   validated: boolean;
-  runtime: Record<string, any>;
+  runtime: Record<string, unknown>;
   note: string;
 }
 
@@ -251,7 +251,11 @@ const DEFAULT_KB_FORM: KBRemoteRuntimeForm = {
   extra: '{\n  "dataset_id": ""\n}',
 };
 
-function asNumber(value: any, fallback = 0): number {
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function asNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -261,7 +265,7 @@ function asPercent(value: number): number {
   return Number(Math.max(normalized, 0).toFixed(1));
 }
 
-function asString(value: any, fallback = ''): string {
+function asString(value: unknown, fallback = ''): string {
   if (typeof value !== 'string') {
     return fallback;
   }
@@ -269,7 +273,7 @@ function asString(value: any, fallback = ''): string {
   return text || fallback;
 }
 
-function normalizeCacheStats(raw: Record<string, any>): CacheStats {
+function normalizeCacheStats(raw: Record<string, unknown>): CacheStats {
   const totalEntries = asNumber(raw?.total_entries ?? raw?.total_keys, 0);
   const activeEntries = asNumber(raw?.active_entries, totalEntries);
   const expiredEntries = asNumber(raw?.expired_entries, 0);
@@ -297,16 +301,23 @@ function normalizeCacheStats(raw: Record<string, any>): CacheStats {
   };
 }
 
-function normalizeDedupStats(raw: Record<string, any>): DeduplicationStats {
+function normalizeDedupStats(raw: Record<string, unknown>): DeduplicationStats {
   const totalEvents = asNumber(raw?.total_processed ?? raw?.total_events, 0);
   const duplicateCount = asNumber(raw?.duplicates_found ?? raw?.duplicate_count, 0);
   const duplicateRate = asNumber(raw?.duplicate_rate, 0);
 
   const topDuplicates = Array.isArray(raw?.top_duplicates)
     ? raw.top_duplicates
-        .map((item: any) => ({
-          pattern: asString(item?.pattern ?? item?.name, 'unknown'),
-          count: asNumber(item?.count, 0),
+        .map((item) => {
+          const itemRecord = asRecord(item);
+          return {
+            pattern: asString(itemRecord.pattern ?? itemRecord.name, 'LooseAny'),
+            count: asNumber(itemRecord.count, 0),
+          };
+        })
+        .map((item) => ({
+          pattern: item.pattern,
+          count: item.count,
         }))
         .filter((item: { pattern: string; count: number }) => item.count > 0)
     : [
@@ -322,10 +333,11 @@ function normalizeDedupStats(raw: Record<string, any>): DeduplicationStats {
   };
 }
 
-function normalizeLLMRuntime(raw: Record<string, any>): LLMRuntimeStatus {
+function normalizeLLMRuntime(raw: Record<string, unknown>): LLMRuntimeStatus {
   const providers = Array.isArray(raw?.supported_providers)
-    ? raw.supported_providers.map((item: any) => asString(item)).filter(Boolean)
+    ? raw.supported_providers.map((item) => asString(item)).filter(Boolean)
     : [];
+  const deploymentPersistence = asRecord(raw?.deployment_persistence);
 
   const contractRaw = raw?.runtime_config_contract;
   const runtimeContract: Record<string, string> = {};
@@ -347,21 +359,22 @@ function normalizeLLMRuntime(raw: Record<string, any>): LLMRuntimeStatus {
       ? runtimeContract
       : DEFAULT_LLM_RUNTIME.runtime_config_contract,
     deployment_persistence: {
-      deployment_file: asString(raw?.deployment_persistence?.deployment_file, ''),
-      deployment_file_exists: Boolean(raw?.deployment_persistence?.deployment_file_exists),
-      deployment_file_writable: Boolean(raw?.deployment_persistence?.deployment_file_writable),
-      enabled_by_default: Boolean(raw?.deployment_persistence?.enabled_by_default ?? true),
+      deployment_file: asString(deploymentPersistence.deployment_file, ''),
+      deployment_file_exists: Boolean(deploymentPersistence.deployment_file_exists),
+      deployment_file_writable: Boolean(deploymentPersistence.deployment_file_writable),
+      enabled_by_default: Boolean(deploymentPersistence.enabled_by_default ?? true),
     },
     note: asString(raw?.note, ''),
   };
 }
 
-function normalizeKBRemoteRuntime(raw: Record<string, any>): KBRemoteRuntimeStatus {
+function normalizeKBRemoteRuntime(raw: Record<string, unknown>): KBRemoteRuntimeStatus {
   const providers = Array.isArray(raw?.supported_providers)
-    ? raw.supported_providers.map((item: any) => asString(item)).filter(Boolean)
+    ? raw.supported_providers.map((item) => asString(item)).filter(Boolean)
     : [];
   const provider = asString(raw?.configured_provider, 'ragflow');
   const preset = KB_PROVIDER_PRESETS[provider] || KB_PROVIDER_PRESETS.ragflow;
+  const deploymentPersistence = asRecord(raw?.deployment_persistence);
 
   const contractRaw = raw?.runtime_config_contract;
   const runtimeContract: Record<string, string> = {};
@@ -372,9 +385,7 @@ function normalizeKBRemoteRuntime(raw: Record<string, any>): KBRemoteRuntimeStat
   }
 
   const providerStatusRaw = raw?.provider_status;
-  const providerStatus = providerStatusRaw && typeof providerStatusRaw === 'object'
-    ? providerStatusRaw
-    : {};
+  const providerStatus = asRecord(providerStatusRaw);
 
   return {
     configured_provider: provider,
@@ -400,17 +411,20 @@ function normalizeKBRemoteRuntime(raw: Record<string, any>): KBRemoteRuntimeStat
       ...providerStatus,
     },
     deployment_persistence: {
-      deployment_file: asString(raw?.deployment_persistence?.deployment_file, ''),
-      deployment_file_exists: Boolean(raw?.deployment_persistence?.deployment_file_exists),
-      deployment_file_writable: Boolean(raw?.deployment_persistence?.deployment_file_writable),
-      enabled_by_default: Boolean(raw?.deployment_persistence?.enabled_by_default ?? true),
+      deployment_file: asString(deploymentPersistence.deployment_file, ''),
+      deployment_file_exists: Boolean(deploymentPersistence.deployment_file_exists),
+      deployment_file_writable: Boolean(deploymentPersistence.deployment_file_writable),
+      enabled_by_default: Boolean(deploymentPersistence.enabled_by_default ?? true),
     },
     note: asString(raw?.note, ''),
   };
 }
 
-function getErrorMessage(error: any, fallback: string): string {
-  const detail = error?.response?.data?.detail;
+function getErrorMessage(error: unknown, fallback: string): string {
+  const errorRecord = asRecord(error);
+  const responseRecord = asRecord(errorRecord.response);
+  const dataRecord = asRecord(responseRecord.data);
+  const detail = dataRecord.detail;
   if (typeof detail === 'string' && detail.trim()) {
     return detail.trim();
   }
@@ -423,8 +437,8 @@ function getErrorMessage(error: any, fallback: string): string {
       return first.msg;
     }
   }
-  if (typeof error?.message === 'string' && error.message.trim()) {
-    return error.message.trim();
+  if (typeof errorRecord.message === 'string' && errorRecord.message.trim()) {
+    return errorRecord.message.trim();
   }
   return fallback;
 }
@@ -655,9 +669,9 @@ const Settings: React.FC = () => {
     try {
       const result = await api.health();
       setApiHealth({
-        status: asString(result?.status, 'unknown'),
-        service: asString(result?.service, 'unknown'),
-        version: asString(result?.version, 'unknown'),
+        status: asString(result?.status, 'LooseAny'),
+        service: asString(result?.service, 'LooseAny'),
+        version: asString(result?.version, 'LooseAny'),
         checked_at: new Date().toISOString(),
       });
       setBanner({ type: 'success', text: 'API 连通性检查成功' });
@@ -677,9 +691,9 @@ const Settings: React.FC = () => {
     local_model_path?: string;
     clear_api_key?: boolean;
     persist_to_deployment?: boolean;
-    extra: Record<string, any>;
+    extra: Record<string, unknown>;
   } | null => {
-    let extra: Record<string, any> = {};
+    let extra: Record<string, unknown> = {};
     const extraRaw = llmForm.extra.trim();
 
     if (extraRaw) {
@@ -689,7 +703,7 @@ const Settings: React.FC = () => {
           setBanner({ type: 'error', text: 'extra 必须是 JSON 对象' });
           return null;
         }
-        extra = parsed;
+        extra = parsed as Record<string, unknown>;
       } catch (error) {
         setBanner({ type: 'error', text: `extra JSON 解析失败: ${getErrorMessage(error, '格式错误')}` });
         return null;
@@ -719,7 +733,7 @@ const Settings: React.FC = () => {
       const result = await api.validateLLMRuntimeConfig(payload);
 
       setLlmValidateResult({
-        status: asString(result?.status, 'unknown'),
+        status: asString(result?.status, 'LooseAny'),
         validated: Boolean(result?.validated),
         runtime: result?.runtime && typeof result.runtime === 'object' ? result.runtime : {},
         note: asString(result?.note, ''),
@@ -763,7 +777,7 @@ const Settings: React.FC = () => {
       const successText = payload.persist_to_deployment
         ? (persisted
             ? 'API Key 与 LLM 运行时配置已更新，并已同步到部署文件'
-            : `API Key 与 LLM 运行时配置已更新，但部署文件持久化失败: ${persistError || 'unknown'}`)
+            : `API Key 与 LLM 运行时配置已更新，但部署文件持久化失败: ${persistError || 'LooseAny'}`)
         : 'API Key 与 LLM 运行时配置已更新（仅当前进程生效）';
       setBanner({ type: persisted || !payload.persist_to_deployment ? 'success' : 'info', text: successText });
       await fetchSettingsData({ initial: false, silentSuccess: true });
@@ -788,9 +802,9 @@ const Settings: React.FC = () => {
     outbox_max_attempts: number;
     clear_api_key: boolean;
     persist_to_deployment: boolean;
-    extra: Record<string, any>;
+    extra: Record<string, unknown>;
   } | null => {
-    let extra: Record<string, any> = {};
+    let extra: Record<string, unknown> = {};
     const extraRaw = kbForm.extra.trim();
 
     if (extraRaw) {
@@ -800,7 +814,7 @@ const Settings: React.FC = () => {
           setBanner({ type: 'error', text: 'KB extra 必须是 JSON 对象' });
           return null;
         }
-        extra = parsed;
+        extra = parsed as Record<string, unknown>;
       } catch (error) {
         setBanner({ type: 'error', text: `KB extra JSON 解析失败: ${getErrorMessage(error, '格式错误')}` });
         return null;
@@ -838,7 +852,7 @@ const Settings: React.FC = () => {
     try {
       const result = await api.validateKBRuntimeConfig(payload);
       setKbValidateResult({
-        status: asString(result?.status, 'unknown'),
+        status: asString(result?.status, 'LooseAny'),
         validated: Boolean(result?.validated),
         runtime: result?.runtime && typeof result.runtime === 'object' ? result.runtime : {},
         note: asString(result?.note, ''),
@@ -892,7 +906,7 @@ const Settings: React.FC = () => {
       const successText = payload.persist_to_deployment
         ? (persisted
             ? '远端知识库运行时配置已更新，并已同步到部署文件'
-            : `远端知识库运行时配置已更新，但部署文件持久化失败: ${persistError || 'unknown'}`)
+            : `远端知识库运行时配置已更新，但部署文件持久化失败: ${persistError || 'LooseAny'}`)
         : '远端知识库运行时配置已更新（仅当前进程生效）';
       setBanner({ type: persisted || !payload.persist_to_deployment ? 'success' : 'info', text: successText });
       await fetchSettingsData({ initial: false, silentSuccess: true });
@@ -1100,7 +1114,7 @@ const Settings: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
               <div className="p-3 rounded-lg bg-gray-50">
                 <div className="text-xs text-gray-500">Provider</div>
-                <div className="text-sm font-medium text-gray-900 mt-1">{kbRuntime.configured_provider || 'unknown'}</div>
+                <div className="text-sm font-medium text-gray-900 mt-1">{kbRuntime.configured_provider || 'LooseAny'}</div>
               </div>
               <div className="p-3 rounded-lg bg-gray-50">
                 <div className="text-xs text-gray-500">远端可用性</div>
@@ -1388,7 +1402,7 @@ const Settings: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
               <div className="p-3 rounded-lg bg-gray-50">
                 <div className="text-xs text-gray-500">Provider</div>
-                <div className="text-sm font-medium text-gray-900 mt-1">{llmRuntime.configured_provider || 'unknown'}</div>
+                <div className="text-sm font-medium text-gray-900 mt-1">{llmRuntime.configured_provider || 'LooseAny'}</div>
               </div>
               <div className="p-3 rounded-lg bg-gray-50">
                 <div className="text-xs text-gray-500">Model</div>

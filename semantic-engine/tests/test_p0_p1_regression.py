@@ -144,3 +144,44 @@ async def test_worker_stop_closes_async_queue_and_sync_storage():
     worker.queue.close.assert_awaited_once()
     worker.storage.close.assert_called_once()
     assert worker.running is False
+
+
+@pytest.mark.asyncio
+async def test_worker_stop_is_idempotent_when_called_twice():
+    worker = LogWorker()
+    worker.running = True
+    worker.queue = Mock()
+    worker.queue.close = AsyncMock()
+    worker.storage = Mock()
+    worker.storage.close = Mock()
+    worker.log_writer = Mock()
+    worker.log_writer.stop = Mock()
+    worker.log_writer.get_stats = Mock(return_value={"buffer_size": 0, "total_rows": 0})
+
+    await worker.stop()
+    await worker.stop()
+
+    worker.queue.close.assert_awaited_once()
+    worker.storage.close.assert_called_once()
+    worker.log_writer.stop.assert_called_once()
+    assert worker.running is False
+
+
+@pytest.mark.asyncio
+async def test_worker_stop_continues_when_queue_close_raises():
+    worker = LogWorker()
+    worker.running = True
+    worker.queue = Mock()
+    worker.queue.close = AsyncMock(side_effect=RuntimeError("queue close failed"))
+    worker.storage = Mock()
+    worker.storage.close = Mock()
+    worker.log_writer = Mock()
+    worker.log_writer.stop = Mock()
+    worker.log_writer.get_stats = Mock(return_value={"buffer_size": 0, "total_rows": 0})
+
+    await worker.stop()
+
+    worker.queue.close.assert_awaited_once()
+    worker.storage.close.assert_called_once()
+    worker.log_writer.stop.assert_called_once()
+    assert worker.running is False

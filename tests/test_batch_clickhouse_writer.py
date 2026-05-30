@@ -8,7 +8,7 @@ import threading
 import time
 from unittest.mock import Mock, MagicMock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'shared_src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared_src'))
 
 from batch.clickhouse_writer import BatchClickHouseWriter, MultiTableBatchWriter
 
@@ -99,6 +99,25 @@ class TestBatchClickHouseWriter:
         assert result is True
         assert len(writer._buffer) == 0
         assert len(client.inserted_data) == 2
+
+    def test_flush_chunked_by_max_insert_rows_per_query(self, monkeypatch):
+        """测试 CH_MAX_INSERT_ROWS_PER_QUERY 会限制单次写入行数。"""
+        monkeypatch.setenv("CH_MAX_INSERT_ROWS_PER_QUERY", "2")
+        client = MockClickHouseClient()
+        writer = BatchClickHouseWriter(client, "test_table", batch_size=100)
+
+        writer.add_batch([
+            ["id1", "data1"],
+            ["id2", "data2"],
+            ["id3", "data3"],
+            ["id4", "data4"],
+            ["id5", "data5"],
+        ])
+        result = writer.flush()
+
+        assert result is True
+        assert client.insert_count == 3
+        assert len(client.inserted_data) == 5
 
     def test_get_stats(self):
         """测试统计信息"""

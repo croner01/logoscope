@@ -564,7 +564,9 @@ GET /health
   "service": "ingest-service",
   "version": "1.0.0",
   "mode": "normal",
-  "redis_connected": true,
+  "queue_backend": "kafka",
+  "queue_connected": true,
+  "kafka_connected": true,
   "memory_queue": {
     "size": 0,
     "max_size": 1000,
@@ -572,7 +574,8 @@ GET /health
   },
   "stats": {
     "total_written": 15234,
-    "redis_written": 15234,
+    "queue_written": 15234,
+    "kafka_written": 15234,
     "memory_queued": 0,
     "reconnect_attempts": 0
   },

@@ -28,7 +28,10 @@ HEALTH_CHECK_PATHS = (
     "/liveness",
 )
 
-_HEALTH_ACCESS_PATTERN = re.compile(r'"(?:GET|HEAD)\s+([^"\s]+)\s+HTTP/\d\.\d"', re.IGNORECASE)
+_HEALTH_ACCESS_PATTERN = re.compile(
+    r'"[A-Z]+\s+([^"\s]+)\s+HTTP/\d(?:\.\d+)?"',
+    re.IGNORECASE,
+)
 _REQUEST_CONTEXT: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
     "logoscope_request_context",
     default=None,
@@ -209,11 +212,9 @@ class HealthEndpointFilter(logging.Filter):
             return True
 
         path = _extract_uvicorn_access_path(record)
-        if path and is_health_check_path(path):
-            return False
-
-        lowered_message = record.getMessage().lower()
-        return not any(token in lowered_message for token in HEALTH_CHECK_PATHS)
+        if not path:
+            return True
+        return not is_health_check_path(path)
 
 
 class RequestContextFilter(logging.Filter):

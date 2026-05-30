@@ -21,9 +21,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 DEPLOY_DIR="$PROJECT_ROOT/deploy"
 
-# K3s 配置
-K3S_CONFIG_FILE="/etc/rancher/k3s/k3s.yaml"
+# 默认 K3s kubeconfig（仅在未显式设置 KUBECONFIG 且文件存在时作为兜底）
+DEFAULT_K3S_KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
 NAMESPACE="islap"
+DB_PROFILE_RAW="${DB_PROFILE:-single}"
+DB_PROFILE="$(echo "$DB_PROFILE_RAW" | tr '[:upper:]' '[:lower:]')"
+
+CLICKHOUSE_MANIFEST_SINGLE="$DEPLOY_DIR/clickhouse-single.yaml"
+CLICKHOUSE_MANIFEST_HA="$DEPLOY_DIR/clickhouse-ha.yaml"
+REDIS_MANIFEST_SINGLE="$DEPLOY_DIR/redis-single.yaml"
+REDIS_MANIFEST_HA="$DEPLOY_DIR/redis-ha.yaml"
 
 ##############################################################################
 # 工具函数
@@ -51,15 +58,25 @@ print_info() {
     echo -e "${BLUE}ℹ $1${NC}"
 }
 
-# 检查 k3s 是否运行
-check_k3s() {
-    if ! systemctl is-active --quiet k3s; then
-        print_error "K3s 服务未运行"
-        print_info "启动 K3s: sudo systemctl start k3s"
-        exit 1
-    fi
-    print_success "K3s 服务运行正常"
+normalize_db_profile() {
+    case "$DB_PROFILE" in
+        single|ha)
+            ;;
+        *)
+            print_error "无效 DB_PROFILE: $DB_PROFILE（仅支持 single|ha）"
+            exit 1
+            ;;
+    esac
 }
+
+resolve_clickhouse_manifest() {
+    if [ "$DB_PROFILE" = "ha" ]; then
+        echo "$CLICKHOUSE_MANIFEST_HA"
+    else
+        echo "$CLICKHOUSE_MANIFEST_SINGLE"
+    fi
+}
+
 
 # 检查 kubectl 是否可用
 check_kubectl() {
@@ -71,9 +88,30 @@ check_kubectl() {
     print_success "kubectl 可用"
 }
 
-# 设置 kubectl 配置
+# 设置 kubectl 配置（兼容任意 Kubernetes 发行版）
 setup_kubectl() {
-    export KUBECONFIG="$K3S_CONFIG_FILE"
+    if [ -n "${KUBECONFIG:-}" ]; then
+        print_info "使用已有 KUBECONFIG: $KUBECONFIG"
+        return 0
+    fi
+
+    if [ -f "$DEFAULT_K3S_KUBECONFIG" ]; then
+        export KUBECONFIG="$DEFAULT_K3S_KUBECONFIG"
+        print_info "未设置 KUBECONFIG，使用默认 K3s 配置: $KUBECONFIG"
+        return 0
+    fi
+
+    print_info "未设置 KUBECONFIG，使用 kubectl 默认上下文"
+}
+
+# 检查 Kubernetes 集群连通性
+check_kubernetes_cluster() {
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        print_error "无法连接 Kubernetes 集群，请检查 kubeconfig / 当前 context / 集群状态"
+        print_info "排查命令: kubectl config current-context && kubectl cluster-info"
+        exit 1
+    fi
+    print_success "Kubernetes 集群连接正常"
 }
 
 # 等待 Pod 就绪
@@ -118,6 +156,25 @@ wait_for_deployment() {
         return 0
     else
         print_error "Deployment $deployment 未能在 ${timeout}秒内就绪"
+        return 1
+    fi
+}
+
+# 等待 StatefulSet 就绪
+wait_for_statefulset() {
+    local namespace=$1
+    local statefulset=$2
+    local timeout=${3:-600}
+
+    print_info "等待 StatefulSet 就绪: $statefulset"
+
+    kubectl rollout status statefulset/"$statefulset" -n "$namespace" --timeout="${timeout}s"
+
+    if [ $? -eq 0 ]; then
+        print_success "StatefulSet $statefulset 已就绪"
+        return 0
+    else
+        print_error "StatefulSet $statefulset 未能在 ${timeout}秒内就绪"
         return 1
     fi
 }
@@ -195,10 +252,20 @@ deploy_namespace() {
 deploy_clickhouse() {
     print_header "部署 ClickHouse"
 
-    kubectl apply -f "$DEPLOY_DIR/clickhouse.yaml"
+    local manifest
+    manifest="$(resolve_clickhouse_manifest)"
+    print_info "使用数据库配置: $DB_PROFILE ($manifest)"
+    kubectl apply -f "$manifest"
 
-    print_info "等待 ClickHouse 就绪..."
-    wait_for_deployment "$NAMESPACE" "clickhouse" 300
+    if [ "$DB_PROFILE" = "ha" ]; then
+        print_info "等待 ClickHouse Keeper 就绪..."
+        wait_for_statefulset "$NAMESPACE" "clickhouse-keeper" 600
+        print_info "等待 ClickHouse 就绪..."
+        wait_for_statefulset "$NAMESPACE" "clickhouse" 600
+    else
+        print_info "等待 ClickHouse（单副本）就绪..."
+        wait_for_deployment "$NAMESPACE" "clickhouse" 300
+    fi
 
     print_success "ClickHouse 部署完成"
 }
@@ -216,16 +283,24 @@ deploy_neo4j() {
 }
 
 # 部署 Redis
-deploy_redis() {
-    print_header "部署 Redis"
-
-    kubectl apply -f "$DEPLOY_DIR/redis.yaml"
-
-    print_info "等待 Redis 就绪..."
-    wait_for_deployment "$NAMESPACE" "redis" 180
-
-    print_success "Redis 部署完成"
-}
+#deploy_redis() {
+#    print_header "部署 Redis"
+#
+#    local manifest
+#    manifest="$(resolve_redis_manifest)"
+#    print_info "使用数据库配置: $DB_PROFILE ($manifest)"
+#    kubectl apply -f "$manifest"
+#
+#    if [ "$DB_PROFILE" = "ha" ]; then
+#        print_info "等待 Redis HA StatefulSet 就绪..."
+#        wait_for_statefulset "$NAMESPACE" "redis" 300
+#    else
+#        print_info "等待 Redis（单副本）就绪..."
+#        wait_for_deployment "$NAMESPACE" "redis" 180
+#    fi
+#
+#    print_success "Redis 部署完成"
+#}
 
 # 部署 Semantic Engine
 deploy_semantic_engine() {
@@ -249,6 +324,45 @@ deploy_ai_service() {
     wait_for_deployment "$NAMESPACE" "ai-service" 180
 
     print_success "AI Service 部署完成"
+}
+
+# 部署 Temporal（外环编排引擎）
+deploy_temporal() {
+    print_header "部署 Temporal"
+
+    kubectl apply -f "$DEPLOY_DIR/temporal.yaml"
+
+    print_info "等待 Temporal PostgreSQL 就绪..."
+    wait_for_deployment "$NAMESPACE" "temporal-postgresql" 300
+
+    print_info "等待 Temporal Frontend 就绪..."
+    wait_for_deployment "$NAMESPACE" "temporal" 300
+
+    print_success "Temporal 部署完成"
+}
+
+# 部署 OPA
+deploy_opa() {
+    print_header "部署 OPA Policy Engine"
+
+    kubectl apply -f "$DEPLOY_DIR/opa.yaml"
+
+    print_info "等待 OPA 就绪..."
+    wait_for_deployment "$NAMESPACE" "opa" 180
+
+    print_success "OPA 部署完成"
+}
+
+# 部署 Exec Service
+deploy_exec_service() {
+    print_header "部署 Exec Service"
+
+    kubectl apply -f "$DEPLOY_DIR/exec-service.yaml"
+
+    print_info "等待 Exec Service 就绪..."
+    wait_for_deployment "$NAMESPACE" "exec-service" 180
+
+    print_success "Exec Service 部署完成"
 }
 
 # 部署 Worker
@@ -362,7 +476,7 @@ deploy_all() {
     echo ""
 
     # 按依赖顺序部署
-    print_info "部署顺序：命名空间 → 基础设施 → 核心服务 → 采集组件 → 查询服务 → 前端"
+    print_info "部署顺序：命名空间 → 基础设施 → 编排/核心服务 → 采集组件 → 查询服务 → 前端"
     echo ""
 
     # 1. 命名空间
@@ -377,7 +491,10 @@ deploy_all() {
     deploy_neo4j
     echo ""
 
-    deploy_redis
+    #deploy_redis
+    #echo ""
+
+    deploy_temporal
     echo ""
 
     # 3. 核心服务
@@ -389,6 +506,12 @@ deploy_all() {
     echo ""
 
     deploy_ai_service
+    echo ""
+
+    deploy_opa
+    echo ""
+
+    deploy_exec_service
     echo ""
 
     deploy_worker
@@ -470,10 +593,14 @@ health_check() {
     local services=(
         "clickhouse"
         "neo4j"
-        "redis"
+        #"#redis"
+        "temporal-postgresql"
+        "temporal"
         "ingest-service"
         "semantic-engine"
         "ai-service"
+        "opa"
+        "exec-service"
         "semantic-engine-worker"
         "query-service"
         "topology-service"
@@ -505,6 +632,17 @@ health_check() {
 # 初始化数据库
 init_database() {
     print_header "初始化数据库表"
+
+    # profile 感知初始化（single/ha 两套引擎）。
+    if [ -x "$PROJECT_ROOT/scripts/clickhouse-ha-control.sh" ]; then
+        print_info "使用数据库配置: $DB_PROFILE（脚本初始化）"
+        DB_PROFILE="$DB_PROFILE" "$PROJECT_ROOT/scripts/clickhouse-ha-control.sh" bootstrap
+        if [ "$DB_PROFILE" = "ha" ]; then
+            DB_PROFILE="$DB_PROFILE" "$PROJECT_ROOT/scripts/clickhouse-ha-control.sh" sync
+        fi
+        print_success "ClickHouse schema 初始化完成（profile=$DB_PROFILE）"
+        return 0
+    fi
 
     print_info "检查 ClickHouse 表..."
     local logs_ttl_days="${LOGS_TTL_DAYS:-30}"
@@ -571,6 +709,7 @@ init_database() {
             INDEX idx_logs_pod_name pod_name TYPE bloom_filter(0.01) GRANULARITY 4,
             INDEX idx_logs_trace_id_source trace_id_source TYPE set(128) GRANULARITY 1,
             INDEX idx_logs_message_token message TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
+            INDEX idx_logs_message_ngram message TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1,
             PROJECTION proj_logs_trace_lookup
             (
                 SELECT
@@ -595,6 +734,19 @@ init_database() {
                     span_id,
                     id
                 ORDER BY (service_name, level_norm, timestamp, id)
+            ),
+            PROJECTION proj_logs_pod_ns_time
+            (
+                SELECT
+                    id,
+                    timestamp,
+                    service_name,
+                    level_norm,
+                    pod_name,
+                    namespace,
+                    trace_id,
+                    span_id
+                ORDER BY (pod_name, namespace, timestamp, id)
             )
         ) ENGINE = MergeTree()
         PARTITION BY toDate(timestamp)
@@ -786,14 +938,19 @@ init_database() {
         CREATE MATERIALIZED VIEW IF NOT EXISTS logs.mv_obs_counts_1m_from_logs
         TO logs.obs_counts_1m
         AS
+        WITH multiIf(
+            length(trim(BOTH ' ' FROM ifNull(level, ''))) = 0, 'OTHER',
+            upperUTF8(trim(BOTH ' ' FROM level)) = 'WARNING', 'WARN',
+            upperUTF8(trim(BOTH ' ' FROM level))
+        ) AS level_norm_safe
         SELECT
             toStartOfMinute(timestamp) AS ts_minute,
             CAST('log', 'Enum8(\\'log\\' = 1, \\'metric\\' = 2)') AS signal,
             service_name,
             'level' AS dim_name,
-            level_norm AS dim_value,
+            level_norm_safe AS dim_value,
             count() AS count,
-            countIf(level_norm IN ('ERROR', 'FATAL')) AS error_count
+            countIf(level_norm_safe IN ('ERROR', 'FATAL')) AS error_count
         FROM logs.logs
         GROUP BY ts_minute, service_name, dim_value
     "
@@ -1045,19 +1202,21 @@ clean_component() {
     case "$component" in
         clickhouse)
             print_warning "清理 ClickHouse 数据"
-            kubectl exec -it "$(kubectl get pods -n "$NAMESPACE" -l app=clickhouse -o jsonpath='{.items[0].metadata.name}')" -n "$NAMESPACE" -- clickhouse-client --query "TRUNCATE TABLE IF EXISTS logs.logs"
-            kubectl exec -it "$(kubectl get pods -n "$NAMESPACE" -l app=clickhouse -o jsonpath='{.items[0].metadata.name}')" -n "$NAMESPACE" -- clickhouse-client --query "TRUNCATE TABLE IF EXISTS logs.events"
+            local clickhouse_pod
+            clickhouse_pod="$(kubectl get pods -n "$NAMESPACE" -l app=clickhouse -o jsonpath='{.items[0].metadata.name}')"
+            if [ "$DB_PROFILE" = "ha" ]; then
+                kubectl exec -it "$clickhouse_pod" -n "$NAMESPACE" -- clickhouse-client --query "TRUNCATE TABLE IF EXISTS logs.logs ON CLUSTER logoscope_cluster"
+                kubectl exec -it "$clickhouse_pod" -n "$NAMESPACE" -- clickhouse-client --query "TRUNCATE TABLE IF EXISTS logs.events ON CLUSTER logoscope_cluster"
+            else
+                kubectl exec -it "$clickhouse_pod" -n "$NAMESPACE" -- clickhouse-client --query "TRUNCATE TABLE IF EXISTS logs.logs"
+                kubectl exec -it "$clickhouse_pod" -n "$NAMESPACE" -- clickhouse-client --query "TRUNCATE TABLE IF EXISTS logs.events"
+            fi
             print_success "ClickHouse 数据已清理"
             ;;
         neo4j)
             print_warning "清理 Neo4j 数据"
             kubectl exec -it "$(kubectl get pods -n "$NAMESPACE" -l app=neo4j -o jsonpath='{.items[0].metadata.name}')" -n "$NAMESPACE" -- cypher-shell -u neo4j -p password "MATCH (n) DETACH DELETE n"
             print_success "Neo4j 数据已清理"
-            ;;
-        redis)
-            print_warning "清理 Redis 数据"
-            kubectl exec -it "$(kubectl get pods -n "$NAMESPACE" -l app=redis -o jsonpath='{.items[0].metadata.name}')" -n "$NAMESPACE" -- redis-cli FLUSHALL
-            print_success "Redis 数据已清理"
             ;;
         *)
             print_error "未知组件: $component"
@@ -1080,7 +1239,16 @@ restart_component() {
     print_header "重启组件: $component"
 
     case "$component" in
-        clickhouse|neo4j|redis|ingest-service|semantic-engine|ai-service|semantic-engine-worker|query-service|topology-service|otel-gateway)
+        clickhouse)
+            if [ "$DB_PROFILE" = "ha" ]; then
+                kubectl rollout restart statefulset/clickhouse -n "$NAMESPACE"
+            else
+                kubectl rollout restart deployment/clickhouse -n "$NAMESPACE"
+            fi
+            print_success "组件 $component 已重启"
+            print_info "使用 '$0 status' 查看状态"
+            ;;
+        neo4j|ingest-service|semantic-engine|ai-service|opa|exec-service|semantic-engine-worker|query-service|topology-service|otel-gateway|temporal|temporal-postgresql)
             kubectl rollout restart deployment/"$component" -n "$NAMESPACE"
             print_success "组件 $component 已重启"
             print_info "使用 '$0 status' 查看状态"
@@ -1101,7 +1269,7 @@ restart_component() {
             ;;
         *)
             print_error "未知组件: $component"
-            print_info "支持的组件: clickhouse, neo4j, redis, ingest-service, semantic-engine, ai-service, semantic-engine-worker, query-service, topology-service, otel-gateway, frontend, fluent-bit, otel-collector"
+            print_info "支持的组件: clickhouse, neo4j, temporal, temporal-postgresql, ingest-service, semantic-engine, ai-service, opa, exec-service, semantic-engine-worker, query-service, topology-service, otel-gateway, frontend, fluent-bit, otel-collector"
             return 1
             ;;
     esac
@@ -1130,6 +1298,12 @@ show_logs() {
         redis)
             kubectl logs -l app=redis -n "$NAMESPACE" --tail="$lines"
             ;;
+        temporal)
+            kubectl logs -l app=temporal -n "$NAMESPACE" --tail="$lines"
+            ;;
+        temporal-postgresql)
+            kubectl logs -l app=temporal-postgresql -n "$NAMESPACE" --tail="$lines"
+            ;;
         ingest-service)
             kubectl logs -l app=ingest-service -n "$NAMESPACE" --tail="$lines"
             ;;
@@ -1138,6 +1312,12 @@ show_logs() {
             ;;
         ai-service)
             kubectl logs -l app=ai-service -n "$NAMESPACE" --tail="$lines"
+            ;;
+        opa)
+            kubectl logs -l app=opa -n "$NAMESPACE" --tail="$lines"
+            ;;
+        exec-service)
+            kubectl logs -l app=exec-service -n "$NAMESPACE" --tail="$lines"
             ;;
         worker|semantic-engine-worker)
             kubectl logs -l app=semantic-engine-worker -n "$NAMESPACE" --tail="$lines"
@@ -1162,7 +1342,7 @@ show_logs() {
             ;;
         *)
             print_error "未知组件: $component"
-            print_info "支持的组件: clickhouse, neo4j, redis, ingest-service, semantic-engine, ai-service, worker, query-service, topology-service, frontend, fluent-bit, otel-collector, otel-gateway"
+            print_info "支持的组件: clickhouse, neo4j, redis, temporal, temporal-postgresql, ingest-service, semantic-engine, ai-service, opa, exec-service, worker, query-service, topology-service, frontend, fluent-bit, otel-collector, otel-gateway"
             return 1
             ;;
     esac
@@ -1178,16 +1358,19 @@ ${GREEN}Logoscope 一键部署脚本 v4.0${NC}
 
 ${BLUE}用法:${NC}
     $0 <command> [options]
+    DB_PROFILE=single|ha $0 <command>
 
 ${BLUE}部署命令:${NC}
     all                    部署所有组件（推荐）
     namespace               部署命名空间
     clickhouse              部署 ClickHouse
     neo4j                   部署 Neo4j
-    redis                   部署 Redis
+    temporal                部署 Temporal（外环编排引擎）
     ingest-service          部署 Ingest Service（数据摄入）
     semantic-engine         部署 Semantic Engine API
     ai-service              部署 AI Service（LLM/会话/案例库/follow-up）
+    opa                     部署 OPA Policy Engine（命令策略决策）
+    exec-service            部署 Exec Service（命令预检/执行/审计）
     worker                  部署 Semantic Engine Worker
     query-service           部署 Query Service（查询服务）
     topology-service        部署 Topology Service（拓扑服务）
@@ -1206,6 +1389,8 @@ ${BLUE}管理命令:${NC}
 
 ${BLUE}示例:${NC}
     $0 all                         # 部署所有组件
+    DB_PROFILE=single $0 all       # 单副本数据库配置（开发环境）
+    DB_PROFILE=ha $0 all           # 高可用数据库配置（生产环境）
     $0 status                      # 查看状态
     $0 health                      # 健康检查
     $0 init-db                     # 初始化数据库
@@ -1217,23 +1402,28 @@ ${BLUE}组件部署顺序:${NC}
     1. namespace (islap)
     2. clickhouse (时序数据库)
     3. neo4j (图数据库)
-    4. redis (缓存/队列)
-    5. ingest-service (数据摄入服务)
-    6. semantic-engine (语义分析 API)
-    7. ai-service (AI API)
-    8. worker (异步处理 Worker)
-    9. query-service (查询服务)
-    10. topology-service (拓扑服务)
-    11. fluent-bit (日志采集)
-    12. otel-collector (OTel 采集器)
-    13. otel-gateway (OTel 网关)
-    14. frontend (前端界面)
-    15. value-kpi-cronjob (价值指标周任务)
+    5. temporal (外环编排引擎)
+    6. ingest-service (数据摄入服务)
+    7. semantic-engine (语义分析 API)
+    8. ai-service (AI API)
+    9. opa (策略决策引擎)
+    10. exec-service (命令执行服务)
+    11. worker (异步处理 Worker)
+    12. query-service (查询服务)
+    13. topology-service (拓扑服务)
+    14. fluent-bit (日志采集)
+    15. otel-collector (OTel 采集器)
+    16. otel-gateway (OTel 网关)
+    17. frontend (前端界面)
+    18. value-kpi-cronjob (价值指标周任务)
 
 ${BLUE}服务地址:${NC}
     Ingest Service:  http://10.43.167.123:8080
     Semantic Engine:  http://10.43.231.27:8080
     AI Service:       http://ai-service.islap.svc:8090
+    Temporal:         temporal-frontend.islap.svc:7233
+    OPA:              http://opa.islap.svc:8181
+    Exec Service:     http://exec-service.islap.svc:8095
     Query Service:    http://query-service.islap.svc:8080
     Topology Service: http://topology-service.islap.svc:8080
     Frontend:         http://frontend.islap.svc:80
@@ -1251,9 +1441,11 @@ EOF
 
 main() {
     # 检查环境
-    check_k3s
     check_kubectl
     setup_kubectl
+    check_kubernetes_cluster
+    normalize_db_profile
+    print_info "数据库 Profile: $DB_PROFILE"
 
     # 执行命令
     local command=$1
@@ -1272,14 +1464,20 @@ main() {
         neo4j)
             deploy_neo4j
             ;;
-        redis)
-            deploy_redis
+        temporal)
+            deploy_temporal
             ;;
         semantic-engine)
             deploy_semantic_engine
             ;;
         ai-service)
             deploy_ai_service
+            ;;
+        opa)
+            deploy_opa
+            ;;
+        exec-service)
+            deploy_exec_service
             ;;
         worker)
             deploy_worker

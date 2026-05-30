@@ -242,13 +242,38 @@ class EnhancedTopologyBuilder:
                     trace_id, span_id, parent_span_id, service_name, operation_name, status, timestamp, attributes_json = row
                     # 从 attributes_json 中提取 duration_ms（如果存在）
                     duration_ms = 0
-                    try:
-                        if attributes_json:
-                            import json
-                            attrs = json.loads(attributes_json)
+                    if attributes_json:
+                        if isinstance(attributes_json, dict):
+                            attrs = attributes_json
+                        elif isinstance(attributes_json, (str, bytes, bytearray)):
+                            try:
+                                attrs = json.loads(attributes_json)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                logger.warning(
+                                    "Failed to parse attributes_json for trace %s span %s: %s",
+                                    trace_id,
+                                    span_id,
+                                    exc,
+                                )
+                                attrs = {}
+                        else:
+                            logger.warning(
+                                "Unexpected attributes_json type for trace %s span %s: %s",
+                                trace_id,
+                                span_id,
+                                type(attributes_json).__name__,
+                            )
+                            attrs = {}
+
+                        if isinstance(attrs, dict):
                             duration_ms = attrs.get('duration_ms', 0) or attrs.get('duration', 0) or 0
-                    except:
-                        pass
+                        else:
+                            logger.warning(
+                                "attributes_json is not an object for trace %s span %s: %s",
+                                trace_id,
+                                span_id,
+                                type(attrs).__name__,
+                            )
                     traces_by_id[trace_id].append({
                         "span_id": span_id,
                         "parent_span_id": parent_span_id,

@@ -17,15 +17,19 @@ import {
   ZoomOut,
 } from 'lucide-react';
 
-import { useEvents, useHybridTopology, useRealtimeTopology, useTopologyEdgeLogPreview, useTopologyStats } from '../hooks/useApi';
+import { useHybridTopology, useRealtimeTopology, useTopologyEdgeLogPreview } from '../hooks/useApi';
 import { useNavigation } from '../hooks/useNavigation';
 import LoadingState from '../components/common/LoadingState';
 import ErrorState from '../components/common/ErrorState';
 import Tooltip from '../components/common/Tooltip';
+import { api } from '../utils/api';
+import type { Event } from '../utils/api';
+import { extractEventRequestIds, extractEventTraceIds } from '../utils/logCorrelation';
 import {
   computeEdgeIssueScore,
   filterByEvidenceMode,
   filterGraphByFocusDepth,
+  filterWeakEvidenceEdges,
   isolateNodeNeighborhood,
   sortEdgesByIssueScore,
 } from '../utils/topologyGraph';
@@ -35,11 +39,97 @@ import {
   resolveIssueSummary,
   resolveNodeProblemSummary,
 } from '../utils/topologyProblemSummary';
+import { formatTime, formatTimeWindow, parseTimestamp } from '../utils/formatters';
+import { resolveCanonicalServiceName } from '../utils/serviceName';
 
 type LayoutMode = 'swimlane' | 'grid' | 'free';
 type EvidenceMode = 'all' | 'observed' | 'inferred';
 type MessageTargetPattern = 'url' | 'kv' | 'proxy' | 'rpc';
 type InferenceMode = 'rule' | 'hybrid_score';
+type TopologyEntity = {
+  id?: string;
+  source?: string;
+  target?: string;
+  label?: string;
+  type?: string;
+  level?: string;
+  message?: string;
+  service_name?: string;
+  pod_name?: string;
+  namespace?: string;
+  timestamp?: string;
+  name?: string;
+  node_key?: string;
+  edge_key?: string;
+  source_service?: string;
+  target_service?: string;
+  source_namespace?: string;
+  target_namespace?: string;
+  source_node_key?: string;
+  target_node_key?: string;
+  service_namespace?: string;
+  namespace_count?: number;
+  namespace_ambiguous?: boolean;
+  coverage?: number;
+  quality_score?: number;
+  timeout_rate?: number;
+  p95?: number;
+  p99?: number;
+  evidence_type?: string;
+  metrics?: {
+    log_count?: number;
+    error_count?: number;
+    coverage?: number;
+    quality_score?: number;
+    call_count?: number | null;
+    rps?: number;
+    error_rate?: number;
+    timeout_rate?: number;
+    p95?: number;
+    p99?: number;
+    evidence_type?: string;
+    reason?: string;
+    protocol?: string;
+    transport?: string;
+    operation?: string;
+    data_source?: string;
+    service_name?: string;
+    service_namespace?: string;
+    namespace?: string;
+    node_key?: string;
+    edge_key?: string;
+    source_service?: string;
+    target_service?: string;
+    source_namespace?: string;
+    target_namespace?: string;
+    source_node_key?: string;
+    target_node_key?: string;
+    namespace_count?: number;
+    namespace_ambiguous?: boolean;
+    directional_consistency?: number;
+    inference_mode?: string;
+  };
+  service?: {
+    namespace?: string;
+    name?: string;
+    env?: string;
+  };
+  kubernetes?: {
+    namespace_name?: string;
+  };
+  attributes?: Record<string, unknown>;
+  context?: Record<string, unknown>;
+};
+type TopologyNodeEntity = TopologyEntity & {
+  id: string;
+};
+type TopologyEdgeEntity = TopologyEntity & {
+  source: string;
+  target: string;
+};
+type TopProblemEdge = TopologyEdgeEntity & {
+  issueScore: number;
+};
 
 type EdgeSortMode = 'anomaly' | 'error_rate' | 'timeout_rate' | 'p99';
 type PanelKey = 'control' | 'issues' | 'detail';
@@ -90,6 +180,13 @@ interface ServicePathSummary {
   explanation: string;
 }
 
+interface FocusServiceOption {
+  serviceName: string;
+  nodeId: string;
+  nodeCount: number;
+  score: number;
+}
+
 interface EdgeLabelBox {
   x1: number;
   y1: number;
@@ -107,7 +204,7 @@ interface EdgeBundleMeta {
 
 interface EdgeRenderDatum {
   uid: string;
-  edge: any;
+  edge: TopologyEdgeEntity;
   edgeIndex: number;
   path: string;
   labelX: number;
@@ -128,8 +225,15 @@ interface HoverCardState {
   kind: 'node' | 'edge';
   cursorX: number;
   cursorY: number;
-  node?: any;
-  edge?: any;
+  node?: TopologyNodeEntity;
+  edge?: TopologyEdgeEntity;
+}
+
+interface ChangeOverlayEvent {
+  id: string;
+  service_name: string;
+  timestamp: string;
+  message: string;
 }
 
 const TIME_WINDOWS = ['15 MINUTE', '30 MINUTE', '1 HOUR', '6 HOUR', '24 HOUR'];
@@ -167,6 +271,199 @@ const LANE_COLORS = ['#22d3ee', '#a78bfa', '#34d399', '#fb923c', '#fb7185', '#60
 const DENSE_TOPOLOGY_EDGE_THRESHOLD = 180;
 const HEAVY_TOPOLOGY_EDGE_THRESHOLD = 320;
 const PATH_SUMMARY_EDGE_THRESHOLD = 260;
+const TOPOLOGY_MIN_ZOOM = 0.35;
+const TOPOLOGY_MAX_ZOOM = 2.8;
+const FREE_LAYOUT_STORAGE_VERSION = 1;
+const FREE_LAYOUT_STORAGE_PREFIX = 'topology:free-layout';
+const TOPOLOGY_VIEW_STATE_VERSION = 1;
+const TOPOLOGY_VIEW_STATE_PREFIX = 'topology:view-state';
+
+const clampZoom = (value: number): number => Math.max(TOPOLOGY_MIN_ZOOM, Math.min(TOPOLOGY_MAX_ZOOM, value));
+
+interface FreeLayoutPoint {
+  x: number;
+  y: number;
+}
+
+interface FreeLayoutSnapshot {
+  version: number;
+  updatedAt: string;
+  positions: Record<string, FreeLayoutPoint>;
+}
+
+interface TopologyViewState {
+  zoom: number;
+  pan: {
+    x: number;
+    y: number;
+  };
+}
+
+interface TopologyViewStateSnapshot {
+  version: number;
+  updatedAt: string;
+  state: TopologyViewState;
+}
+
+const parseFreeLayoutPoint = (value: unknown): FreeLayoutPoint | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const point = value as { x?: unknown; y?: unknown };
+  const x = Number(point.x);
+  const y = Number(point.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+  if (Math.abs(x) > 200000 || Math.abs(y) > 200000) {
+    return null;
+  }
+  return { x, y };
+};
+
+const readFreeLayoutSnapshot = (storageKey: string): Record<string, FreeLayoutPoint> => {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as FreeLayoutSnapshot;
+    if (Number(parsed?.version) !== FREE_LAYOUT_STORAGE_VERSION || !parsed?.positions || typeof parsed.positions !== 'object') {
+      return {};
+    }
+    const next: Record<string, FreeLayoutPoint> = {};
+    Object.entries(parsed.positions).forEach(([nodeId, point]) => {
+      const parsedPoint = parseFreeLayoutPoint(point);
+      if (!parsedPoint) {
+        return;
+      }
+      next[nodeId] = parsedPoint;
+    });
+    return next;
+  } catch {
+    return {};
+  }
+};
+
+const writeFreeLayoutSnapshot = (storageKey: string, positions: Record<string, FreeLayoutPoint>): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const snapshot: FreeLayoutSnapshot = {
+    version: FREE_LAYOUT_STORAGE_VERSION,
+    updatedAt: new Date().toISOString(),
+    positions,
+  };
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
+  } catch {
+    return;
+  }
+};
+
+const clearFreeLayoutSnapshot = (storageKey: string): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(storageKey);
+  } catch {
+    return;
+  }
+};
+
+const parseViewState = (value: unknown): TopologyViewState | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const raw = value as { zoom?: unknown; pan?: { x?: unknown; y?: unknown } };
+  const zoom = clampZoom(Number(raw.zoom));
+  const panX = Number(raw.pan?.x);
+  const panY = Number(raw.pan?.y);
+  if (!Number.isFinite(zoom) || !Number.isFinite(panX) || !Number.isFinite(panY)) {
+    return null;
+  }
+  if (Math.abs(panX) > 500000 || Math.abs(panY) > 500000) {
+    return null;
+  }
+  return {
+    zoom,
+    pan: {
+      x: panX,
+      y: panY,
+    },
+  };
+};
+
+const sameFreeLayoutPositions = (
+  a: Record<string, FreeLayoutPoint>,
+  b: Record<string, FreeLayoutPoint>,
+): boolean => {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) {
+    return false;
+  }
+  for (const key of aKeys) {
+    const pointA = a[key];
+    const pointB = b[key];
+    if (!pointB) {
+      return false;
+    }
+    if (pointA.x !== pointB.x || pointA.y !== pointB.y) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const sameTopologyViewState = (
+  a: TopologyViewState | null,
+  b: TopologyViewState,
+): boolean => {
+  if (!a) {
+    return false;
+  }
+  return a.zoom === b.zoom && a.pan.x === b.pan.x && a.pan.y === b.pan.y;
+};
+
+const readTopologyViewState = (storageKey: string): TopologyViewState | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as TopologyViewStateSnapshot;
+    if (Number(parsed?.version) !== TOPOLOGY_VIEW_STATE_VERSION) {
+      return null;
+    }
+    return parseViewState(parsed.state);
+  } catch {
+    return null;
+  }
+};
+
+const writeTopologyViewState = (storageKey: string, state: TopologyViewState): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const snapshot: TopologyViewStateSnapshot = {
+    version: TOPOLOGY_VIEW_STATE_VERSION,
+    updatedAt: new Date().toISOString(),
+    state,
+  };
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
+  } catch {
+    return;
+  }
+};
 
 interface TimeWindowNodeTheme {
   serviceFrom: string;
@@ -279,17 +576,85 @@ const toMetric = (value: unknown, fallback = 0): number => {
 };
 
 function getRelationshipLabel(reason: string): { label: string; description: string } {
-  return REASON_LABELS[reason] || {
-    label: reason || '调用关系',
-    description: reason ? `链路由系统规则推断: ${reason}` : '链路由系统推断。',
+  const normalizedReason = safeText(reason);
+  const safeReason = normalizedReason && !['unknown', 'none', 'null', 'n/a', '-'].includes(normalizedReason.toLowerCase())
+    ? normalizedReason
+    : '';
+  return REASON_LABELS[safeReason] || {
+    label: safeReason || '调用关系',
+    description: safeReason ? `链路由系统规则推断: ${safeReason}` : '链路由系统推断。',
   };
 }
 
-function resolveServiceName(node: any): string {
-  return node?.service?.name || node?.metrics?.service_name || node?.label || node?.id || 'unknown';
+function resolveServiceName(node: TopologyNodeEntity): string {
+  const candidate = node?.service?.name || node?.metrics?.service_name || node?.label || node?.id || 'unknown';
+  return resolveCanonicalServiceName(candidate);
 }
 
-function resolveNamespace(node: any): string {
+function resolveEdgeServiceName(value: unknown): string {
+  const raw = safeText(value);
+  if (!raw) {
+    return 'unknown';
+  }
+  const nodeKeyMatch = raw.match(/^[^:]+:([^:]+):[^:]+$/);
+  if (nodeKeyMatch?.[1]) {
+    return resolveCanonicalServiceName(nodeKeyMatch[1]);
+  }
+  if (raw.includes('::')) {
+    const [, serviceToken] = raw.split('::', 2);
+    if (serviceToken) {
+      return resolveCanonicalServiceName(serviceToken);
+    }
+  }
+  return resolveCanonicalServiceName(raw);
+}
+
+function normalizeOptionalServiceName(value: unknown): string | undefined {
+  const resolved = safeText(resolveCanonicalServiceName(value));
+  if (!resolved || ['unknown', 'none', 'null', 'n/a', '-'].includes(resolved.toLowerCase())) {
+    return undefined;
+  }
+  return resolved;
+}
+
+function normalizeOptionalNamespaceValue(value: unknown): string | undefined {
+  const resolved = safeText(value);
+  if (!resolved || ['unknown', 'none', 'null', 'n/a', '-', 'multiple', 'mixed', '多个命名空间'].includes(resolved.toLowerCase())) {
+    return undefined;
+  }
+  return resolved;
+}
+
+const MULTI_NAMESPACE_LABEL = '多个命名空间';
+
+function hasAmbiguousNamespace(node: TopologyNodeEntity | null | undefined): boolean {
+  const count = Number(node?.metrics?.namespace_count ?? node?.namespace_count ?? 0);
+  if (Number.isFinite(count) && count > 1) {
+    return true;
+  }
+  return Boolean(node?.metrics?.namespace_ambiguous || node?.namespace_ambiguous);
+}
+
+function resolveNamespaceLabel(node: TopologyNodeEntity): string {
+  if (hasAmbiguousNamespace(node)) {
+    return MULTI_NAMESPACE_LABEL;
+  }
+  return resolveNamespace(node);
+}
+
+function resolveNamespaceFilter(node: TopologyNodeEntity): string | undefined {
+  if (hasAmbiguousNamespace(node)) {
+    return undefined;
+  }
+  const namespace = resolveNamespace(node);
+  const normalized = safeText(namespace).toLowerCase();
+  if (!normalized || ['unknown', 'none', 'null', 'n/a', '-', 'multiple', 'mixed'].includes(normalized)) {
+    return undefined;
+  }
+  return namespace;
+}
+
+function resolveNamespace(node: TopologyNodeEntity): string {
   const normalizeNamespace = (value: unknown): string => safeText(value);
   const namespaceQuality = (value: string): number => {
     const text = safeText(value).toLowerCase();
@@ -370,7 +735,7 @@ function resolveNamespace(node: any): string {
   return 'unknown';
 }
 
-function resolveLane(node: any): { key: string; label: string } {
+function resolveLane(node: TopologyNodeEntity): { key: string; label: string } {
   const namespace = resolveNamespace(node);
   if (namespace === 'unknown') {
     const type = safeText(node?.type || 'service').toLowerCase();
@@ -384,16 +749,16 @@ function resolveLane(node: any): { key: string; label: string } {
       return { key: 'type:external', label: 'Edge Plane · External' };
     }
 
-    return { key: 'type:service', label: 'Service Plane · Core Services' };
+    return { key: 'type:service', label: 'Service Plane（分层）· Core Services' };
   }
 
   if (namespace) {
     return { key: `ns:${namespace.toLowerCase()}`, label: `Namespace · ${namespace}` };
   }
-  return { key: 'type:service', label: 'Service Plane · Core Services' };
+  return { key: 'type:service', label: 'Service Plane（分层）· Core Services' };
 }
 
-function getNodeStatus(node: any): 'error' | 'warning' | 'normal' {
+function getNodeStatus(node: TopologyNodeEntity): 'error' | 'warning' | 'normal' {
   const summary = resolveNodeProblemSummary(node);
   if (summary.riskLevel === '高风险') {
     return 'error';
@@ -418,7 +783,7 @@ function resolveNodeThemeByWindow(timeWindow: string): TimeWindowNodeTheme {
   return TIME_WINDOW_NODE_THEMES[normalized] || DEFAULT_TIME_WINDOW_NODE_THEME;
 }
 
-function getNodePalette(node: any, timeWindow: string): { from: string; to: string; ring: string; statusDot: string } {
+function getNodePalette(node: TopologyNodeEntity, timeWindow: string): { from: string; to: string; ring: string; statusDot: string } {
   const status = getNodeStatus(node);
   if (status === 'error') {
     return {
@@ -464,7 +829,7 @@ function getNodePalette(node: any, timeWindow: string): { from: string; to: stri
   };
 }
 
-function getEdgeColor(edge: any): { stroke: string; marker: string; severity: 'danger' | 'warning' | 'normal'; meaning: string } {
+function getEdgeColor(edge: TopologyEdgeEntity): { stroke: string; marker: string; severity: 'danger' | 'warning' | 'normal'; meaning: string } {
   const summary = resolveEdgeProblemSummary(edge);
   if (summary.riskLevel === '高风险') {
     return { stroke: '#fb7185', marker: 'arrow-danger', severity: 'danger', meaning: '高风险链路' };
@@ -497,16 +862,46 @@ function hashText(value: string): number {
   return Math.abs(hash);
 }
 
-function edgePairKey(edge: any): string {
+function edgePairKey(edge: TopologyEdgeEntity): string {
   return `${safeText(edge?.source)}=>${safeText(edge?.target)}`;
 }
 
-function resolveEdgeUid(edge: any, fallbackIndex = 0): string {
+function resolveEdgeUid(edge: TopologyEdgeEntity, fallbackIndex = 0): string {
   const rawId = safeText(edge?.id);
   if (rawId) {
     return rawId;
   }
   return `${edgePairKey(edge)}#${fallbackIndex}`;
+}
+
+function resolveEdgeSelectionSignature(edge: TopologyEdgeEntity | null | undefined): string {
+  if (!edge) {
+    return '';
+  }
+  const source = safeText(edge?.source);
+  const target = safeText(edge?.target);
+  const edgeKey = safeText(edge?.edge_key || edge?.metrics?.edge_key);
+  const sourceNodeKey = safeText(edge?.source_node_key || edge?.metrics?.source_node_key);
+  const targetNodeKey = safeText(edge?.target_node_key || edge?.metrics?.target_node_key);
+  const sourceService = normalizeOptionalServiceName(
+    edge?.source_service || edge?.metrics?.source_service || resolveEdgeServiceName(edge?.source),
+  ) || '';
+  const targetService = normalizeOptionalServiceName(
+    edge?.target_service || edge?.metrics?.target_service || resolveEdgeServiceName(edge?.target),
+  ) || '';
+  const sourceNamespace = normalizeOptionalNamespaceValue(edge?.source_namespace || edge?.metrics?.source_namespace) || '';
+  const targetNamespace = normalizeOptionalNamespaceValue(edge?.target_namespace || edge?.metrics?.target_namespace) || '';
+  return [
+    source,
+    target,
+    edgeKey.toLowerCase(),
+    sourceNodeKey.toLowerCase(),
+    targetNodeKey.toLowerCase(),
+    sourceService.toLowerCase(),
+    targetService.toLowerCase(),
+    sourceNamespace.toLowerCase(),
+    targetNamespace.toLowerCase(),
+  ].join('|');
 }
 
 function getRiskLevel(errorRate: number, timeoutRate: number, p99: number, qualityScore: number): '高风险' | '中风险' | '低风险' {
@@ -519,7 +914,7 @@ function getRiskLevel(errorRate: number, timeoutRate: number, p99: number, quali
   return '低风险';
 }
 
-function resolveDirectionalContribution(edge: any): {
+function resolveDirectionalContribution(edge: TopologyEdgeEntity | null): {
   hasMetric: boolean;
   value: number;
   confidenceContribution: number;
@@ -527,8 +922,9 @@ function resolveDirectionalContribution(edge: any): {
   inferenceMode: string;
 } {
   const raw = edge?.metrics?.directional_consistency;
+  const rawText = String(raw ?? '').trim();
   const parsed = Number(raw);
-  const hasMetric = raw !== undefined && raw !== null && raw !== '' && Number.isFinite(parsed);
+  const hasMetric = rawText !== '' && Number.isFinite(parsed);
   const value = Math.max(0, Math.min(1, hasMetric ? parsed : 1));
   const inferenceMode = safeText(edge?.metrics?.inference_mode || '');
 
@@ -541,9 +937,12 @@ function resolveDirectionalContribution(edge: any): {
   };
 }
 
-function formatEdgeDescription(edge: any): string {
+function formatEdgeDescription(edge: TopologyEdgeEntity): string {
   const relation = getRelationshipLabel(safeText(edge?.metrics?.reason || ''));
-  const protocol = safeText(edge?.metrics?.protocol || edge?.metrics?.transport || edge?.metrics?.operation || relation.label || 'unknown');
+  const rawProtocol = safeText(edge?.metrics?.protocol || edge?.metrics?.transport || edge?.metrics?.operation || '');
+  const protocol = rawProtocol && !['unknown', 'none', 'null', 'n/a', '-'].includes(rawProtocol.toLowerCase())
+    ? rawProtocol
+    : relation.label || '调用关系';
   const requestRate = toMetric(edge?.metrics?.rps ?? edge?.metrics?.call_count, 0);
   const errorRate = toMetric(edge?.metrics?.error_rate, 0);
   const timeoutRate = toMetric(edge?.metrics?.timeout_rate ?? edge?.timeout_rate, 0);
@@ -552,8 +951,10 @@ function formatEdgeDescription(edge: any): string {
   const quality = toMetric(edge?.metrics?.quality_score ?? edge?.quality_score, 100);
   const evidence = safeText(edge?.metrics?.evidence_type || edge?.evidence_type || 'observed');
   const risk = getRiskLevel(errorRate, timeoutRate, p99, quality);
+  const sourceService = resolveEdgeServiceName(edge?.source || 'unknown');
+  const targetService = resolveEdgeServiceName(edge?.target || 'unknown');
 
-  return `${safeText(edge?.source || 'unknown')} -> ${safeText(edge?.target || 'unknown')} | ${protocol} | ${toNum(
+  return `${sourceService} -> ${targetService} | ${protocol} | ${toNum(
     requestRate,
     1,
   )} rpm | 错误率 ${toPct(errorRate)} | 超时率 ${toPct(timeoutRate)} | P95 ${toNum(p95, 0)}ms / P99 ${toNum(
@@ -568,12 +969,12 @@ function escapeRegExp(value: string): string {
 
 function enumerateDirectionalPaths(
   startId: string,
-  edges: any[],
+  edges: TopologyEdgeEntity[],
   direction: PathDirection,
   maxDepth: number,
   maxPaths: number,
-): Array<{ nodeIds: string[]; edgeChain: any[] }> {
-  const adjacency = new Map<string, any[]>();
+): Array<{ nodeIds: string[]; edgeChain: TopologyEdgeEntity[] }> {
+  const adjacency = new Map<string, TopologyEdgeEntity[]>();
   for (const edge of edges) {
     const from = direction === 'downstream' ? edge.source : edge.target;
     if (!adjacency.has(from)) {
@@ -582,8 +983,8 @@ function enumerateDirectionalPaths(
     adjacency.get(from)?.push(edge);
   }
 
-  const results: Array<{ nodeIds: string[]; edgeChain: any[] }> = [];
-  const stack: Array<{ nodeIds: string[]; edgeChain: any[] }> = [{ nodeIds: [startId], edgeChain: [] }];
+  const results: Array<{ nodeIds: string[]; edgeChain: TopologyEdgeEntity[] }> = [];
+  const stack: Array<{ nodeIds: string[]; edgeChain: TopologyEdgeEntity[] }> = [{ nodeIds: [startId], edgeChain: [] }];
 
   while (stack.length > 0 && results.length < maxPaths) {
     const current = stack.pop();
@@ -624,10 +1025,11 @@ const TopologyPage: React.FC = () => {
   }, [queryParams]);
 
   const [timeWindow, setTimeWindow] = useState('1 HOUR');
-  const [selectedNode, setSelectedNode] = useState<any | null>(null);
-  const [selectedEdge, setSelectedEdge] = useState<any | null>(null);
+  const [selectedNode, setSelectedNode] = useState<TopologyNodeEntity | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<TopologyEdgeEntity | null>(null);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('swimlane');
   const [focusNodeId, setFocusNodeId] = useState('');
+  const [focusServiceFilter, setFocusServiceFilter] = useState('');
   const [focusDepth, setFocusDepth] = useState(2);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>('all');
   const [inferenceMode, setInferenceMode] = useState<InferenceMode>('rule');
@@ -640,6 +1042,8 @@ const TopologyPage: React.FC = () => {
   const [showChangeOverlay, setShowChangeOverlay] = useState(true);
   const [pathViewMode, setPathViewMode] = useState<PathViewMode>('all');
   const [selectedPathId, setSelectedPathId] = useState('');
+  const [changeOverlayEvents, setChangeOverlayEvents] = useState<ChangeOverlayEvent[]>([]);
+  const [suppressWeakEdges, setSuppressWeakEdges] = useState(false);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -653,15 +1057,40 @@ const TopologyPage: React.FC = () => {
   const [panelPositions, setPanelPositions] = useState<Record<PanelKey, PanelPos>>(PANEL_DEFAULTS);
   const [draggingPanel, setDraggingPanel] = useState<DraggingPanel | null>(null);
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
+  const [savedFreeLayoutPositions, setSavedFreeLayoutPositions] = useState<Record<string, FreeLayoutPoint>>({});
   const confidenceThreshold = 0.3;
   const messageTargetPatternsParam = useMemo(
     () => Array.from(new Set(messageTargetPatterns)).sort().join(','),
     [messageTargetPatterns],
   );
+  const freeLayoutStorageKey = useMemo(() => {
+    const scopeNamespace = safeText(queryNamespace || 'all');
+    const scopeWindow = safeText(timeWindow || '1 HOUR').toUpperCase();
+    const scopeInference = safeText(inferenceMode || 'rule').toLowerCase();
+    return `${FREE_LAYOUT_STORAGE_PREFIX}:${scopeNamespace}:${scopeWindow}:${scopeInference}`;
+  }, [inferenceMode, queryNamespace, timeWindow]);
+  const topologyViewStateStorageKey = useMemo(() => {
+    const scopeNamespace = safeText(queryNamespace || 'all');
+    const scopeWindow = safeText(timeWindow || '1 HOUR').toUpperCase();
+    const scopeInference = safeText(inferenceMode || 'rule').toLowerCase();
+    return `${TOPOLOGY_VIEW_STATE_PREFIX}:${scopeNamespace}:${scopeWindow}:${scopeInference}`;
+  }, [inferenceMode, queryNamespace, timeWindow]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const hoverHideTimerRef = useRef<number | null>(null);
+  const changeOverlayRequestSeqRef = useRef(0);
+  const panRef = useRef(pan);
+  const panStartRef = useRef(panStart);
+  const zoomRef = useRef(zoom);
+  const isPanningRef = useRef(isPanning);
+  const draggingNodeRef = useRef<DraggingNode | null>(draggingNode);
+  const interactionRafRef = useRef<number | null>(null);
+  const pendingPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const freeLayoutScopeKeyRef = useRef(freeLayoutStorageKey);
+  const viewStateHydratedRef = useRef(false);
+  const lastSavedFreeLayoutRef = useRef<Record<string, FreeLayoutPoint>>({});
+  const lastSavedViewStateRef = useRef<TopologyViewState | null>(null);
 
   const { data, loading, error, refetch } = useHybridTopology({
     time_window: timeWindow,
@@ -673,8 +1102,9 @@ const TopologyPage: React.FC = () => {
     message_target_min_support: messageTargetMinSupport,
     message_target_max_per_log: messageTargetMaxPerLog,
   });
+  const realtimeTopologyEnabled = !loading && !error;
   const { topology: realtimeTopology, isConnected: realtimeConnected } = useRealtimeTopology({
-    enabled: true,
+    enabled: realtimeTopologyEnabled,
     subscription: {
       time_window: timeWindow,
       namespace: queryNamespace,
@@ -686,22 +1116,6 @@ const TopologyPage: React.FC = () => {
       message_target_max_per_log: messageTargetMaxPerLog,
     },
   });
-  const { data: statsData } = useTopologyStats({ time_window: timeWindow });
-  const { data: recentEventsData } = useEvents({ limit: 80, exclude_health_check: true });
-  const edgePreviewParams = useMemo(() => {
-    if (!selectedEdge?.source || !selectedEdge?.target) {
-      return null;
-    }
-    return {
-      source_service: safeText(selectedEdge.source),
-      target_service: safeText(selectedEdge.target),
-      time_window: timeWindow,
-      limit: 8,
-      exclude_health_check: true,
-    };
-  }, [selectedEdge, timeWindow]);
-  const { data: edgeLogPreviewData, loading: edgeLogPreviewLoading } = useTopologyEdgeLogPreview(edgePreviewParams);
-
   const topologyData = useMemo(() => {
     const realtimeWindow = String(realtimeTopology?.metadata?.time_window || '').trim().toUpperCase();
     const expectedWindow = String(timeWindow || '').trim().toUpperCase();
@@ -749,6 +1163,196 @@ const TopologyPage: React.FC = () => {
     realtimeTopology,
     timeWindow,
   ]);
+  const hasTopologyMetadata = useMemo(() => {
+    const metadata = topologyData?.metadata;
+    if (!metadata || typeof metadata !== 'object') {
+      return false;
+    }
+    return Boolean(metadata.generated_at || metadata.time_window || metadata.issue_summary);
+  }, [topologyData]);
+
+  const effectiveTopologyTimeWindow = useMemo(() => {
+    const metadataWindow = String(topologyData?.metadata?.time_window || '').trim();
+    return metadataWindow || timeWindow;
+  }, [topologyData?.metadata?.time_window, timeWindow]);
+
+  const effectiveTopologyAnchorTime = useMemo(() => {
+    const generatedAt = String(topologyData?.metadata?.generated_at || '').trim();
+    return generatedAt || undefined;
+  }, [topologyData?.metadata?.generated_at]);
+
+  const effectiveTopologyNamespace = useMemo(() => {
+    const metadataNamespace = String(topologyData?.metadata?.namespace || '').trim();
+    return metadataNamespace || queryNamespace;
+  }, [topologyData?.metadata?.namespace, queryNamespace]);
+
+  const topologyRenderSource = useMemo<'realtime' | 'snapshot'>(() => {
+    if (topologyData && realtimeTopology && topologyData === realtimeTopology) {
+      return 'realtime';
+    }
+    return 'snapshot';
+  }, [realtimeTopology, topologyData]);
+
+  const topologyFreshness = useMemo(() => {
+    const rawAnchor = String(effectiveTopologyAnchorTime || '').trim();
+    const parsed = parseTimestamp(rawAnchor);
+    if (!parsed) {
+      return {
+        anchorLabel: rawAnchor || '--',
+        ageLabel: '未知',
+        statusLabel: '时间未知',
+        toneClass: 'border-slate-700 bg-slate-900/70 text-slate-300',
+      };
+    }
+
+    const ageMs = Math.max(0, Date.now() - parsed.getTime());
+    const ageSeconds = Math.floor(ageMs / 1000);
+    const ageMinutes = Math.floor(ageSeconds / 60);
+    const ageLabel = ageSeconds < 60
+      ? `${ageSeconds} 秒前`
+      : ageMinutes < 60
+        ? `${ageMinutes} 分钟前`
+        : `${Math.floor(ageMinutes / 60)} 小时前`;
+
+    let staleThresholdMs = 10 * 60 * 1000;
+    const normalizedWindow = String(effectiveTopologyTimeWindow || '').trim().toUpperCase();
+    if (normalizedWindow === '1 MINUTE') {
+      staleThresholdMs = 2 * 60 * 1000;
+    } else if (['5 MINUTE', '15 MINUTE', '30 MINUTE'].includes(normalizedWindow)) {
+      staleThresholdMs = 5 * 60 * 1000;
+    }
+
+    const isStale = ageMs > staleThresholdMs;
+    const isWarm = !isStale && ageMs > Math.max(60 * 1000, Math.floor(staleThresholdMs / 2));
+    return {
+      anchorLabel: formatTime(rawAnchor),
+      ageLabel,
+      statusLabel: isStale ? '可能滞后' : isWarm ? '接近窗口边界' : '新鲜',
+      toneClass: isStale
+        ? 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+        : isWarm
+          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+          : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100',
+    };
+  }, [effectiveTopologyAnchorTime, effectiveTopologyTimeWindow]);
+
+  const topologyInferenceModeLabel = useMemo(() => {
+    const mode = String(topologyData?.metadata?.inference_mode || topologyData?.metadata?.inference_quality?.inference_mode || inferenceMode || 'rule').trim();
+    return mode || 'rule';
+  }, [inferenceMode, topologyData?.metadata?.inference_mode, topologyData?.metadata?.inference_quality]);
+
+  const goToEffectiveLogs = useCallback((options?: {
+    serviceName?: string;
+    namespace?: string;
+    level?: string;
+    search?: string;
+    traceId?: string;
+    traceIds?: string[];
+    requestId?: string;
+    requestIds?: string[];
+    podName?: string;
+    timestamp?: string;
+    sourceService?: string;
+    targetService?: string;
+    sourceNamespace?: string;
+    targetNamespace?: string;
+    timeWindow?: string;
+    anchorTime?: string;
+    correlationMode?: 'and' | 'or';
+  }) => {
+    const requestedNamespace = String(options?.namespace || '').trim();
+    const normalizedNamespace = ['-', 'unknown', 'none', 'null', 'n/a'].includes(requestedNamespace.toLowerCase())
+      ? ''
+      : ['multiple', 'mixed', '多个命名空间'].includes(requestedNamespace.toLowerCase())
+        ? ''
+        : requestedNamespace;
+    const normalizedServiceName = normalizeOptionalServiceName(options?.serviceName);
+    const normalizedSearch = normalizeOptionalServiceName(options?.search);
+    const normalizedSourceService = normalizeOptionalServiceName(options?.sourceService);
+    const normalizedTargetService = normalizeOptionalServiceName(options?.targetService);
+    const normalizedSourceNamespace = normalizeOptionalNamespaceValue(options?.sourceNamespace);
+    const normalizedTargetNamespace = normalizeOptionalNamespaceValue(options?.targetNamespace);
+
+    navigation.goToLogs({
+      ...options,
+      serviceName: normalizedServiceName,
+      search: normalizedSearch,
+      sourceService: normalizedSourceService,
+      targetService: normalizedTargetService,
+      sourceNamespace: normalizedSourceNamespace,
+      targetNamespace: normalizedTargetNamespace,
+      namespace: normalizedNamespace || effectiveTopologyNamespace,
+      timeWindow: options?.timeWindow || effectiveTopologyTimeWindow,
+      anchorTime: options?.anchorTime || effectiveTopologyAnchorTime,
+    });
+  }, [effectiveTopologyAnchorTime, effectiveTopologyNamespace, effectiveTopologyTimeWindow, navigation]);
+
+  const goToEffectiveAlerts = useCallback((options?: {
+    tab?: 'events' | 'rules';
+    status?: 'pending' | 'firing' | 'acknowledged' | 'silenced' | 'resolved';
+    severity?: 'critical' | 'warning' | 'info';
+    serviceName?: string;
+    namespace?: string;
+    scope?: 'all' | 'edge' | 'service';
+    sourceService?: string;
+    targetService?: string;
+  }) => {
+    const requestedNamespace = String(options?.namespace || '').trim();
+    const normalizedNamespace = ['-', 'unknown', 'none', 'null', 'n/a'].includes(requestedNamespace.toLowerCase())
+      ? ''
+      : ['multiple', 'mixed', '多个命名空间'].includes(requestedNamespace.toLowerCase())
+        ? ''
+        : requestedNamespace;
+
+    navigation.goToAlerts({
+      ...options,
+      namespace: normalizedNamespace || effectiveTopologyNamespace || undefined,
+    });
+  }, [effectiveTopologyNamespace, navigation]);
+
+  const edgePreviewParams = useMemo(() => {
+    const sourceService = normalizeOptionalServiceName(
+      selectedEdge?.source_service || selectedEdge?.metrics?.source_service || resolveEdgeServiceName(selectedEdge?.source),
+    );
+    const targetService = normalizeOptionalServiceName(
+      selectedEdge?.target_service || selectedEdge?.metrics?.target_service || resolveEdgeServiceName(selectedEdge?.target),
+    );
+    if (!sourceService || !targetService) {
+      return null;
+    }
+    return {
+      source_service: sourceService,
+      target_service: targetService,
+      namespace: effectiveTopologyNamespace,
+      source_namespace: normalizeOptionalNamespaceValue(selectedEdge?.source_namespace || selectedEdge?.metrics?.source_namespace),
+      target_namespace: normalizeOptionalNamespaceValue(selectedEdge?.target_namespace || selectedEdge?.metrics?.target_namespace),
+      time_window: effectiveTopologyTimeWindow,
+      anchor_time: effectiveTopologyAnchorTime,
+      limit: 8,
+      exclude_health_check: true,
+    };
+  }, [effectiveTopologyAnchorTime, effectiveTopologyNamespace, effectiveTopologyTimeWindow, selectedEdge]);
+  const { data: edgeLogPreviewData, loading: edgeLogPreviewLoading } = useTopologyEdgeLogPreview(edgePreviewParams);
+  const edgePreviewSummary = useMemo(() => {
+    const context = edgeLogPreviewData?.context || {};
+    const seedCount = Number(context.seed_count || 0);
+    const expandedCount = Number(context.expanded_count || 0);
+    const traceIdCount = Number(context.trace_id_count || 0);
+    const requestIdCount = Number(context.request_id_count || 0);
+    const expansionEnabled = Boolean(context.expansion_enabled);
+    return { seedCount, expandedCount, traceIdCount, requestIdCount, expansionEnabled };
+  }, [edgeLogPreviewData?.context]);
+
+  const edgePreviewCorrelationFilters = useMemo(() => {
+    const context = edgeLogPreviewData?.context || {};
+    const contextTraceIds = Array.isArray(context.trace_ids) ? context.trace_ids : [];
+    const contextRequestIds = Array.isArray(context.request_ids) ? context.request_ids : [];
+    const previewTraceIds = (edgeLogPreviewData?.data || []).flatMap((item) => extractEventTraceIds(item));
+    const previewRequestIds = (edgeLogPreviewData?.data || []).flatMap((item) => extractEventRequestIds(item));
+    const traceIds = Array.from(new Set([...contextTraceIds, ...previewTraceIds].map((item) => String(item || '').trim()).filter(Boolean)));
+    const requestIds = Array.from(new Set([...contextRequestIds, ...previewRequestIds].map((item) => String(item || '').trim()).filter(Boolean)));
+    return { traceIds, requestIds };
+  }, [edgeLogPreviewData]);
 
   const focusedService = queryParams.get('service');
   const highlightedService = queryParams.get('highlight') || focusedService;
@@ -771,24 +1375,104 @@ const TopologyPage: React.FC = () => {
     const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const baseNodes = topologyData?.nodes || [];
     const baseEdges = topologyData?.edges || [];
+    const nodeIdSet = new Set(
+      baseNodes
+        .map((node: TopologyNodeEntity) => safeText(node?.id))
+        .filter(Boolean),
+    );
+    const nodeIdByServiceNamespace = new Map<string, string>();
+    const nodeIdsByService = new Map<string, string[]>();
+    baseNodes.forEach((node: TopologyNodeEntity) => {
+      const nodeId = safeText(node?.id);
+      if (!nodeId) {
+        return;
+      }
+      const serviceName = normalizeOptionalServiceName(resolveServiceName(node));
+      if (!serviceName) {
+        return;
+      }
+      const serviceKey = serviceName.toLowerCase();
+      const namespace = normalizeOptionalNamespaceValue(resolveNamespace(node));
+      if (namespace) {
+        const key = `${serviceKey}|${namespace.toLowerCase()}`;
+        if (!nodeIdByServiceNamespace.has(key)) {
+          nodeIdByServiceNamespace.set(key, nodeId);
+        }
+      }
+      const bucket = nodeIdsByService.get(serviceKey);
+      if (bucket) {
+        if (!bucket.includes(nodeId)) {
+          bucket.push(nodeId);
+        }
+      } else {
+        nodeIdsByService.set(serviceKey, [nodeId]);
+      }
+    });
+    const normalizeEdgeEndpoint = (edge: TopologyEdgeEntity, side: 'source' | 'target'): string => {
+      const direct = safeText(side === 'source' ? edge?.source : edge?.target);
+      if (direct && nodeIdSet.has(direct)) {
+        return direct;
+      }
 
-    if (evidenceMode === 'all' && !focusNodeId && !isolateMode) {
-      const cost = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - start;
-      return {
-        nodes: baseNodes,
-        edges: baseEdges,
-        baseNodeCount: baseNodes.length,
-        baseEdgeCount: baseEdges.length,
-        costMs: Math.round(cost * 100) / 100,
-      };
-    }
+      const nodeKey = safeText(
+        side === 'source'
+          ? edge?.source_node_key || edge?.metrics?.source_node_key
+          : edge?.target_node_key || edge?.metrics?.target_node_key,
+      );
+      if (nodeKey && nodeIdSet.has(nodeKey)) {
+        return nodeKey;
+      }
+
+      const namespace = normalizeOptionalNamespaceValue(
+        side === 'source'
+          ? edge?.source_namespace || edge?.metrics?.source_namespace
+          : edge?.target_namespace || edge?.metrics?.target_namespace,
+      );
+      const service = normalizeOptionalServiceName(
+        side === 'source'
+          ? edge?.source_service || edge?.metrics?.source_service
+          : edge?.target_service || edge?.metrics?.target_service,
+      ) || normalizeOptionalServiceName(resolveEdgeServiceName(direct));
+      if (service) {
+        const serviceKey = service.toLowerCase();
+        if (namespace) {
+          const key = `${serviceKey}|${namespace.toLowerCase()}`;
+          const strictMatch = nodeIdByServiceNamespace.get(key);
+          if (strictMatch && nodeIdSet.has(strictMatch)) {
+            return strictMatch;
+          }
+        }
+        const serviceCandidates = nodeIdsByService.get(serviceKey) || [];
+        if (serviceCandidates.length === 1 && nodeIdSet.has(serviceCandidates[0])) {
+          return serviceCandidates[0];
+        }
+      }
+      return direct;
+    };
+    const normalizedBaseEdges = baseEdges
+      .map((edge: TopologyEdgeEntity) => {
+        const source = normalizeEdgeEndpoint(edge, 'source');
+        const target = normalizeEdgeEndpoint(edge, 'target');
+        return {
+          ...edge,
+          source,
+          target,
+        };
+      })
+      .filter((edge: TopologyEdgeEntity) => nodeIdSet.has(edge.source) && nodeIdSet.has(edge.target));
 
     let nodes = baseNodes;
-    let edges = baseEdges;
+    let edges = normalizedBaseEdges;
 
     const evidenceFiltered = filterByEvidenceMode(nodes, edges, evidenceMode);
     nodes = evidenceFiltered.nodes;
     edges = evidenceFiltered.edges;
+
+    const weakEvidenceFiltered = filterWeakEvidenceEdges(nodes, edges, suppressWeakEdges);
+    const hiddenWeakEdgeCount = Math.max(0, edges.length - weakEvidenceFiltered.edges.length);
+    const hiddenWeakNodeCount = Math.max(0, nodes.length - weakEvidenceFiltered.nodes.length);
+    nodes = weakEvidenceFiltered.nodes;
+    edges = weakEvidenceFiltered.edges;
 
     const activeFocus = focusNodeId;
     if (activeFocus) {
@@ -812,31 +1496,166 @@ const TopologyPage: React.FC = () => {
       edges,
       baseNodeCount: baseNodes.length,
       baseEdgeCount: baseEdges.length,
+      hiddenWeakEdgeCount,
+      hiddenWeakNodeCount,
       costMs: Math.round(cost * 100) / 100,
     };
-  }, [topologyData, evidenceMode, focusNodeId, focusDepth, isolateMode]);
+  }, [topologyData, evidenceMode, focusNodeId, focusDepth, isolateMode, suppressWeakEdges]);
 
-  const visibleNodes = filteredTopology.nodes || [];
-  const visibleEdges = filteredTopology.edges || [];
+  const visibleNodes = useMemo<TopologyNodeEntity[]>(
+    () => (filteredTopology.nodes || []) as TopologyNodeEntity[],
+    [filteredTopology.nodes],
+  );
+  const visibleEdges = useMemo<TopologyEdgeEntity[]>(
+    () => (filteredTopology.edges || []) as TopologyEdgeEntity[],
+    [filteredTopology.edges],
+  );
 
   const nodeLabelById = useMemo(() => {
     const mapping = new Map<string, string>();
-    (topologyData?.nodes || []).forEach((node: any) => {
-      mapping.set(node.id, node.label || node.id);
+    (topologyData?.nodes || []).forEach((node: TopologyNodeEntity) => {
+      mapping.set(node.id, resolveServiceName(node));
     });
-    visibleNodes.forEach((node: any) => {
+    visibleNodes.forEach((node: TopologyNodeEntity) => {
       if (!mapping.has(node.id)) {
-        mapping.set(node.id, node.label || node.id);
+        mapping.set(node.id, resolveServiceName(node));
       }
     });
     return mapping;
   }, [topologyData, visibleNodes]);
 
+  const topologyNodeById = useMemo(() => {
+    const mapping = new Map<string, TopologyNodeEntity>();
+    (topologyData?.nodes || []).forEach((node: TopologyNodeEntity) => {
+      mapping.set(node.id, node);
+      if (node.node_key) {
+        mapping.set(node.node_key, node);
+      }
+    });
+    visibleNodes.forEach((node: TopologyNodeEntity) => {
+      mapping.set(node.id, node);
+      if (node.node_key) {
+        mapping.set(node.node_key, node);
+      }
+    });
+    return mapping;
+  }, [topologyData, visibleNodes]);
+
+  const resolveEdgeEndpointService = useCallback((edge: TopologyEdgeEntity | null | undefined, side: 'source' | 'target'): string => {
+    const explicit = side === 'source'
+      ? edge?.source_service || edge?.metrics?.source_service
+      : edge?.target_service || edge?.metrics?.target_service;
+    const explicitResolved = normalizeOptionalServiceName(explicit);
+    if (explicitResolved) {
+      return explicitResolved;
+    }
+    const nodeKey = side === 'source' ? safeText(edge?.source) : safeText(edge?.target);
+    const node = topologyNodeById.get(nodeKey);
+    if (node) {
+      return resolveServiceName(node);
+    }
+    return resolveEdgeServiceName(nodeKey || explicit || 'unknown');
+  }, [topologyNodeById]);
+
+  const resolveEdgeEndpointNamespace = useCallback((edge: TopologyEdgeEntity | null | undefined, side: 'source' | 'target'): string | undefined => {
+    const explicit = side === 'source'
+      ? edge?.source_namespace || edge?.metrics?.source_namespace
+      : edge?.target_namespace || edge?.metrics?.target_namespace;
+    const normalizedExplicit = safeText(explicit);
+    if (normalizedExplicit && !['unknown', 'none', 'null', 'n/a', '-'].includes(normalizedExplicit.toLowerCase())) {
+      return normalizedExplicit;
+    }
+    const nodeKey = side === 'source' ? safeText(edge?.source) : safeText(edge?.target);
+    const node = topologyNodeById.get(nodeKey);
+    if (!node) {
+      return undefined;
+    }
+    return resolveNamespaceFilter(node) || undefined;
+  }, [topologyNodeById]);
+
+  const focusServiceOptions = useMemo(() => {
+    const buckets = new Map<string, FocusServiceOption>();
+    (topologyData?.nodes || []).forEach((node: TopologyNodeEntity) => {
+      const serviceName = resolveServiceName(node);
+      const nodeId = safeText(node?.id);
+      if (!serviceName || serviceName === 'unknown' || !nodeId) {
+        return;
+      }
+
+      const qualityScore = toMetric(node?.quality_score ?? node?.metrics?.quality_score, 0);
+      const coverageScore = toMetric(node?.coverage ?? node?.metrics?.coverage, 0);
+      const trafficScore = Math.min(toMetric(node?.metrics?.log_count, 0), 100_000);
+      const score = qualityScore * 10_000 + coverageScore * 1_000 + trafficScore;
+
+      const existing = buckets.get(serviceName);
+      if (!existing) {
+        buckets.set(serviceName, {
+          serviceName,
+          nodeId,
+          nodeCount: 1,
+          score,
+        });
+        return;
+      }
+
+      existing.nodeCount += 1;
+      if (score > existing.score) {
+        existing.nodeId = nodeId;
+        existing.score = score;
+      }
+    });
+
+    return Array.from(buckets.values()).sort((a, b) =>
+      a.serviceName.localeCompare(b.serviceName, 'zh-CN', { sensitivity: 'base' }),
+    );
+  }, [topologyData]);
+
+  const focusNodeIdByServiceName = useMemo(() => {
+    const mapping = new Map<string, string>();
+    focusServiceOptions.forEach((option) => {
+      mapping.set(option.serviceName, option.nodeId);
+    });
+    return mapping;
+  }, [focusServiceOptions]);
+
+  const focusServiceValue = useMemo(() => {
+    if (!focusNodeId) {
+      return '';
+    }
+    const node =
+      (topologyData?.nodes || []).find((item: TopologyNodeEntity) => item.id === focusNodeId)
+      || visibleNodes.find((item: TopologyNodeEntity) => item.id === focusNodeId);
+    if (!node) {
+      return '';
+    }
+    return resolveServiceName(node);
+  }, [focusNodeId, topologyData, visibleNodes]);
+
+  const filteredFocusServiceOptions = useMemo(() => {
+    const keyword = safeText(focusServiceFilter).toLowerCase();
+    if (!keyword) {
+      return focusServiceOptions;
+    }
+    const filtered = focusServiceOptions.filter((option) =>
+      option.serviceName.toLowerCase().includes(keyword),
+    );
+    if (!focusServiceValue || filtered.some((option) => option.serviceName === focusServiceValue)) {
+      return filtered;
+    }
+    const activeOption = focusServiceOptions.find((option) => option.serviceName === focusServiceValue);
+    return activeOption ? [activeOption, ...filtered] : filtered;
+  }, [focusServiceFilter, focusServiceOptions, focusServiceValue]);
+
   useEffect(() => {
     if (!focusedService || !topologyData?.nodes?.length) {
       return;
     }
-    const targetNode = topologyData.nodes.find((node: any) => node.id === focusedService || node.label === focusedService);
+    const targetNode = topologyData.nodes.find(
+      (node: TopologyNodeEntity) =>
+        node.id === focusedService
+        || node.label === focusedService
+        || resolveServiceName(node) === focusedService,
+    );
     if (targetNode) {
       setSelectedNode(targetNode);
       setSelectedEdge(null);
@@ -848,7 +1667,7 @@ const TopologyPage: React.FC = () => {
     if (!selectedNode) {
       return;
     }
-    const latestNode = visibleNodes.find((node: any) => node.id === selectedNode.id);
+    const latestNode = visibleNodes.find((node: TopologyNodeEntity) => node.id === selectedNode.id);
     if (!latestNode) {
       setSelectedNode(null);
       return;
@@ -862,7 +1681,22 @@ const TopologyPage: React.FC = () => {
     if (!selectedEdge) {
       return;
     }
-    const latestEdge = visibleEdges.find((edge: any) => edge.id === selectedEdge.id);
+    const selectedRawId = safeText(selectedEdge?.id);
+    let latestEdge: TopologyEdgeEntity | undefined;
+    if (selectedRawId) {
+      latestEdge = visibleEdges.find((edge: TopologyEdgeEntity) => safeText(edge?.id) === selectedRawId);
+      if (!latestEdge) {
+        const selectedSignature = resolveEdgeSelectionSignature(selectedEdge);
+        latestEdge = visibleEdges.find(
+          (edge: TopologyEdgeEntity) => resolveEdgeSelectionSignature(edge) === selectedSignature,
+        );
+      }
+    } else {
+      const selectedSignature = resolveEdgeSelectionSignature(selectedEdge);
+      latestEdge = visibleEdges.find(
+        (edge: TopologyEdgeEntity) => resolveEdgeSelectionSignature(edge) === selectedSignature,
+      );
+    }
     if (!latestEdge) {
       setSelectedEdge(null);
       return;
@@ -881,6 +1715,57 @@ const TopologyPage: React.FC = () => {
       if (hoverHideTimerRef.current) {
         window.clearTimeout(hoverHideTimerRef.current);
       }
+      if (interactionRafRef.current !== null) {
+        window.cancelAnimationFrame(interactionRafRef.current);
+        interactionRafRef.current = null;
+      }
+      pendingPointerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  useEffect(() => {
+    panStartRef.current = panStart;
+  }, [panStart]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    isPanningRef.current = isPanning;
+  }, [isPanning]);
+
+  useEffect(() => {
+    draggingNodeRef.current = draggingNode;
+  }, [draggingNode]);
+
+  useEffect(() => {
+    const saved = readFreeLayoutSnapshot(freeLayoutStorageKey);
+    lastSavedFreeLayoutRef.current = saved;
+    setSavedFreeLayoutPositions(saved);
+  }, [freeLayoutStorageKey]);
+
+  useEffect(() => {
+    if (layoutMode !== 'free') {
+      freeLayoutScopeKeyRef.current = freeLayoutStorageKey;
+      return;
+    }
+    if (freeLayoutScopeKeyRef.current === freeLayoutStorageKey) {
+      return;
+    }
+    freeLayoutScopeKeyRef.current = freeLayoutStorageKey;
+    setNodePositions({});
+  }, [freeLayoutStorageKey, layoutMode]);
+
+  useEffect(() => {
+    return () => {
+      if (interactionRafRef.current !== null) {
+        window.cancelAnimationFrame(interactionRafRef.current);
+      }
     };
   }, []);
 
@@ -893,10 +1778,20 @@ const TopologyPage: React.FC = () => {
     if (layoutMode === 'free') {
       setNodePositions((prev) => {
         const next: Record<string, NodePosition> = {};
-        visibleNodes.forEach((node: any, index: number) => {
+        visibleNodes.forEach((node: TopologyNodeEntity, index: number) => {
           const existing = prev[node.id];
-          if (existing) {
+          if (existing && existing.laneKey === 'free') {
             next[node.id] = existing;
+            return;
+          }
+          const persisted = savedFreeLayoutPositions[node.id];
+          if (persisted) {
+            next[node.id] = {
+              x: persisted.x,
+              y: persisted.y,
+              laneKey: 'free',
+              laneLabel: '自由编排',
+            };
             return;
           }
           const col = index % LAYOUT.gridCols;
@@ -915,7 +1810,7 @@ const TopologyPage: React.FC = () => {
 
     if (layoutMode === 'grid') {
       const next: Record<string, NodePosition> = {};
-      visibleNodes.forEach((node: any, index: number) => {
+      visibleNodes.forEach((node: TopologyNodeEntity, index: number) => {
         const col = index % LAYOUT.gridCols;
         const row = Math.floor(index / LAYOUT.gridCols);
         next[node.id] = {
@@ -929,8 +1824,8 @@ const TopologyPage: React.FC = () => {
       return;
     }
 
-    const groups = new Map<string, { label: string; nodes: any[] }>();
-    visibleNodes.forEach((node: any) => {
+    const groups = new Map<string, { label: string; nodes: TopologyNodeEntity[] }>();
+    visibleNodes.forEach((node: TopologyNodeEntity) => {
       const lane = resolveLane(node);
       if (!groups.has(lane.key)) {
         groups.set(lane.key, { label: lane.label, nodes: [] });
@@ -959,8 +1854,8 @@ const TopologyPage: React.FC = () => {
         laneRows * LAYOUT.laneRowGapY + LAYOUT.laneRowPaddingTop + LAYOUT.laneRowPaddingBottom + LAYOUT.laneBlockGapY;
     });
 
-    const missing = visibleNodes.filter((node: any) => !next[node.id]);
-    missing.forEach((node: any, index: number) => {
+    const missing = visibleNodes.filter((node: TopologyNodeEntity) => !next[node.id]);
+    missing.forEach((node: TopologyNodeEntity, index: number) => {
       next[node.id] = {
         x: 120 + index * 180,
         y: 120,
@@ -970,7 +1865,39 @@ const TopologyPage: React.FC = () => {
     });
 
     setNodePositions(next);
-  }, [layoutMode, visibleNodes]);
+  }, [layoutMode, savedFreeLayoutPositions, visibleNodes]);
+
+  useEffect(() => {
+    if (layoutMode !== 'free' || visibleNodes.length === 0 || !!draggingNode || isPanning) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const visibleNodeIdSet = new Set(visibleNodes.map((node: TopologyNodeEntity) => node.id));
+      const persistedPositions: Record<string, FreeLayoutPoint> = {};
+      Object.entries(nodePositions).forEach(([nodeId, pos]) => {
+        if (!visibleNodeIdSet.has(nodeId)) {
+          return;
+        }
+        const parsed = parseFreeLayoutPoint(pos);
+        if (!parsed) {
+          return;
+        }
+        persistedPositions[nodeId] = {
+          x: Math.round(parsed.x * 100) / 100,
+          y: Math.round(parsed.y * 100) / 100,
+        };
+      });
+      if (!Object.keys(persistedPositions).length) {
+        return;
+      }
+      if (sameFreeLayoutPositions(lastSavedFreeLayoutRef.current, persistedPositions)) {
+        return;
+      }
+      writeFreeLayoutSnapshot(freeLayoutStorageKey, persistedPositions);
+      lastSavedFreeLayoutRef.current = persistedPositions;
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [draggingNode, freeLayoutStorageKey, isPanning, layoutMode, nodePositions, visibleNodes]);
 
   const laneBands = useMemo(() => {
     if (layoutMode !== 'swimlane') {
@@ -978,7 +1905,7 @@ const TopologyPage: React.FC = () => {
     }
 
     const grouped = new Map<string, { label: string; positions: NodePosition[] }>();
-    visibleNodes.forEach((node: any) => {
+    visibleNodes.forEach((node: TopologyNodeEntity) => {
       const pos = nodePositions[node.id];
       if (!pos) {
         return;
@@ -1016,18 +1943,18 @@ const TopologyPage: React.FC = () => {
     return resolveIssueSummary(visibleNodes, visibleEdges, topologyData?.metadata || null);
   }, [topologyData?.metadata, visibleEdges, visibleNodes]);
 
-  const topProblemEdges = useMemo(() => {
+  const topProblemEdges = useMemo<TopProblemEdge[]>(() => {
     const edges = visibleEdges || [];
     let sorted = sortEdgesByIssueScore(edges);
     if (edgeSortMode === 'error_rate') {
-      sorted = [...edges].sort((a: any, b: any) => Number(b?.metrics?.error_rate ?? 0) - Number(a?.metrics?.error_rate ?? 0));
+      sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.error_rate ?? 0) - Number(a?.metrics?.error_rate ?? 0));
     } else if (edgeSortMode === 'timeout_rate') {
-      sorted = [...edges].sort((a: any, b: any) => Number(b?.metrics?.timeout_rate ?? b?.timeout_rate ?? 0) - Number(a?.metrics?.timeout_rate ?? a?.timeout_rate ?? 0));
+      sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.timeout_rate ?? b?.timeout_rate ?? 0) - Number(a?.metrics?.timeout_rate ?? a?.timeout_rate ?? 0));
     } else if (edgeSortMode === 'p99') {
-      sorted = [...edges].sort((a: any, b: any) => Number(b?.metrics?.p99 ?? b?.p99 ?? 0) - Number(a?.metrics?.p99 ?? a?.p99 ?? 0));
+      sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.p99 ?? b?.p99 ?? 0) - Number(a?.metrics?.p99 ?? a?.p99 ?? 0));
     }
-    return sorted.slice(0, 10).map((edge: any) => ({
-      ...edge,
+    return sorted.slice(0, 10).map((edge): TopProblemEdge => ({
+      ...(edge as TopologyEdgeEntity),
       issueScore: resolveEdgeIssueScore(edge),
     }));
   }, [edgeSortMode, visibleEdges]);
@@ -1064,7 +1991,7 @@ const TopologyPage: React.FC = () => {
         id: `upstream-${idx}-${item.nodeIds.join('>')}`,
         direction: 'upstream' as const,
         nodeIds: item.nodeIds,
-        edgeIds: item.edgeChain.map((edge) => edge.id),
+        edgeIds: item.edgeChain.map((edge, edgeIndex) => resolveEdgeUid(edge, edgeIndex)),
         pathText,
         hopCount: item.edgeChain.length,
         requestRate,
@@ -1100,7 +2027,7 @@ const TopologyPage: React.FC = () => {
         id: `downstream-${idx}-${item.nodeIds.join('>')}`,
         direction: 'downstream' as const,
         nodeIds: item.nodeIds,
-        edgeIds: item.edgeChain.map((edge) => edge.id),
+        edgeIds: item.edgeChain.map((edge, edgeIndex) => resolveEdgeUid(edge, edgeIndex)),
         pathText,
         hopCount: item.edgeChain.length,
         requestRate,
@@ -1132,7 +2059,7 @@ const TopologyPage: React.FC = () => {
       return { upstream: 0, downstream: 0 };
     }
     return visibleEdges.reduce(
-      (acc: { upstream: number; downstream: number }, edge: any) => {
+      (acc: { upstream: number; downstream: number }, edge: TopologyEntity) => {
         if (edge?.target === selectedNode.id) {
           acc.upstream += 1;
         }
@@ -1146,10 +2073,10 @@ const TopologyPage: React.FC = () => {
   }, [selectedNode?.id, visibleEdges]);
   const serviceNameById = useMemo(() => {
     const mapping = new Map<string, string>();
-    (topologyData?.nodes || []).forEach((node: any) => {
+    (topologyData?.nodes || []).forEach((node: TopologyNodeEntity) => {
       mapping.set(node.id, resolveServiceName(node));
     });
-    visibleNodes.forEach((node: any) => {
+    visibleNodes.forEach((node: TopologyNodeEntity) => {
       if (!mapping.has(node.id)) {
         mapping.set(node.id, resolveServiceName(node));
       }
@@ -1171,22 +2098,52 @@ const TopologyPage: React.FC = () => {
     return serviceNameById.get(terminalId) || nodeLabelById.get(terminalId) || terminalId || '';
   }, [nodeLabelById, selectedPath, serviceNameById]);
 
-  const changeOverlayEvents = useMemo(() => {
-    const items = recentEventsData?.events || [];
+  useEffect(() => {
+    if (!showChangeOverlay || loading) {
+      return;
+    }
+
+    const requestSeq = ++changeOverlayRequestSeqRef.current;
+    let active = true;
     const keywords = ['deployment', 'deploy', 'rollout', 'release', 'version', 'helm', '镜像', '发布', '变更'];
-    return items
-      .filter((event: any) => {
-        const text = String(event?.message || '').toLowerCase();
-        return keywords.some((keyword) => text.includes(keyword));
-      })
-      .slice(0, 8)
-      .map((event: any) => ({
-        id: event.id,
-        service_name: event.service_name || 'unknown',
-        timestamp: event.timestamp,
-        message: String(event.message || ''),
-      }));
-  }, [recentEventsData]);
+
+    const fetchChangeEvents = async () => {
+      try {
+        const response = await api.getEvents({
+          limit: 80,
+          exclude_health_check: true,
+          time_window: timeWindow,
+        });
+        if (!active || requestSeq !== changeOverlayRequestSeqRef.current) {
+          return;
+        }
+        const items = Array.isArray(response?.events) ? response.events : [];
+        const nextEvents = items
+          .filter((event: Event) => {
+            const text = String(event?.message || '').toLowerCase();
+            return keywords.some((keyword) => text.includes(keyword));
+          })
+          .slice(0, 8)
+          .map((event: Event) => ({
+            id: safeText(event?.id) || `${safeText(event?.service_name)}-${safeText(event?.timestamp)}`,
+            service_name: resolveCanonicalServiceName(event?.service_name, event?.pod_name),
+            timestamp: safeText(event?.timestamp),
+            message: String(event?.message || ''),
+          }));
+        setChangeOverlayEvents(nextEvents);
+      } catch {
+        if (!active || requestSeq !== changeOverlayRequestSeqRef.current) {
+          return;
+        }
+        setChangeOverlayEvents([]);
+      }
+    };
+
+    fetchChangeEvents();
+    return () => {
+      active = false;
+    };
+  }, [loading, showChangeOverlay, timeWindow]);
 
   const getNodePosition = useCallback((nodeId: string): NodePosition => {
     return nodePositions[nodeId] || { x: 120, y: 120 };
@@ -1235,57 +2192,311 @@ const TopologyPage: React.FC = () => {
     URL.revokeObjectURL(url);
   }, [topologyData]);
 
+  const applyViewState = useCallback((nextZoom: number, nextPan: { x: number; y: number }) => {
+    const currentZoom = zoomRef.current;
+    const currentPan = panRef.current;
+    if (
+      Math.abs(currentZoom - nextZoom) < 0.0001
+      && Math.abs(currentPan.x - nextPan.x) < 0.0001
+      && Math.abs(currentPan.y - nextPan.y) < 0.0001
+    ) {
+      return;
+    }
+    zoomRef.current = nextZoom;
+    panRef.current = nextPan;
+    setZoom(nextZoom);
+    setPan(nextPan);
+  }, []);
+
+  const applyPointerInteractions = useCallback((clientX: number, clientY: number) => {
+    if (isPanningRef.current) {
+      const start = panStartRef.current;
+      const nextX = clientX - start.x;
+      const nextY = clientY - start.y;
+      setPan((prev) => {
+        if (prev.x === nextX && prev.y === nextY) {
+          return prev;
+        }
+        return { x: nextX, y: nextY };
+      });
+    }
+
+    const currentDragging = draggingNodeRef.current;
+    if (currentDragging) {
+      const currentZoom = Math.max(zoomRef.current, 0.01);
+      const deltaX = (clientX - currentDragging.startClientX) / currentZoom;
+      const deltaY = (clientY - currentDragging.startClientY) / currentZoom;
+      const nextNodeX = currentDragging.startNodeX + deltaX;
+      const nextNodeY = currentDragging.startNodeY + deltaY;
+      setNodePositions((prev) => {
+        const currentNode = prev[currentDragging.id] || { x: 0, y: 0 };
+        if (currentNode.x === nextNodeX && currentNode.y === nextNodeY) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [currentDragging.id]: {
+            ...currentNode,
+            x: nextNodeX,
+            y: nextNodeY,
+          },
+        };
+      });
+    }
+  }, []);
+
+  const flushScheduledPointerUpdate = useCallback(() => {
+    interactionRafRef.current = null;
+    const pending = pendingPointerRef.current;
+    if (!pending) {
+      return;
+    }
+    pendingPointerRef.current = null;
+    applyPointerInteractions(pending.clientX, pending.clientY);
+  }, [applyPointerInteractions]);
+
+  const schedulePointerUpdate = useCallback((clientX: number, clientY: number) => {
+    pendingPointerRef.current = { clientX, clientY };
+    if (interactionRafRef.current !== null) {
+      return;
+    }
+    interactionRafRef.current = window.requestAnimationFrame(flushScheduledPointerUpdate);
+  }, [flushScheduledPointerUpdate]);
+
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) {
+      return;
+    }
     if ((e.target as HTMLElement).closest('[data-floating-panel]')) {
       return;
     }
     setHoverCard(null);
+    isPanningRef.current = true;
     setIsPanning(true);
-    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    const nextPanStart = { x: e.clientX - panRef.current.x, y: e.clientY - panRef.current.y };
+    panStartRef.current = nextPanStart;
+    setPanStart(nextPanStart);
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (isPanning) {
-      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+    if (!isPanningRef.current && !draggingNodeRef.current) {
+      return;
     }
-
-    if (draggingNode) {
-      const deltaX = (e.clientX - draggingNode.startClientX) / zoom;
-      const deltaY = (e.clientY - draggingNode.startClientY) / zoom;
-      setNodePositions((prev) => ({
-        ...prev,
-        [draggingNode.id]: {
-          ...(prev[draggingNode.id] || { x: 0, y: 0 }),
-          x: draggingNode.startNodeX + deltaX,
-          y: draggingNode.startNodeY + deltaY,
-        },
-      }));
-    }
+    schedulePointerUpdate(e.clientX, e.clientY);
   };
 
-  const stopCanvasInteractions = () => {
+  const stopCanvasInteractions = useCallback(() => {
+    if (interactionRafRef.current !== null) {
+      window.cancelAnimationFrame(interactionRafRef.current);
+      interactionRafRef.current = null;
+    }
+    const pending = pendingPointerRef.current;
+    if (pending) {
+      pendingPointerRef.current = null;
+      applyPointerInteractions(pending.clientX, pending.clientY);
+    }
+    isPanningRef.current = false;
+    draggingNodeRef.current = null;
     setIsPanning(false);
     setDraggingNode(null);
-  };
+  }, [applyPointerInteractions]);
 
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -0.12 : 0.12;
-    setZoom((prev) => Math.max(0.35, Math.min(2.8, prev + delta)));
-  };
+  useEffect(() => {
+    if (!isPanning && !draggingNode) {
+      return;
+    }
+    const handleWindowMouseUp = () => {
+      stopCanvasInteractions();
+    };
+    const handleWindowBlur = () => {
+      stopCanvasInteractions();
+    };
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [draggingNode, isPanning, stopCanvasInteractions]);
 
-  const handleNodeMouseDown = (e: React.MouseEvent, node: any) => {
+  const applyZoomBy = useCallback((delta: number, clientX?: number, clientY?: number) => {
+    const currentZoom = zoomRef.current;
+    const nextZoom = clampZoom(currentZoom + delta);
+    if (Math.abs(nextZoom - currentZoom) < 0.0001) {
+      return;
+    }
+
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    const currentPan = panRef.current;
+    let nextPan = currentPan;
+
+    if (canvasRect) {
+      const anchorX = clientX === undefined ? canvasRect.width / 2 : clientX - canvasRect.left;
+      const anchorY = clientY === undefined ? canvasRect.height / 2 : clientY - canvasRect.top;
+      const safeZoom = Math.max(currentZoom, 0.0001);
+      const graphX = (anchorX - currentPan.x) / safeZoom;
+      const graphY = (anchorY - currentPan.y) / safeZoom;
+      nextPan = {
+        x: anchorX - graphX * nextZoom,
+        y: anchorY - graphY * nextZoom,
+      };
+    }
+
+    applyViewState(nextZoom, nextPan);
+  }, [applyViewState]);
+
+  const handleFitView = useCallback((mode: 'all' | 'focus' = 'all') => {
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    if (!canvasRect) {
+      return;
+    }
+    const viewportWidth = canvasRect.width;
+    const viewportHeight = canvasRect.height;
+    if (viewportWidth < 40 || viewportHeight < 40) {
+      return;
+    }
+
+    const focusCenterId = selectedNode?.id || focusNodeId;
+    const focusNodeIdSet = new Set<string>();
+    if (mode === 'focus' && focusCenterId) {
+      focusNodeIdSet.add(focusCenterId);
+      visibleEdges.forEach((edge: TopologyEdgeEntity) => {
+        if (edge.source === focusCenterId || edge.target === focusCenterId) {
+          focusNodeIdSet.add(edge.source);
+          focusNodeIdSet.add(edge.target);
+        }
+      });
+    }
+    const targetNodes = mode === 'focus' && focusNodeIdSet.size > 0
+      ? visibleNodes.filter((node: TopologyNodeEntity) => focusNodeIdSet.has(node.id))
+      : visibleNodes;
+    if (mode === 'focus' && targetNodes.length === 0) {
+      return;
+    }
+
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+
+    targetNodes.forEach((node: TopologyNodeEntity) => {
+      const pos = nodePositions[node.id];
+      if (!pos) {
+        return;
+      }
+      minX = Math.min(minX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxX = Math.max(maxX, pos.x + LAYOUT.nodeWidth);
+      maxY = Math.max(maxY, pos.y + LAYOUT.nodeHeight);
+    });
+
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+      minX = 0;
+      minY = 0;
+      maxX = canvasSize.width;
+      maxY = canvasSize.height;
+    }
+
+    const contentWidth = Math.max(1, maxX - minX);
+    const contentHeight = Math.max(1, maxY - minY);
+    const padding = 72;
+    const fitZoom = clampZoom(
+      Math.min(
+        (viewportWidth - padding * 2) / contentWidth,
+        (viewportHeight - padding * 2) / contentHeight,
+      ),
+    );
+
+    const centerX = minX + contentWidth / 2;
+    const centerY = minY + contentHeight / 2;
+    const nextPan = {
+      x: viewportWidth / 2 - centerX * fitZoom,
+      y: viewportHeight / 2 - centerY * fitZoom,
+    };
+    applyViewState(fitZoom, nextPan);
+  }, [applyViewState, canvasSize.height, canvasSize.width, focusNodeId, nodePositions, selectedNode?.id, visibleEdges, visibleNodes]);
+
+  const resetFreeLayout = useCallback(() => {
+    clearFreeLayoutSnapshot(freeLayoutStorageKey);
+    freeLayoutScopeKeyRef.current = freeLayoutStorageKey;
+    lastSavedFreeLayoutRef.current = {};
+    setSavedFreeLayoutPositions({});
+    setNodePositions({});
+    setLayoutMode('free');
+  }, [freeLayoutStorageKey]);
+
+  const applyWheelZoomByDelta = useCallback((deltaY: number, deltaMode: number, clientX: number, clientY: number) => {
+    const deltaModeRatio = deltaMode === 1 ? 18 : deltaMode === 2 ? 120 : 1;
+    const normalizedDelta = deltaY * deltaModeRatio;
+    const wheelStep = Math.max(-0.32, Math.min(0.32, -normalizedDelta * 0.0012));
+    if (wheelStep === 0) {
+      return;
+    }
+    applyZoomBy(wheelStep, clientX, clientY);
+  }, [applyZoomBy]);
+
+  const handleCanvasWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('[data-floating-panel], [data-no-canvas-wheel]')) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    applyWheelZoomByDelta(event.deltaY, event.deltaMode, event.clientX, event.clientY);
+  }, [applyWheelZoomByDelta]);
+
+  useEffect(() => {
+    viewStateHydratedRef.current = false;
+    const saved = readTopologyViewState(topologyViewStateStorageKey);
+    const nextState = saved || { zoom: 1, pan: { x: 0, y: 0 } };
+    lastSavedViewStateRef.current = nextState;
+    applyViewState(nextState.zoom, nextState.pan);
+    viewStateHydratedRef.current = true;
+  }, [applyViewState, topologyViewStateStorageKey]);
+
+  useEffect(() => {
+    if (!viewStateHydratedRef.current) {
+      return;
+    }
+    if (isPanning) {
+      return;
+    }
+    const nextState: TopologyViewState = {
+      zoom: clampZoom(zoom),
+      pan: {
+        x: Math.round(pan.x * 100) / 100,
+        y: Math.round(pan.y * 100) / 100,
+      },
+    };
+    if (sameTopologyViewState(lastSavedViewStateRef.current, nextState)) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      writeTopologyViewState(topologyViewStateStorageKey, nextState);
+      lastSavedViewStateRef.current = nextState;
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [isPanning, pan.x, pan.y, topologyViewStateStorageKey, zoom]);
+
+  const handleNodeMouseDown = (e: React.MouseEvent, node: TopologyNodeEntity) => {
+    if (e.button !== 0) {
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
+    // 保持当前布局模式锁定：仅自由布局允许拖拽节点
+    if (layoutMode !== 'free') {
+      return;
+    }
     const pos = getNodePosition(node.id);
-    setLayoutMode('free');
-    setDraggingNode({
+    const nextDraggingNode: DraggingNode = {
       id: node.id,
       startClientX: e.clientX,
       startClientY: e.clientY,
       startNodeX: pos.x,
       startNodeY: pos.y,
-    });
+    };
+    draggingNodeRef.current = nextDraggingNode;
+    setDraggingNode(nextDraggingNode);
   };
 
   const startPanelDrag = (panel: PanelKey, e: React.MouseEvent) => {
@@ -1379,7 +2590,7 @@ const TopologyPage: React.FC = () => {
   }, []);
 
   const showNodeHoverCard = useCallback(
-    (event: React.MouseEvent, node: any) => {
+    (event: React.MouseEvent, node: TopologyNodeEntity) => {
       clearHoverHideTimer();
       const cursor = resolveRelativeCursor(event.clientX, event.clientY);
       setHoverCard({
@@ -1393,7 +2604,7 @@ const TopologyPage: React.FC = () => {
   );
 
   const showEdgeHoverCard = useCallback(
-    (event: React.MouseEvent, edge: any) => {
+    (event: React.MouseEvent, edge: TopologyEdgeEntity) => {
       clearHoverHideTimer();
       const cursor = resolveRelativeCursor(event.clientX, event.clientY);
       setHoverCard({
@@ -1429,14 +2640,14 @@ const TopologyPage: React.FC = () => {
     return { left, top, width: cardWidth };
   }, [hoverCard]);
 
-  const handleNodeClick = (node: any) => {
+  const handleNodeClick = (node: TopologyNodeEntity) => {
     setHoverCard(null);
     setSelectedEdge(null);
     setSelectedNode(node);
     setSelectedPathId('');
   };
 
-  const handleEdgeClick = (edge: any) => {
+  const handleEdgeClick = (edge: TopologyEdgeEntity) => {
     setHoverCard(null);
     setSelectedNode(null);
     setSelectedEdge(edge);
@@ -1459,10 +2670,27 @@ const TopologyPage: React.FC = () => {
   const nodeCount = visibleNodes.length;
   const edgeCount = visibleEdges.length;
   const laneCount = laneBands.length;
-  const selectedEdgeId = safeText(selectedEdge?.id);
+  const selectedEdgeUid = useMemo(() => {
+    if (!selectedEdge) {
+      return '';
+    }
+    const selectedRawId = safeText(selectedEdge?.id);
+    if (selectedRawId) {
+      return selectedRawId;
+    }
+    const selectedSignature = resolveEdgeSelectionSignature(selectedEdge);
+    const matchedIndex = visibleEdges.findIndex(
+      (edge: TopologyEdgeEntity) => resolveEdgeSelectionSignature(edge) === selectedSignature,
+    );
+    if (matchedIndex < 0) {
+      return '';
+    }
+    return resolveEdgeUid(visibleEdges[matchedIndex], matchedIndex);
+  }, [selectedEdge, visibleEdges]);
   const activeFocusNodeId = selectedNode?.id || focusNodeId || '';
+  const isDraggingNode = !!draggingNode;
   const denseTopologyMode = edgeCount >= DENSE_TOPOLOGY_EDGE_THRESHOLD || nodeCount >= 120;
-  const showCompactEdgeLabel = (!denseTopologyMode && visibleEdges.length <= 16) || !!selectedEdgeId || !!selectedPathId;
+  const showCompactEdgeLabel = (!denseTopologyMode && visibleEdges.length <= 16) || !!selectedEdgeUid || !!selectedPathId;
 
   const edgeRenderData = useMemo(() => {
     if (!visibleEdges.length) {
@@ -1471,11 +2699,13 @@ const TopologyPage: React.FC = () => {
 
     const denseMode = visibleEdges.length >= DENSE_TOPOLOGY_EDGE_THRESHOLD || visibleNodes.length >= 120;
     const heavyMode = visibleEdges.length >= HEAVY_TOPOLOGY_EDGE_THRESHOLD;
+    const ultraDenseMode = heavyMode || visibleNodes.length >= 180;
+    const dragDegradeMode = isDraggingNode && (denseMode || heavyMode);
     const edgeUidByRef = new WeakMap<object, string>();
-    const edgeByUid = new Map<string, any>();
-    const groups = new Map<string, any[]>();
+    const edgeByUid = new Map<string, TopologyEdgeEntity>();
+    const groups = new Map<string, TopologyEdgeEntity[]>();
 
-    visibleEdges.forEach((edge: any, index: number) => {
+    visibleEdges.forEach((edge: TopologyEdgeEntity, index: number) => {
       const uid = resolveEdgeUid(edge, index);
       edgeUidByRef.set(edge as object, uid);
       edgeByUid.set(uid, edge);
@@ -1491,12 +2721,12 @@ const TopologyPage: React.FC = () => {
     });
 
     const expandedPairKeys = new Set<string>();
-    const globalExpandBundles = !denseMode && zoom >= 1.15;
+    const globalExpandBundles = !denseMode && !dragDegradeMode && zoom >= 1.15;
     if (globalExpandBundles) {
       groups.forEach((_, key) => expandedPairKeys.add(key));
     }
-    if (selectedEdgeId) {
-      const found = edgeByUid.get(selectedEdgeId);
+    if (selectedEdgeUid) {
+      const found = edgeByUid.get(selectedEdgeUid);
       if (found) {
         expandedPairKeys.add(edgePairKey(found));
       }
@@ -1508,7 +2738,7 @@ const TopologyPage: React.FC = () => {
       }
     });
     if (activeFocusNodeId) {
-      visibleEdges.forEach((edge: any) => {
+      visibleEdges.forEach((edge: TopologyEdgeEntity) => {
         if (edge.source === activeFocusNodeId || edge.target === activeFocusNodeId) {
           expandedPairKeys.add(edgePairKey(edge));
         }
@@ -1536,12 +2766,12 @@ const TopologyPage: React.FC = () => {
       });
     });
 
-    const edgePriority = (edge: any): number => {
+    const edgePriority = (edge: TopologyEdgeEntity): number => {
       const uid = edgeUidByRef.get(edge as object) || safeText(edge.id);
-      if (selectedEdgeId && (uid === selectedEdgeId || safeText(edge.id) === selectedEdgeId)) {
+      if (selectedEdgeUid && (uid === selectedEdgeUid || safeText(edge.id) === selectedEdgeUid)) {
         return 0;
       }
-      if (selectedPathEdgeIds.has(edge.id) || selectedPathEdgeIds.has(safeText(edge.id)) || selectedPathEdgeIds.has(uid)) {
+      if (selectedPathEdgeIds.has(safeText(edge.id)) || selectedPathEdgeIds.has(uid)) {
         return 1;
       }
       if (activeFocusNodeId && (edge.source === activeFocusNodeId || edge.target === activeFocusNodeId)) {
@@ -1550,7 +2780,7 @@ const TopologyPage: React.FC = () => {
       return 3;
     };
 
-    const shouldSortDetailed = !heavyMode || !!selectedEdgeId || !!selectedPathId || !!activeFocusNodeId;
+    const shouldSortDetailed = (!heavyMode && !dragDegradeMode) || !!selectedEdgeUid || !!selectedPathId || !!activeFocusNodeId;
     const orderedEdges = shouldSortDetailed
       ? [...visibleEdges].sort(
           (a, b) =>
@@ -1563,7 +2793,7 @@ const TopologyPage: React.FC = () => {
     const labelBoxes: EdgeLabelBox[] = [];
     const rendered: EdgeRenderDatum[] = [];
 
-    orderedEdges.forEach((edge: any, edgeIndex: number) => {
+    orderedEdges.forEach((edge: TopologyEdgeEntity, edgeIndex: number) => {
       const uid = edgeUidByRef.get(edge as object) || resolveEdgeUid(edge, edgeIndex);
       const meta = bundleMetaByUid.get(uid) || {
         key: edgePairKey(edge),
@@ -1601,10 +2831,10 @@ const TopologyPage: React.FC = () => {
       const score = computeEdgeIssueScore(edge);
       const requestRate = toMetric(edge?.metrics?.rps ?? edge?.metrics?.call_count, 0);
       const baseWidth = Math.min(6.8, Math.max(2.2, Math.log10(requestRate + 10) * 1.75));
-      const isPathEdge = selectedPathEdgeIds.has(edge.id) || selectedPathEdgeIds.has(safeText(edge.id)) || selectedPathEdgeIds.has(uid);
-      const isSelectedEdge = selectedEdgeId === uid || selectedEdgeId === safeText(edge.id);
+      const isPathEdge = selectedPathEdgeIds.has(safeText(edge.id)) || selectedPathEdgeIds.has(uid);
+      const isSelectedEdge = selectedEdgeUid === uid || selectedEdgeUid === safeText(edge.id);
       const isFocusEdge = activeFocusNodeId ? edge.source === activeFocusNodeId || edge.target === activeFocusNodeId : false;
-      const hasActiveHighlight = !!selectedPathId || !!selectedEdgeId || !!activeFocusNodeId;
+      const hasActiveHighlight = !!selectedPathId || !!selectedEdgeUid || !!activeFocusNodeId;
       const bundleCollapsed = meta.size > 1 && !meta.expanded;
 
       let edgeOpacity = isPathEdge || isSelectedEdge ? 0.98 : isFocusEdge ? 0.86 : hasActiveHighlight ? 0.18 : 0.72;
@@ -1616,7 +2846,9 @@ const TopologyPage: React.FC = () => {
       const labelTextColor = color.severity === 'danger' ? '#fecdd3' : color.severity === 'warning' ? '#fde68a' : '#bae6fd';
       const labelStroke = isPathEdge || isSelectedEdge ? '#e2e8f0' : color.stroke;
       const isLabelOwner = meta.size <= 1 || meta.expanded || meta.index === Math.floor((meta.size - 1) / 2);
-      const labelEligible = !denseMode || isPathEdge || isSelectedEdge || isFocusEdge;
+      const labelEligible = ultraDenseMode
+        ? (isPathEdge || isSelectedEdge)
+        : !dragDegradeMode && (!denseMode || isPathEdge || isSelectedEdge || isFocusEdge);
       const labelVisible = labelEligible && isLabelOwner && (showCompactEdgeLabel || isPathEdge || isSelectedEdge || bundleCollapsed);
       const labelTitle = bundleCollapsed ? `${relation.label} ×${meta.size}` : relation.label;
 
@@ -1667,9 +2899,13 @@ const TopologyPage: React.FC = () => {
         }
       }
 
-      const flowDotCount = denseMode
+      const flowDotCount = ultraDenseMode
         ? (isPathEdge || isSelectedEdge ? 1 : 0)
-        : (isPathEdge || isSelectedEdge ? 2 : edgeOpacity > 0.58 ? 1 : 0);
+        : dragDegradeMode
+        ? (isPathEdge || isSelectedEdge ? 1 : 0)
+        : denseMode
+          ? (isPathEdge || isSelectedEdge ? 1 : 0)
+          : (isPathEdge || isSelectedEdge ? 2 : edgeOpacity > 0.58 ? 1 : 0);
       const flowDuration = Math.max(1.7, Math.min(6.8, 6.3 - Math.log10(requestRate + 1) * 1.05));
 
       rendered.push({
@@ -1698,14 +2934,44 @@ const TopologyPage: React.FC = () => {
     canvasSize.height,
     canvasSize.width,
     getNodePosition,
-    selectedEdgeId,
+    selectedEdgeUid,
     selectedPathEdgeIds,
     selectedPathId,
     showCompactEdgeLabel,
+    isDraggingNode,
     visibleNodes.length,
     visibleEdges,
     zoom,
   ]);
+
+  const interactiveEdgeData = useMemo(() => {
+    if (!isDraggingNode || !denseTopologyMode) {
+      return edgeRenderData;
+    }
+    return edgeRenderData.filter((item) => {
+      const edgeId = safeText(item.edge?.id);
+      return (
+        item.uid === selectedEdgeUid
+        || edgeId === selectedEdgeUid
+        || selectedPathEdgeIds.has(item.uid)
+        || selectedPathEdgeIds.has(edgeId)
+      );
+    });
+  }, [denseTopologyMode, edgeRenderData, isDraggingNode, selectedEdgeUid, selectedPathEdgeIds]);
+
+  const hasFocusFitTarget = useMemo(
+    () => {
+      const focusCenterId = selectedNode?.id || focusNodeId;
+      if (!focusCenterId) {
+        return false;
+      }
+      if (visibleNodes.some((node: TopologyNodeEntity) => node.id === focusCenterId)) {
+        return true;
+      }
+      return visibleEdges.some((edge: TopologyEdgeEntity) => edge.source === focusCenterId || edge.target === focusCenterId);
+    },
+    [focusNodeId, selectedNode?.id, visibleEdges, visibleNodes],
+  );
 
   const edgeNarrative = useMemo(() => {
     if (!selectedEdge) {
@@ -1713,7 +2979,10 @@ const TopologyPage: React.FC = () => {
     }
     return formatEdgeDescription(selectedEdge);
   }, [selectedEdge]);
-  const selectedEdgeDirectional = useMemo(() => resolveDirectionalContribution(selectedEdge), [selectedEdge]);
+  const selectedEdgeDirectional = useMemo(
+    () => resolveDirectionalContribution(selectedEdge ?? null),
+    [selectedEdge],
+  );
 
   const renderEdgePreviewMessage = useCallback((message: string, source: string, target: string) => {
     const text = String(message || '');
@@ -1740,7 +3009,127 @@ const TopologyPage: React.FC = () => {
     });
   }, []);
 
-  const buildNodeAiPayload = useCallback((node: any) => {
+  const resolveEdgePreviewSideMeta = useCallback((log: Event) => {
+    const side = String(log.edge_side || log.attributes?.edge_side || '').trim().toLowerCase();
+    if (side === 'source') {
+      return {
+        label: '源端',
+        badgeClass: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200',
+      };
+    }
+    if (side === 'target') {
+      return {
+        label: '目标端',
+        badgeClass: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+      };
+    }
+    return {
+      label: '关联扩展',
+      badgeClass: 'border-violet-500/40 bg-violet-500/10 text-violet-200',
+    };
+  }, []);
+
+  const resolveEdgePreviewMatchMeta = useCallback((log: Event) => {
+    switch (log.edge_match_kind) {
+      case 'source_mentions_target':
+        return {
+          label: '源端命中',
+          badgeClass: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200',
+          description: '源服务日志正文或属性中提到了目标服务。',
+        };
+      case 'target_mentions_source':
+        return {
+          label: '目标命中',
+          badgeClass: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+          description: '目标服务日志正文或属性中提到了源服务。',
+        };
+      case 'dual_text':
+        return {
+          label: '双边文本',
+          badgeClass: 'border-violet-500/40 bg-violet-500/10 text-violet-200',
+          description: '日志正文或属性中同时命中了源服务和目标服务。',
+        };
+      case 'source_service':
+        return {
+          label: '源端候选',
+          badgeClass: 'border-sky-500/40 bg-sky-500/10 text-sky-200',
+          description: '当前日志来自源服务，作为链路候选被纳入结果。',
+        };
+      case 'target_service':
+        return {
+          label: '目标候选',
+          badgeClass: 'border-orange-500/40 bg-orange-500/10 text-orange-200',
+          description: '当前日志来自目标服务，作为链路候选被纳入结果。',
+        };
+      case 'correlated_text':
+        return {
+          label: '关联候选',
+          badgeClass: 'border-slate-500/40 bg-slate-500/10 text-slate-200',
+          description: '当前日志通过源/目标文本相关性被纳入候选结果。',
+        };
+      default:
+        return null;
+    }
+  }, []);
+
+  const resolveEdgePreviewCorrelationMeta = useCallback((kind?: Event['correlation_kind']) => {
+    switch (kind) {
+      case 'seed':
+        return '种子命中';
+      case 'expanded':
+        return '扩展关联';
+      case 'candidate':
+        return '候选关联';
+      default:
+        return null;
+    }
+  }, []);
+
+  const resolveEdgePreviewPrecisionMeta = useCallback((log: Event) => {
+    const traceIds = extractEventTraceIds(log).filter((value) => edgePreviewCorrelationFilters.traceIds.includes(value));
+    const requestIds = extractEventRequestIds(log).filter((value) => edgePreviewCorrelationFilters.requestIds.includes(value));
+    if (!traceIds.length && !requestIds.length) {
+      return null;
+    }
+    const parts: string[] = [];
+    if (traceIds.length) {
+      parts.push(`trace_id=${traceIds[0]}`);
+    }
+    if (requestIds.length) {
+      parts.push(`request_id=${requestIds[0]}`);
+    }
+    return {
+      label: '精确关联',
+      badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+      description: `当前日志通过 ${parts.join(' / ')} 精确落入链路关联结果。`,
+    };
+  }, [edgePreviewCorrelationFilters.requestIds, edgePreviewCorrelationFilters.traceIds]);
+
+  const buildEdgePreviewLogJump = useCallback((log: Event) => {
+    const sourceService = resolveEdgeEndpointService(selectedEdge, 'source');
+    const targetService = resolveEdgeEndpointService(selectedEdge, 'target');
+    const requestId = extractEventRequestIds(log)[0] || undefined;
+    const traceId = extractEventTraceIds(log)[0] || undefined;
+    const traceIds = traceId ? [traceId] : undefined;
+    const requestIds = requestId ? [requestId] : undefined;
+
+    return {
+      sourceService,
+      targetService,
+      sourceNamespace: resolveEdgeEndpointNamespace(selectedEdge, 'source'),
+      targetNamespace: resolveEdgeEndpointNamespace(selectedEdge, 'target'),
+      traceId,
+      requestId,
+      traceIds,
+      requestIds,
+      timestamp: log.timestamp,
+      anchorTime: log.timestamp,
+      namespace: log.namespace || effectiveTopologyNamespace,
+      correlationMode: 'or' as const,
+    };
+  }, [effectiveTopologyNamespace, resolveEdgeEndpointNamespace, resolveEdgeEndpointService, selectedEdge]);
+
+  const buildNodeAiPayload = useCallback((node: TopologyNodeEntity) => {
     const service = resolveServiceName(node);
     const status = getNodeStatus(node);
     const level = status === 'error' ? 'ERROR' : status === 'warning' ? 'WARN' : 'INFO';
@@ -1757,7 +3146,7 @@ const TopologyPage: React.FC = () => {
         `coverage=${toMetric(node?.coverage ?? node?.metrics?.coverage, 0).toFixed(3)}`,
         `quality_score=${toMetric(node?.quality_score ?? node?.metrics?.quality_score, 0).toFixed(2)}`,
       ].join(' | '),
-      namespace: resolveNamespace(node),
+      namespace: resolveNamespaceFilter(node),
       attributes: {
         source: 'topology-node',
         source_service: service,
@@ -1768,7 +3157,7 @@ const TopologyPage: React.FC = () => {
     };
   }, [timeWindow]);
 
-  const buildEdgeAiPayload = useCallback((edge: any) => {
+  const buildEdgeAiPayload = useCallback((edge: TopologyEdgeEntity) => {
     const errorRate = toMetric(edge?.metrics?.error_rate, 0);
     const timeoutRate = toMetric(edge?.metrics?.timeout_rate ?? edge?.timeout_rate, 0);
     const p99 = toMetric(edge?.metrics?.p99 ?? edge?.p99, 0);
@@ -1779,10 +3168,10 @@ const TopologyPage: React.FC = () => {
     return {
       id: `topology-edge-${edge?.source}-${edge?.target}-${Date.now()}`,
       timestamp: new Date().toISOString(),
-      service_name: safeText(edge?.source || 'unknown'),
+      service_name: normalizeOptionalServiceName(resolveEdgeEndpointService(edge, 'source')) || 'unknown',
       level,
       message: [
-        `Topology edge anomaly ${safeText(edge?.source)} -> ${safeText(edge?.target)}`,
+        `Topology edge anomaly ${resolveEdgeEndpointService(edge, 'source')} -> ${resolveEdgeEndpointService(edge, 'target')}`,
         `error_rate=${errorRate.toFixed(4)}`,
         `timeout_rate=${timeoutRate.toFixed(4)}`,
         `p95=${toMetric(edge?.metrics?.p95 ?? edge?.p95, 0).toFixed(1)}ms`,
@@ -1794,11 +3183,13 @@ const TopologyPage: React.FC = () => {
         source: 'topology-edge',
         edge_narrative: formatEdgeDescription(edge),
         edge_metrics: edge?.metrics || {},
-        target_service: safeText(edge?.target || 'unknown'),
+        target_service: normalizeOptionalServiceName(resolveEdgeEndpointService(edge, 'target')) || 'unknown',
+        source_namespace: resolveEdgeEndpointNamespace(edge, 'source'),
+        target_namespace: resolveEdgeEndpointNamespace(edge, 'target'),
         time_window: timeWindow,
       },
     };
-  }, [timeWindow]);
+  }, [resolveEdgeEndpointNamespace, resolveEdgeEndpointService, timeWindow]);
 
   if (loading) {
     return <LoadingState message="加载拓扑数据..." />;
@@ -1829,18 +3220,47 @@ const TopologyPage: React.FC = () => {
             ))}
           </select>
 
+          <div className="inline-flex items-center gap-2">
+            <input
+              type="text"
+              value={focusServiceFilter}
+              onChange={(e) => setFocusServiceFilter(e.target.value)}
+              placeholder="筛选服务名称..."
+              className="w-44 rounded-lg border border-slate-600 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+            />
+            {focusServiceFilter ? (
+              <button
+                onClick={() => setFocusServiceFilter('')}
+                className="rounded-md border border-slate-600 px-2 py-1 text-[11px] text-slate-200 hover:border-cyan-400 hover:text-cyan-200"
+              >
+                清空
+              </button>
+            ) : null}
+          </div>
+
           <select
-            value={focusNodeId}
-            onChange={(e) => setFocusNodeId(e.target.value)}
+            value={focusServiceValue}
+            onChange={(e) => {
+              const serviceName = e.target.value;
+              if (!serviceName) {
+                setFocusNodeId('');
+                return;
+              }
+              setFocusNodeId(focusNodeIdByServiceName.get(serviceName) || '');
+            }}
             className="max-w-[240px] rounded-lg border border-slate-600 bg-slate-900 px-3 py-1.5 text-xs text-slate-100"
           >
             <option value="">Focus: 全图</option>
-            {(topologyData?.nodes || []).map((node: any) => (
-              <option key={`focus-${node.id}`} value={node.id}>
-                {node.label}
+            {filteredFocusServiceOptions.map((option) => (
+              <option key={`focus-${option.serviceName}`} value={option.serviceName}>
+                {option.serviceName}
+                {option.nodeCount > 1 ? ` (${option.nodeCount})` : ''}
               </option>
             ))}
           </select>
+          <span className="text-[11px] text-slate-400">
+            匹配 {filteredFocusServiceOptions.length}/{focusServiceOptions.length}
+          </span>
 
           <div className="inline-flex items-center gap-1">
             <select
@@ -1982,6 +3402,27 @@ const TopologyPage: React.FC = () => {
             />
           </div>
 
+          <div className="inline-flex items-center gap-1">
+            <button
+              onClick={() => setSuppressWeakEdges((prev) => !prev)}
+              className={`rounded-lg border px-3 py-1.5 text-xs ${
+                suppressWeakEdges
+                  ? 'border-fuchsia-400 bg-fuchsia-500/20 text-fuchsia-100'
+                  : 'border-slate-600 bg-slate-900 text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              弱证据降噪 {suppressWeakEdges ? 'ON' : 'OFF'}
+            </button>
+            <Tooltip
+              title="弱证据降噪"
+              lines={[
+                '仅折叠低置信度、低流量、低问题分的推断链路。',
+                '不会主动隐藏高风险边，也不会影响后端拓扑计算结果。',
+                '适合全图视角下减少噪声边。',
+              ]}
+            />
+          </div>
+
           <div className="ml-auto flex items-center gap-2">
             <div className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-1 py-1">
               <button
@@ -2008,14 +3449,34 @@ const TopologyPage: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1">
-              <button onClick={() => setZoom((z) => Math.max(0.35, z - 0.15))} className="rounded p-1 text-slate-300 hover:bg-slate-800">
+              <button onClick={() => applyZoomBy(-0.15)} className="rounded p-1 text-slate-300 hover:bg-slate-800">
                 <ZoomOut className="h-4 w-4" />
               </button>
               <span className="w-14 text-center text-xs text-slate-300">{Math.round(zoom * 100)}%</span>
-              <button onClick={() => setZoom((z) => Math.min(2.8, z + 0.15))} className="rounded p-1 text-slate-300 hover:bg-slate-800">
+              <button onClick={() => applyZoomBy(0.15)} className="rounded p-1 text-slate-300 hover:bg-slate-800">
                 <ZoomIn className="h-4 w-4" />
               </button>
             </div>
+
+            <button onClick={() => handleFitView('all')} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800">
+              适配视图
+            </button>
+
+            <button
+              onClick={() => handleFitView('focus')}
+              disabled={!hasFocusFitTarget}
+              className={`rounded-lg border px-3 py-1.5 text-xs ${
+                hasFocusFitTarget
+                  ? 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
+                  : 'border-slate-800 bg-slate-900/40 text-slate-500 cursor-not-allowed'
+              }`}
+            >
+              焦点适配
+            </button>
+
+            <button onClick={resetFreeLayout} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800">
+              重置自由布局
+            </button>
 
             <button onClick={exportTopology} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800">
               <Download className="mr-1 inline h-3.5 w-3.5" />导出
@@ -2028,6 +3489,30 @@ const TopologyPage: React.FC = () => {
             </button>
           </div>
         </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+          <span className={`inline-flex items-center rounded-full border px-2.5 py-1 ${topologyRenderSource === 'realtime' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100' : 'border-slate-600 bg-slate-900 text-slate-300'}`}>
+            来源: {topologyRenderSource === 'realtime' ? '实时推送' : '查询快照'}
+          </span>
+          <span className={`inline-flex items-center rounded-full border px-2.5 py-1 ${realtimeConnected ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100' : 'border-amber-500/40 bg-amber-500/10 text-amber-100'}`}>
+            WS: {realtimeConnected ? '已连接' : '未连接'}
+          </span>
+          <span className={`inline-flex items-center rounded-full border px-2.5 py-1 ${topologyFreshness.toneClass}`}>
+            新鲜度: {topologyFreshness.statusLabel} · {topologyFreshness.ageLabel}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300">
+            时间窗: {formatTimeWindow(effectiveTopologyTimeWindow)}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300">
+            锚点: {topologyFreshness.anchorLabel}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300">
+            推断: {topologyInferenceModeLabel}
+          </span>
+          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300">
+            命名空间: {effectiveTopologyNamespace || '全部'}
+          </span>
+        </div>
       </div>
 
       <div className="relative flex-1 overflow-hidden">
@@ -2038,7 +3523,7 @@ const TopologyPage: React.FC = () => {
           onMouseMove={handleCanvasMouseMove}
           onMouseUp={stopCanvasInteractions}
           onMouseLeave={stopCanvasInteractions}
-          onWheel={handleWheel}
+          onWheel={handleCanvasWheel}
           style={{
             backgroundColor: '#020617',
             backgroundImage:
@@ -2111,7 +3596,7 @@ const TopologyPage: React.FC = () => {
                           <circle
                             key={`flow-dot-${uid}-${dotIndex}`}
                             r={dotIndex === 0 ? 2.7 : 2.2}
-                            fill={selectedEdgeId === safeText(edge.id) || selectedEdgeId === uid ? '#ffffff' : color.stroke}
+                            fill={selectedEdgeUid === safeText(edge.id) || selectedEdgeUid === uid ? '#ffffff' : color.stroke}
                             opacity={dotIndex === 0 ? 0.95 : 0.76}
                           >
                             <animateMotion
@@ -2152,16 +3637,24 @@ const TopologyPage: React.FC = () => {
                 })}
               </svg>
 
-              {edgeRenderData.map((item) => {
-                const { uid, edge, path } = item;
-                return (
-                  <svg key={`edge-hit-${uid}`} className="absolute inset-0" style={{ width: canvasSize.width, height: canvasSize.height }}>
+              <svg className="absolute inset-0" style={{ width: canvasSize.width, height: canvasSize.height }}>
+                {interactiveEdgeData.map((item) => {
+                  const { uid, edge, path } = item;
+                  return (
                     <path
+                      key={`edge-hit-${uid}`}
                       d={path}
                       stroke="transparent"
-                      strokeWidth={16}
+                      strokeWidth={isDraggingNode && denseTopologyMode ? 10 : 16}
                       fill="none"
                       className="cursor-pointer"
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) {
+                          return;
+                        }
+                        // 避免点击链路时冒泡触发画布平移
+                        e.stopPropagation();
+                      }}
                       onMouseEnter={(e) => {
                         e.stopPropagation();
                         showEdgeHoverCard(e, edge);
@@ -2176,15 +3669,20 @@ const TopologyPage: React.FC = () => {
                         handleEdgeClick(edge);
                       }}
                     />
-                  </svg>
-                );
-              })}
+                  );
+                })}
+              </svg>
 
-              {visibleNodes.map((node: any) => {
+              {visibleNodes.map((node: TopologyNodeEntity) => {
                 const pos = getNodePosition(node.id);
                 const palette = getNodePalette(node, timeWindow);
                 const isSelected = selectedNode?.id === node.id;
-                const isHighlighted = !!highlightedService && (node.id === highlightedService || node.label === highlightedService);
+                const isHighlighted = !!highlightedService
+                  && (
+                    node.id === highlightedService
+                    || node.label === highlightedService
+                    || resolveServiceName(node) === highlightedService
+                  );
                 const isPathNode = selectedPathNodeIds.has(node.id);
                 const status = getNodeStatus(node);
                 const dimByPath = !!selectedPathId && !isPathNode;
@@ -2200,7 +3698,7 @@ const TopologyPage: React.FC = () => {
                       e.stopPropagation();
                       handleNodeClick(node);
                     }}
-                    className={`absolute rounded-2xl px-3 py-2 text-slate-100 transition ${palette.ring} ${
+                    className={`absolute rounded-2xl px-3 py-2 text-slate-100 transition-transform duration-150 ${palette.ring} ${
                       isSelected ? 'scale-[1.04] ring-2 ring-cyan-300' : 'hover:scale-[1.02]'
                     } ${isHighlighted && !isSelected ? 'ring-2 ring-emerald-300' : ''} ${isPathNode && !isSelected ? 'ring-2 ring-violet-300' : ''}`}
                     style={{
@@ -2210,11 +3708,12 @@ const TopologyPage: React.FC = () => {
                       height: LAYOUT.nodeHeight,
                       background: `linear-gradient(135deg, ${palette.from} 0%, ${palette.to} 100%)`,
                       opacity: dimByPath ? 0.36 : 1,
+                      willChange: draggingNode?.id === node.id ? 'left, top' : undefined,
                     }}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold tracking-wide">{node.label}</div>
+                        <div className="truncate text-sm font-semibold tracking-wide">{resolveServiceName(node)}</div>
                         <div className="truncate text-[10px] text-slate-200/80">{resolveLane(node).label}</div>
                       </div>
                       <span className={`mt-0.5 inline-block h-2.5 w-2.5 rounded-full ${palette.statusDot} ${status !== 'normal' ? 'animate-pulse' : ''}`} />
@@ -2243,6 +3742,7 @@ const TopologyPage: React.FC = () => {
         {hoverCard && (
           <div className="pointer-events-none absolute inset-0 z-20">
             <div
+              data-no-canvas-wheel
               className="pointer-events-auto absolute rounded-xl border border-cyan-400/40 bg-slate-950/96 p-3 text-[11px] text-slate-100 shadow-[0_0_28px_rgba(56,189,248,0.24)] backdrop-blur"
               style={{ left: hoverCardPosition.left, top: hoverCardPosition.top, width: hoverCardPosition.width }}
               onMouseEnter={clearHoverHideTimer}
@@ -2254,7 +3754,7 @@ const TopologyPage: React.FC = () => {
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold text-cyan-200">{resolveServiceName(hoverCard.node)}</div>
                       <div className="mt-0.5 truncate text-[10px] text-slate-400">
-                        {resolveNamespace(hoverCard.node)} | {resolveLane(hoverCard.node).label}
+                        {resolveNamespaceLabel(hoverCard.node)} | {resolveLane(hoverCard.node).label}
                       </div>
                     </div>
                     <span
@@ -2281,14 +3781,26 @@ const TopologyPage: React.FC = () => {
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-1.5">
                     <button
-                      onClick={() => navigation.goToLogs({ serviceName: resolveServiceName(hoverCard.node) })}
+                      onClick={() => goToEffectiveLogs({ serviceName: resolveServiceName(hoverCard.node!), namespace: resolveNamespaceFilter(hoverCard.node!) })}
                       className="rounded border border-slate-700 bg-slate-900/65 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
                     >
                       <FileText className="mr-1 inline h-3.5 w-3.5 text-sky-300" />
                       查看日志
                     </button>
                     <button
-                      onClick={() => navigation.goToAIAnalysis({ logData: buildNodeAiPayload(hoverCard.node) })}
+                      onClick={() => goToEffectiveAlerts({
+                        tab: 'rules',
+                        scope: 'service',
+                        serviceName: resolveServiceName(hoverCard.node!),
+                        namespace: resolveNamespaceFilter(hoverCard.node!),
+                      })}
+                      className="rounded border border-slate-700 bg-slate-900/65 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
+                    >
+                      <AlertCircle className="mr-1 inline h-3.5 w-3.5 text-amber-300" />
+                      服务告警
+                    </button>
+                    <button
+                      onClick={() => navigation.goToAIAnalysis({ logData: buildNodeAiPayload(hoverCard.node!) })}
                       className="rounded border border-slate-700 bg-slate-900/65 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
                     >
                       <BrainCircuit className="mr-1 inline h-3.5 w-3.5 text-fuchsia-300" />
@@ -2343,12 +3855,9 @@ const TopologyPage: React.FC = () => {
                   <div className="mt-2 grid grid-cols-2 gap-1.5">
                     <button
                       onClick={() =>
-                        navigation.goToLogs({
-                          serviceName: safeText(hoverCard.edge?.source),
-                          search: safeText(hoverCard.edge?.target),
-                          sourceService: safeText(hoverCard.edge?.source),
-                          targetService: safeText(hoverCard.edge?.target),
-                          timeWindow,
+                        goToEffectiveLogs({
+                          sourceService: resolveEdgeEndpointService(hoverCard.edge, 'source'),
+                          targetService: resolveEdgeEndpointService(hoverCard.edge, 'target'),
                         })
                       }
                       className="rounded border border-slate-700 bg-slate-900/65 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
@@ -2357,7 +3866,21 @@ const TopologyPage: React.FC = () => {
                       查看日志
                     </button>
                     <button
-                      onClick={() => navigation.goToAIAnalysis({ logData: buildEdgeAiPayload(hoverCard.edge) })}
+                      onClick={() =>
+                        goToEffectiveAlerts({
+                          tab: 'rules',
+                          scope: 'edge',
+                          sourceService: resolveEdgeEndpointService(hoverCard.edge, 'source'),
+                          targetService: resolveEdgeEndpointService(hoverCard.edge, 'target'),
+                        })
+                      }
+                      className="rounded border border-slate-700 bg-slate-900/65 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
+                    >
+                      <AlertCircle className="mr-1 inline h-3.5 w-3.5 text-amber-300" />
+                      链路告警
+                    </button>
+                    <button
+                      onClick={() => navigation.goToAIAnalysis({ logData: buildEdgeAiPayload(hoverCard.edge!) })}
                       className="rounded border border-slate-700 bg-slate-900/65 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
                     >
                       <BrainCircuit className="mr-1 inline h-3.5 w-3.5 text-fuchsia-300" />
@@ -2426,7 +3949,11 @@ const TopologyPage: React.FC = () => {
                   中风险: 节点 {issueSummary.mediumRiskNodes} / 链路 {issueSummary.mediumRiskEdges}
                 </div>
                 <div className="mt-1">全量视图: {filteredTopology.baseNodeCount} 节点 / {filteredTopology.baseEdgeCount} 边</div>
-                {statsData && (
+                <div className="text-slate-400">当前视图: {visibleNodes.length} 节点 / {visibleEdges.length} 边</div>
+                {suppressWeakEdges && (
+                  <div className="text-fuchsia-300">已折叠弱证据: 节点 {filteredTopology.hiddenWeakNodeCount || 0} / 链路 {filteredTopology.hiddenWeakEdgeCount || 0}</div>
+                )}
+                {hasTopologyMetadata && (
                   <div className="mt-1 text-slate-400">统计接口: 已接入</div>
                 )}
               </div>
@@ -2457,7 +3984,7 @@ const TopologyPage: React.FC = () => {
                       {changeOverlayEvents.map((event) => (
                         <button
                           key={`evt-${event.id}`}
-                          onClick={() => navigation.goToLogs({ serviceName: event.service_name })}
+                          onClick={() => goToEffectiveLogs({ serviceName: event.service_name })}
                           className="block w-full truncate rounded border border-slate-700 px-2 py-1 text-left text-[10px] text-slate-300 hover:bg-slate-800"
                           title={event.message}
                         >
@@ -2497,7 +4024,7 @@ const TopologyPage: React.FC = () => {
 
             <div className="max-h-[340px] space-y-1 overflow-auto p-3">
               {topProblemEdges.length ? (
-                topProblemEdges.slice(0, 7).map((edge: any) => (
+                topProblemEdges.slice(0, 7).map((edge: TopProblemEdge) => (
                   <button
                     key={`problem-${edge.id}`}
                     onClick={() => handleEdgeClick(edge)}
@@ -2549,10 +4076,10 @@ const TopologyPage: React.FC = () => {
                   <>
                     <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-3">
                       <div className="text-[10px] text-slate-400">服务名称</div>
-                      <div className="mt-1 text-sm font-semibold text-cyan-200">{selectedNode.label}</div>
+                      <div className="mt-1 text-sm font-semibold text-cyan-200">{resolveServiceName(selectedNode)}</div>
                       <div className="mt-1 flex items-center gap-2 text-[11px]">
                         <span className="rounded border border-slate-700 bg-slate-900/70 px-1.5 py-0.5 text-slate-300">
-                          Namespace: {resolveNamespace(selectedNode)}
+                          Namespace: {resolveNamespaceLabel(selectedNode)}
                         </span>
                         <span className="text-slate-400">{resolveLane(selectedNode).label}</span>
                       </div>
@@ -2699,9 +4226,7 @@ const TopologyPage: React.FC = () => {
                           <div className="mt-2 grid grid-cols-2 gap-2">
                             <button
                               onClick={() =>
-                                navigation.goToLogs({
-                                  serviceName: selectedPathPeerService || resolveServiceName(selectedNode),
-                                  search: resolveServiceName(selectedNode),
+                                goToEffectiveLogs({
                                   sourceService:
                                     selectedPath.direction === 'upstream'
                                       ? selectedPathPeerService || resolveServiceName(selectedNode)
@@ -2710,7 +4235,6 @@ const TopologyPage: React.FC = () => {
                                     selectedPath.direction === 'upstream'
                                       ? resolveServiceName(selectedNode)
                                       : selectedPathPeerService || resolveServiceName(selectedNode),
-                                  timeWindow,
                                 })
                               }
                               className="rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
@@ -2720,10 +4244,8 @@ const TopologyPage: React.FC = () => {
                             </button>
                             <button
                               onClick={() =>
-                                navigation.goToLogs({
+                                goToEffectiveLogs({
                                   serviceName: selectedPathTerminalService || resolveServiceName(selectedNode),
-                                  search: resolveServiceName(selectedNode),
-                                  timeWindow,
                                 })
                               }
                               className="rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-left text-[10px] hover:bg-slate-800"
@@ -2738,11 +4260,25 @@ const TopologyPage: React.FC = () => {
 
                     <div className="space-y-2 pt-1">
                       <button
-                        onClick={() => navigation.goToLogs({ serviceName: resolveServiceName(selectedNode) })}
+                        onClick={() => goToEffectiveLogs({ serviceName: resolveServiceName(selectedNode), namespace: resolveNamespaceFilter(selectedNode) })}
                         className="flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950/55 px-3 py-2 text-left hover:bg-slate-800"
                       >
                         <span className="flex items-center gap-2">
                           <FileText className="h-4 w-4 text-sky-300" /> 查看服务日志
+                        </span>
+                        <ExternalLink className="h-3.5 w-3.5 text-slate-400" />
+                      </button>
+                      <button
+                        onClick={() => goToEffectiveAlerts({
+                          tab: 'rules',
+                          scope: 'service',
+                          serviceName: resolveServiceName(selectedNode),
+                          namespace: resolveNamespaceFilter(selectedNode),
+                        })}
+                        className="flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950/55 px-3 py-2 text-left hover:bg-slate-800"
+                      >
+                        <span className="flex items-center gap-2">
+                          <AlertCircle className="h-4 w-4 text-amber-300" /> 查看服务告警
                         </span>
                         <ExternalLink className="h-3.5 w-3.5 text-slate-400" />
                       </button>
@@ -2786,7 +4322,7 @@ const TopologyPage: React.FC = () => {
                         <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-3">
                           <div className="text-[10px] text-slate-400">链路</div>
                           <div className="mt-1 text-sm font-semibold text-cyan-200">
-                            {selectedEdge.source} → {selectedEdge.target}
+                            {resolveEdgeEndpointService(selectedEdge, 'source')} → {resolveEdgeEndpointService(selectedEdge, 'target')}
                           </div>
                           <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-400">
                             <span>
@@ -2909,8 +4445,8 @@ const TopologyPage: React.FC = () => {
                     <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-3">
                       <div className="text-[10px] text-slate-400">链路解读</div>
                       <p className="mt-2 text-[12px] leading-5 text-slate-200">
-                        这条链路表示 <span className="text-cyan-200">{selectedEdge.source}</span> 调用{' '}
-                        <span className="text-cyan-200">{selectedEdge.target}</span>。当错误率和超时率抬升时，优先从源服务日志和 Trace
+                        这条链路表示 <span className="text-cyan-200">{resolveEdgeEndpointService(selectedEdge, 'source')}</span> 调用{' '}
+                        <span className="text-cyan-200">{resolveEdgeEndpointService(selectedEdge, 'target')}</span>。当错误率和超时率抬升时，优先从源服务日志和 Trace
                         片段定位失败点，再对比目标服务近期发布变更。
                       </p>
                       <div className="mt-2 text-[10px] text-slate-500">
@@ -2920,17 +4456,34 @@ const TopologyPage: React.FC = () => {
 
                     <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-3">
                       <div className="mb-2 flex items-center justify-between">
-                        <div className="text-[10px] text-slate-400">链路问题日志预览（QS-01）</div>
+                        <div>
+                          <div className="text-[10px] text-slate-400">链路问题日志预览（QS-01）</div>
+                          <div className="mt-1 text-[10px] text-slate-500">
+                            种子 {edgePreviewSummary.seedCount} 条 · 扩展 {edgePreviewSummary.expandedCount} 条 · trace_id {edgePreviewSummary.traceIdCount} · request_id {edgePreviewSummary.requestIdCount}
+                            {!edgePreviewSummary.expansionEnabled ? ' · 当前仅候选检索' : ''}
+                          </div>
+                        </div>
                         <button
-                          onClick={() =>
-                            navigation.goToLogs({
-                              serviceName: selectedEdge.source,
-                              search: safeText(selectedEdge.target),
-                              sourceService: selectedEdge.source,
-                              targetService: selectedEdge.target,
-                              timeWindow,
-                            })
-                          }
+                          onClick={() => {
+                            if (edgePreviewCorrelationFilters.traceIds.length || edgePreviewCorrelationFilters.requestIds.length) {
+                              goToEffectiveLogs({
+                                sourceService: resolveEdgeEndpointService(selectedEdge, 'source'),
+                                targetService: resolveEdgeEndpointService(selectedEdge, 'target'),
+                                sourceNamespace: resolveEdgeEndpointNamespace(selectedEdge, 'source'),
+                                targetNamespace: resolveEdgeEndpointNamespace(selectedEdge, 'target'),
+                                traceIds: edgePreviewCorrelationFilters.traceIds,
+                                requestIds: edgePreviewCorrelationFilters.requestIds,
+                                correlationMode: 'or',
+                              });
+                              return;
+                            }
+                            goToEffectiveLogs({
+                              sourceService: resolveEdgeEndpointService(selectedEdge, 'source'),
+                              targetService: resolveEdgeEndpointService(selectedEdge, 'target'),
+                              sourceNamespace: resolveEdgeEndpointNamespace(selectedEdge, 'source'),
+                              targetNamespace: resolveEdgeEndpointNamespace(selectedEdge, 'target'),
+                            });
+                          }}
                           className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-800"
                         >
                           查看全部
@@ -2942,38 +4495,48 @@ const TopologyPage: React.FC = () => {
                         </div>
                       ) : (edgeLogPreviewData?.data?.length || 0) > 0 ? (
                         <div className="max-h-[220px] space-y-1 overflow-auto pr-1">
-                          {(edgeLogPreviewData?.data || []).slice(0, 6).map((log) => (
-                            <button
-                              key={`edge-preview-${log.id}`}
-                              onClick={() =>
-                                navigation.goToLogs({
-                                  serviceName: log.service_name,
-                                  search: safeText(selectedEdge.target),
-                                  sourceService: selectedEdge.source,
-                                  targetService: selectedEdge.target,
-                                  timeWindow,
-                                })
-                              }
-                              className="block w-full rounded border border-slate-700 bg-slate-950/65 px-2 py-2 text-left hover:bg-slate-800"
-                            >
-                              <div className="flex items-center justify-between gap-2 text-[10px]">
-                                <span className="truncate text-cyan-200">{log.service_name}</span>
-                                <span className={`rounded px-1.5 py-0.5 ${
-                                  log.level === 'ERROR' || log.level === 'FATAL'
-                                    ? 'bg-rose-500/20 text-rose-200'
-                                    : log.level === 'WARN'
-                                      ? 'bg-amber-500/20 text-amber-200'
-                                      : 'bg-slate-700 text-slate-200'
-                                }`}>
-                                  {log.level}
-                                </span>
-                              </div>
-                              <div className="mt-1 truncate text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleString()}</div>
-                              <div className="mt-1 line-clamp-2 text-[11px] text-slate-200">
-                                {renderEdgePreviewMessage(log.message, safeText(selectedEdge.source), safeText(selectedEdge.target))}
-                              </div>
-                            </button>
-                          ))}
+                          {(edgeLogPreviewData?.data || []).slice(0, 6).map((log) => {
+                            const sideMeta = resolveEdgePreviewSideMeta(log);
+                            const matchMeta = resolveEdgePreviewMatchMeta(log);
+                            const precisionMeta = resolveEdgePreviewPrecisionMeta(log);
+                            const correlationMeta = resolveEdgePreviewCorrelationMeta(log.correlation_kind);
+                            return (
+                              <button
+                                key={`edge-preview-${log.id}`}
+                                onClick={() => goToEffectiveLogs(buildEdgePreviewLogJump(log))}
+                                className="block w-full rounded border border-slate-700 bg-slate-950/65 px-2 py-2 text-left hover:bg-slate-800"
+                              >
+                                <div className="flex items-center justify-between gap-2 text-[10px]">
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    <span className="truncate text-cyan-200">{log.service_name}</span>
+                                    <span className={`rounded border px-1.5 py-0.5 text-[9px] ${sideMeta.badgeClass}`}>{sideMeta.label}</span>
+                                    {matchMeta ? <span className={`rounded border px-1.5 py-0.5 text-[9px] ${matchMeta.badgeClass}`}>{matchMeta.label}</span> : null}
+                                    {precisionMeta ? <span className={`rounded border px-1.5 py-0.5 text-[9px] ${precisionMeta.badgeClass}`}>{precisionMeta.label}</span> : null}
+                                  </div>
+                                  <span className={`rounded px-1.5 py-0.5 ${
+                                    log.level === 'ERROR' || log.level === 'FATAL'
+                                      ? 'bg-rose-500/20 text-rose-200'
+                                      : log.level === 'WARN'
+                                        ? 'bg-amber-500/20 text-amber-200'
+                                        : 'bg-slate-700 text-slate-200'
+                                  }`}>
+                                    {log.level}
+                                  </span>
+                                </div>
+                                <div className="mt-1 truncate text-[10px] text-slate-400">{formatTime(log.timestamp)}</div>
+                                <div className="mt-1 line-clamp-2 text-[11px] text-slate-200">
+                                  {renderEdgePreviewMessage(
+                                    log.message,
+                                    resolveEdgeEndpointService(selectedEdge, 'source'),
+                                    resolveEdgeEndpointService(selectedEdge, 'target'),
+                                  )}
+                                </div>
+                                {matchMeta ? <div className="mt-1 text-[10px] text-slate-500">命中说明: {matchMeta.description}</div> : null}
+                                {precisionMeta ? <div className="mt-1 text-[10px] text-emerald-300">精确关联: {precisionMeta.description}</div> : null}
+                                {correlationMeta ? <div className="mt-1 text-[10px] text-slate-500">关联类型: {correlationMeta}</div> : null}
+                              </button>
+                            );
+                          })}
                         </div>
                       ) : (
                         <div className="rounded border border-slate-700 bg-slate-950/65 px-2 py-3 text-center text-[11px] text-slate-500">
@@ -2989,9 +4552,9 @@ const TopologyPage: React.FC = () => {
                             mode: (safeText(selectedEdge?.metrics?.evidence_type || selectedEdge?.evidence_type) === 'inferred' ? 'inferred' : 'observed') as
                               | 'observed'
                               | 'inferred',
-                            sourceService: selectedEdge.source,
-                            targetService: selectedEdge.target,
-                            serviceName: selectedEdge.source,
+                            sourceService: resolveEdgeEndpointService(selectedEdge, 'source'),
+                            targetService: resolveEdgeEndpointService(selectedEdge, 'target'),
+                            serviceName: resolveEdgeEndpointService(selectedEdge, 'source'),
                           })
                         }
                         className="flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950/55 px-3 py-2 text-left hover:bg-slate-800"
@@ -3003,18 +4566,31 @@ const TopologyPage: React.FC = () => {
                       </button>
                       <button
                         onClick={() =>
-                          navigation.goToLogs({
-                            serviceName: selectedEdge.source,
-                            search: safeText(selectedEdge.target),
-                            sourceService: selectedEdge.source,
-                            targetService: selectedEdge.target,
-                            timeWindow,
+                          goToEffectiveLogs({
+                            sourceService: resolveEdgeEndpointService(selectedEdge, 'source'),
+                            targetService: resolveEdgeEndpointService(selectedEdge, 'target'),
                           })
                         }
                         className="flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950/55 px-3 py-2 text-left hover:bg-slate-800"
                       >
                         <span className="flex items-center gap-2">
-                          <FileText className="h-4 w-4 text-sky-300" /> 查看源服务日志
+                          <FileText className="h-4 w-4 text-sky-300" /> 查看链路关联日志
+                        </span>
+                        <ExternalLink className="h-3.5 w-3.5 text-slate-400" />
+                      </button>
+                      <button
+                        onClick={() =>
+                          goToEffectiveAlerts({
+                            tab: 'rules',
+                            scope: 'edge',
+                            sourceService: resolveEdgeEndpointService(selectedEdge, 'source'),
+                            targetService: resolveEdgeEndpointService(selectedEdge, 'target'),
+                          })
+                        }
+                        className="flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950/55 px-3 py-2 text-left hover:bg-slate-800"
+                      >
+                        <span className="flex items-center gap-2">
+                          <AlertCircle className="h-4 w-4 text-amber-300" /> 查看链路告警
                         </span>
                         <ExternalLink className="h-3.5 w-3.5 text-slate-400" />
                       </button>

@@ -14,11 +14,16 @@ import logging
 import json
 import asyncio
 from typing import Dict, Any, List, Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    """Return timezone-aware UTC timestamp string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -48,7 +53,7 @@ class NotificationService:
             "alert_id": alert.get("id"),
             "severity": alert.get("severity"),
             "message": alert.get("message"),
-            "sent_at": datetime.utcnow().isoformat(),
+            "sent_at": _utc_now_iso(),
             "channels": [],
         }
 
@@ -101,7 +106,7 @@ class NotificationService:
                 "message": alert.get("message"),
                 "labels": alert.get("labels", {}),
                 "starts_at": alert.get("starts_at"),
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": _utc_now_iso(),
             }
 
             async with aiohttp.ClientSession() as session:
@@ -144,7 +149,7 @@ class NotificationService:
                             {"title": "消息", "value": alert.get("message", ""), "short": False},
                         ],
                         "footer": "Logoscope Alert",
-                        "ts": int(datetime.utcnow().timestamp()),
+                        "ts": int(datetime.now(timezone.utc).timestamp()),
                     }
                 ]
             }

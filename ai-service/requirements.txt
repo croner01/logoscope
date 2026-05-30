@@ -5,7 +5,7 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 
 # 数据验证
-pydantic==2.5.0
+pydantic==2.5.2
 pydantic-settings==2.1.0
 
 # 数据库客户端
@@ -14,6 +14,7 @@ clickhouse-connect==0.6.10
 neo4j==5.14.0
 requests==2.31.0
 openai==1.63.0
+langchain-core==0.3.10
 
 # 监控指标
 prometheus-client==0.19.0
@@ -43,10 +44,6 @@ opentelemetry-exporter-otlp==1.22.0
 opentelemetry-proto==1.22.0
 opentelemetry-semantic-conventions==0.43b0
 protobuf==4.25.1
-
-# 消息队列
-nats-py==2.13.1
-redis==4.5.0
 
 # 测试框架
 pytest==7.4.3

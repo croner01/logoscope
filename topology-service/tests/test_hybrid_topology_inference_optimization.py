@@ -30,8 +30,8 @@ class FakeStorageForInference:
         condensed = " ".join(query.split())
         if "FROM logs.logs" in condensed and "GROUP BY service_name" in condensed:
             return self.grouped_rows
-        if "FROM logs.logs" in condensed and "ORDER BY timestamp ASC" in condensed:
-            return self.inference_rows
+        if "FROM logs.logs" in condensed and "ORDER BY timestamp DESC" in condensed:
+            return list(reversed(self.inference_rows))
         if "FROM logs.traces" in condensed:
             return []
         if "FROM logs.metrics" in condensed:
@@ -72,9 +72,10 @@ class FakeStorageForMetricsTopology:
 class FakeStorageForTracesNamespaceTopology:
     """用于 traces namespace SQL 下推兼容性的存储桩。"""
 
-    def __init__(self, has_traces_namespace_column: bool):
+    def __init__(self, has_traces_namespace_column: bool, traces_rows: List[Dict[str, Any]] = None):
         self.ch_client = object()
         self.has_traces_namespace_column = has_traces_namespace_column
+        self.traces_rows = traces_rows or []
         self.captured_queries: List[str] = []
 
     def execute_query(self, query: str):
@@ -87,7 +88,7 @@ class FakeStorageForTracesNamespaceTopology:
         ):
             return [{"cnt": 1 if self.has_traces_namespace_column else 0}]
         if "FROM logs.traces" in condensed:
-            return []
+            return self.traces_rows
         return []
 
     def get_edge_red_metrics(self, time_window: str = "1 HOUR", namespace: str = None):
@@ -148,6 +149,50 @@ class TestHybridTopologyInferenceOptimization:
         assert stats["message_target_enabled"] is True
         assert "url" in (stats.get("message_target_patterns") or [])
         assert stats["evidence_sparse"] is False
+
+    def test_inference_normalizes_node_key_style_service_names(self):
+        """推断链路应将 node_key 风格 service_name 归一化为服务名。"""
+        storage = FakeStorageForInference(
+            grouped_rows=[],
+            inference_rows=[
+                {
+                    "id": "log-1",
+                    "timestamp": datetime(2026, 2, 28, 10, 0, 0, tzinfo=timezone.utc),
+                    "service_name": "islap:query-service:prod",
+                    "namespace": "",
+                    "message": "calling http://otel-collector:4317/v1/logs",
+                    "trace_id": "",
+                    "attributes_json": json.dumps({}),
+                },
+                {
+                    "id": "log-2",
+                    "timestamp": datetime(2026, 2, 28, 10, 0, 1, tzinfo=timezone.utc),
+                    "service_name": "default:otel-collector:prod",
+                    "namespace": "",
+                    "message": "collector ready",
+                    "trace_id": "",
+                    "attributes_json": json.dumps({}),
+                },
+            ],
+        )
+        builder = HybridTopologyBuilder(storage)
+
+        edges, stats = builder._infer_edges_from_logs(
+            time_window="1 HOUR",
+            namespace=None,
+            message_target_min_support=1,
+        )
+
+        matched = [
+            edge
+            for edge in edges
+            if edge.get("source") == "query-service" and edge.get("target") == "otel-collector"
+        ]
+        assert matched
+        assert matched[0]["metrics"]["source_service"] == "query-service"
+        assert matched[0]["metrics"]["target_service"] == "otel-collector"
+        assert matched[0]["metrics"]["source_namespace"] == "islap"
+        assert stats["message_target_edges"] >= 1
 
     def test_message_target_supports_kv_proxy_and_rpc_patterns(self):
         """应支持 host/upstream、proxy cluster、rpc 错误日志的目标提取。"""
@@ -567,3 +612,271 @@ class TestHybridTopologyInferenceOptimization:
         assert "traces_namespace = 'islap'" not in traces_query
         assert "JSONExtractString(attributes_json, 'service_namespace')" in traces_query
         assert "JSONExtractString(attributes_json, 'namespace')" in traces_query
+
+    def test_traces_topology_avoids_namespace_json_extract_when_namespace_not_requested(self):
+        """未指定 namespace 且缺少 traces_namespace 列时，明细扫描应避免 JSONExtract 命名空间表达式。"""
+        storage = FakeStorageForTracesNamespaceTopology(has_traces_namespace_column=False)
+        builder = HybridTopologyBuilder(storage)
+
+        builder._get_traces_topology(time_window="1 HOUR", namespace=None)
+
+        traces_queries = [item for item in storage.captured_queries if "FROM logs.traces" in item]
+        assert traces_queries
+        traces_query = traces_queries[-1]
+        assert "AS span_namespace" in traces_query
+        assert "JSONExtractString(attributes_json, 'service_namespace')" not in traces_query
+        assert "JSONExtractString(attributes_json, 'namespace')" not in traces_query
+        assert "optimize_read_in_order = 1" in traces_query
+
+    def test_traces_topology_prefers_k8s_namespace_over_generic_namespace_key(self):
+        """
+        当 attributes 同时包含 k8s.namespace.name 与 namespace 时，应优先使用 k8s 命名空间，
+        避免把 generic namespace（可能是组件名）误判为命名空间。
+        """
+        storage = FakeStorageForTracesNamespaceTopology(
+            has_traces_namespace_column=False,
+            traces_rows=[
+                {
+                    "trace_id": "trace-1",
+                    "span_id": "span-1",
+                    "parent_span_id": "",
+                    "service_name": "semantic-engine",
+                    "operation_name": "GET /api/v1/topology",
+                    "status": "STATUS_CODE_OK",
+                    "attributes_json": json.dumps(
+                        {
+                            "namespace": "semantic-engine",
+                            "k8s.namespace.name": "islap",
+                            "duration_ms": 8,
+                        }
+                    ),
+                    "timestamp": datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc),
+                }
+            ],
+        )
+        builder = HybridTopologyBuilder(storage)
+
+        result = builder._get_traces_topology(time_window="1 HOUR", namespace="islap")
+        nodes = result.get("nodes", [])
+        assert len(nodes) == 1
+        assert nodes[0]["id"] == "semantic-engine"
+        assert nodes[0]["metrics"]["namespace"] == "islap"
+        assert nodes[0]["metrics"]["service_namespace"] == "islap"
+
+    def test_edge_red_aggregation_skips_query_when_no_traces_edge(self):
+        """无 traces 边时应跳过 edge RED 聚合 SQL，避免无效重查询。"""
+        class StorageStub:
+            def __init__(self):
+                self.calls = 0
+
+            def get_edge_red_metrics(self, time_window: str = "1 HOUR", namespace: str = None):
+                _ = (time_window, namespace)
+                self.calls += 1
+                return {}
+
+        storage = StorageStub()
+        builder = HybridTopologyBuilder(storage)
+        merged_edges = [
+            {
+                "source": "frontend",
+                "target": "registry",
+                "metrics": {
+                    "data_source": "logs_heuristic",
+                    "data_sources": ["logs"],
+                },
+            },
+            {
+                "source": "query-service",
+                "target": "frontend",
+                "metrics": {
+                    "data_source": "inferred",
+                    "data_sources": ["logs", "inferred"],
+                },
+            },
+        ]
+
+        builder._apply_edge_red_aggregation(merged_edges=merged_edges, time_window="1 HOUR", namespace="islap")
+        assert storage.calls == 0
+
+    def test_infer_edges_fallbacks_to_lightweight_logs_query_when_primary_empty(self):
+        """主查询空但窗口内有日志时，应回退到轻量查询避免返回空拓扑。"""
+        fallback_rows = [
+            {
+                "id": "log-2",
+                "timestamp": datetime(2026, 3, 1, 12, 0, 2, tzinfo=timezone.utc),
+                "service_name": "payment",
+                "namespace": "islap",
+                "message": "request_id=req-1 handled",
+                "trace_id": "",
+            },
+            {
+                "id": "log-1",
+                "timestamp": datetime(2026, 3, 1, 12, 0, 1, tzinfo=timezone.utc),
+                "service_name": "frontend",
+                "namespace": "islap",
+                "message": "request_id=req-1 calling payment",
+                "trace_id": "",
+            },
+        ]
+
+        class StorageStub:
+            def __init__(self):
+                self.ch_client = object()
+                self.queries: List[str] = []
+
+            def execute_query(self, query: str):
+                condensed = " ".join(query.split())
+                self.queries.append(condensed)
+                if "SELECT count() AS cnt FROM logs.logs" in condensed:
+                    return [{"cnt": 128}]
+                if (
+                    "FROM logs.logs" in condensed
+                    and "ORDER BY timestamp DESC" in condensed
+                    and "attributes_json" in condensed
+                ):
+                    return []
+                if (
+                    "FROM logs.logs" in condensed
+                    and "ORDER BY timestamp DESC" in condensed
+                    and "attributes_json" not in condensed
+                ):
+                    return fallback_rows
+                if "FROM logs.traces" in condensed:
+                    return []
+                if "FROM logs.metrics" in condensed:
+                    return []
+                return []
+
+            def get_edge_red_metrics(self, time_window: str = "1 HOUR", namespace: str = None):
+                _ = (time_window, namespace)
+                return {}
+
+        storage = StorageStub()
+        builder = HybridTopologyBuilder(storage)
+
+        edges, stats = builder._infer_edges_from_logs(time_window="1 HOUR", namespace="islap")
+        assert edges == []
+        assert stats["total_candidates"] == 2
+
+        assert any("SELECT count() AS cnt FROM logs.logs" in item for item in storage.queries)
+        assert any(
+            "FROM logs.logs" in item and "ORDER BY timestamp DESC" in item and "attributes_json" not in item
+            for item in storage.queries
+        )
+        assert any(
+            "FROM logs.logs" in item
+            and "ORDER BY timestamp DESC" in item
+            and "optimize_read_in_order = 1" in item
+            for item in storage.queries
+        )
+
+    def test_traces_topology_uses_fast_node_aggregation_when_no_parent_relations(self):
+        """当窗口内无 parent span 关系时，应走节点聚合快速路径并跳过重型明细扫描。"""
+        class StorageStub:
+            def __init__(self):
+                self.ch_client = object()
+                self.queries: List[str] = []
+
+            def execute_query(self, query: str):
+                condensed = " ".join(query.split())
+                self.queries.append(condensed)
+                if (
+                    "FROM system.columns" in condensed
+                    and "table = 'traces'" in condensed
+                    and "name = 'traces_namespace'" in condensed
+                ):
+                    return [{"cnt": 1}]
+                if (
+                    "SELECT parent_span_id FROM logs.traces" in condensed
+                    and "notEmpty(parent_span_id)" in condensed
+                    and "LIMIT 1" in condensed
+                ):
+                    return []
+                if "topK(1)(traces_namespace) AS namespace_top" in condensed:
+                    return [
+                        {
+                            "service_name": "frontend",
+                            "namespace_top": ["islap"],
+                            "span_count": 20,
+                            "avg_duration": 18.6,
+                            "error_count": 1,
+                            "trace_count": 5,
+                        }
+                    ]
+                if "SELECT trace_id, span_id, parent_span_id" in condensed:
+                    raise AssertionError("heavy traces detail query should not be executed")
+                return []
+
+            def get_edge_red_metrics(self, time_window: str = "1 HOUR", namespace: str = None):
+                _ = (time_window, namespace)
+                return {}
+
+        storage = StorageStub()
+        builder = HybridTopologyBuilder(storage)
+        builder.ENABLE_TRACES_FAST_PATH = True
+
+        result = builder._get_traces_topology(time_window="1 HOUR", namespace="islap")
+        assert len(result.get("edges") or []) == 0
+        nodes = result.get("nodes") or []
+        assert len(nodes) == 1
+        assert nodes[0]["id"] == "frontend"
+        assert nodes[0]["metrics"]["namespace"] == "islap"
+        assert nodes[0]["metrics"]["trace_count"] == 5
+
+        assert any(
+            "SELECT parent_span_id FROM logs.traces" in item and "LIMIT 1" in item
+            for item in storage.queries
+        )
+        assert any("topK(1)(traces_namespace) AS namespace_top" in item for item in storage.queries)
+
+    def test_time_window_fallback_records_are_capped(self):
+        """time_window 回退推断应只处理最新上限记录，避免过大样本拖慢请求。"""
+        class StorageStub:
+            def __init__(self):
+                self.ch_client = object()
+
+            def execute_query(self, query: str):
+                condensed = " ".join(query.split())
+                if "FROM logs.logs" in condensed and "ORDER BY timestamp DESC" in condensed:
+                    rows = []
+                    base = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
+                    for i in range(3000):
+                        rows.append(
+                            {
+                                "id": f"log-{i}",
+                                "timestamp": base,
+                                "service_name": "frontend" if i % 2 == 0 else "payment",
+                                "namespace": "islap",
+                                "message": "plain log without request id",
+                                "trace_id": "",
+                                "attributes_json": "{}",
+                            }
+                        )
+                    return rows
+                if "FROM logs.traces" in condensed:
+                    return []
+                if "FROM logs.metrics" in condensed:
+                    return []
+                return []
+
+            def get_edge_red_metrics(self, time_window: str = "1 HOUR", namespace: str = None):
+                _ = (time_window, namespace)
+                return {}
+
+        storage = StorageStub()
+        builder = HybridTopologyBuilder(storage)
+        builder.MAX_TIME_WINDOW_FALLBACK_RECORDS = 1000
+
+        observed = {"count": None}
+
+        def _fake_accumulate_time_window_fallback_edges(**kwargs):
+            observed["count"] = len(kwargs.get("fallback_records") or [])
+            return 0
+
+        with patch(
+            "graph.hybrid_topology.hybrid_utils.accumulate_time_window_fallback_edges",
+            side_effect=_fake_accumulate_time_window_fallback_edges,
+        ):
+            builder._infer_edges_from_logs(time_window="1 HOUR", namespace="islap")
+
+        assert observed["count"] == 1000

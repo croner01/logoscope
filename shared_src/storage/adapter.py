@@ -94,6 +94,17 @@ def _escape_sql_literal(value: str) -> str:
     return str(value).replace("'", "''")
 
 
+def _read_int_env(name: str, default_value: int) -> int:
+    """读取整数环境变量，异常时回退默认值。"""
+    raw = os.getenv(name, str(default_value))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default_value
+    return max(value, 1)
+
+
+CH_HTTP_TIMEOUT_SECONDS = _read_int_env("CH_HTTP_TIMEOUT_SECONDS", 30)
 _STATS_DEFAULT_WINDOW = _sanitize_interval(os.getenv("CH_STATS_TIME_WINDOW", "24 HOUR"), default_value="24 HOUR")
 _TOPOLOGY_DEFAULT_WINDOW = _sanitize_interval(os.getenv("CH_TOPOLOGY_TIME_WINDOW", "24 HOUR"), default_value="24 HOUR")
 
@@ -336,6 +347,21 @@ class StorageAdapter:
         user = self.ch_http_client['user']
         password = self.ch_http_client['password']
 
+        def _extract_insert_columns(insert_sql: str) -> List[str]:
+            """从 INSERT INTO ... (col1, col2) VALUES 语句中提取列名。"""
+            matched = re.search(
+                r"INSERT\s+INTO\s+[^(]+\((?P<columns>[^)]+)\)\s*VALUES\s*$",
+                str(insert_sql or "").strip(),
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if not matched:
+                return []
+            return [
+                col.strip().strip("`").strip('"')
+                for col in matched.group("columns").split(",")
+                if col.strip()
+            ]
+
         # 构建 SQL 查询
         if data:
             # INSERT 查询 - 使用 FORMAT JSONEachRow
@@ -343,13 +369,16 @@ class StorageAdapter:
             from datetime import datetime
 
             # 转换数据为 JSON 格式
+            insert_columns = _extract_insert_columns(query)
             formatted_data = []
             for row in data:
-                row_dict = {}
-                # 获取列名（从 INSERT 语句中解析）
-                if 'INSERT INTO logs' in query.upper():
-                    columns = ['id', 'timestamp', 'service_name', 'pod_name', 'namespace', 'node_name', 'level', 'message', 'trace_id', 'span_id', 'labels', 'host_ip']
-                    for i, col in enumerate(columns):
+                if isinstance(row, dict):
+                    row_dict = dict(row)
+                else:
+                    if not insert_columns:
+                        raise ValueError("Cannot parse INSERT columns for HTTP batch insert")
+                    row_dict = {}
+                    for i, col in enumerate(insert_columns):
                         val = row[i] if i < len(row) else ''
                         # 转换 datetime 为字符串
                         if isinstance(val, datetime):
@@ -358,7 +387,12 @@ class StorageAdapter:
                 formatted_data.append(row_dict)
 
             # 构建 INSERT 查询
-            insert_query = query.replace('VALUES', '') + ' FORMAT JSONEachRow'
+            insert_query = re.sub(
+                r"\bVALUES\s*$",
+                "",
+                str(query or "").strip(),
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip() + " FORMAT JSONEachRow"
             body = '\n'.join(json.dumps(row) for row in formatted_data)
 
             params = {
@@ -367,21 +401,25 @@ class StorageAdapter:
             }
 
             auth = (user, password) if password else None
-            response = requests.post(url, params=params, data=body, auth=auth, timeout=30)
+            response = requests.post(url, params=params, data=body, auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
         else:
             # SELECT 查询
             params = {
-                'query': f"{query} FORMAT JSONEachRow",
+                'query': f"{query} FORMAT JSON",
                 'database': database
             }
 
             auth = (user, password) if password else None
-            response = requests.get(url, params=params, auth=auth, timeout=30)
+            response = requests.get(url, params=params, auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
 
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-        return response.text
+        try:
+            import json
+            return json.loads(response.text)
+        except Exception:
+            return response.text
 
     def save_event(self, event: Dict[str, Any]) -> bool:
         """
@@ -491,7 +529,7 @@ class StorageAdapter:
             params = {'query': query, 'database': database}
             auth = (user, password) if password else None
 
-            response = requests.post(url, params=params, data=json.dumps(row), auth=auth, timeout=30)
+            response = requests.post(url, params=params, data=json.dumps(row), auth=auth, timeout=CH_HTTP_TIMEOUT_SECONDS)
 
             if response.status_code == 200:
                 logger.info(f"Event saved to ClickHouse (HTTP): {event.get('id', 'unknown')}")
@@ -933,13 +971,27 @@ class StorageAdapter:
             events = []
             for row in result:
                 if len(row) >= 10:
-                    # 解析labels JSON
+                    # 解析 labels JSON，避免异常静默吞掉影响排障
                     labels = {}
-                    try:
-                        if len(row) > 12 and row[12]:  # labels字段 (索引12)
-                            labels = json.loads(row[12])
-                    except:
-                        pass
+                    raw_labels = row[12] if len(row) > 12 else None
+                    if raw_labels:
+                        if isinstance(raw_labels, dict):
+                            labels = raw_labels
+                        elif isinstance(raw_labels, (str, bytes, bytearray)):
+                            try:
+                                labels = json.loads(raw_labels)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                logger.warning(
+                                    "Failed to parse labels JSON for event_id=%s: %s",
+                                    row[0],
+                                    exc,
+                                )
+                        else:
+                            logger.warning(
+                                "Unexpected labels type for event_id=%s: %s",
+                                row[0],
+                                type(raw_labels).__name__,
+                            )
 
                     # 将 ClickHouse DateTime64 格式转换为 RFC 3339
                     ts_datetime64 = row[1]  # 已经是字符串格式
@@ -1278,9 +1330,11 @@ class StorageAdapter:
             # 构建 PREWHERE 条件
             prewhere_conditions = [f"timestamp > now() - INTERVAL {_STATS_DEFAULT_WINDOW}"]
             if service_name:
-                prewhere_conditions.append(f"service_name = '{service_name}'")
+                safe_service_name = _escape_sql_literal(service_name)
+                prewhere_conditions.append(f"service_name = '{safe_service_name}'")
             if metric_name:
-                prewhere_conditions.append(f"metric_name = '{metric_name}'")
+                safe_metric_name = _escape_sql_literal(metric_name)
+                prewhere_conditions.append(f"metric_name = '{safe_metric_name}'")
 
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
             safe_limit = _sanitize_limit(limit, default_value=100, max_value=10000)
@@ -1298,13 +1352,27 @@ class StorageAdapter:
             metrics = []
             for row in result:
                 if len(row) >= 5:
-                    # 解析attributes_json作为labels
+                    # 解析 attributes_json 作为 labels，保留可观测性
                     labels = {}
-                    try:
-                        if row[3]:  # attributes_json字段
-                            labels = json.loads(row[3])
-                    except:
-                        pass
+                    raw_attributes = row[3]
+                    if raw_attributes:
+                        if isinstance(raw_attributes, dict):
+                            labels = raw_attributes
+                        elif isinstance(raw_attributes, (str, bytes, bytearray)):
+                            try:
+                                labels = json.loads(raw_attributes)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                logger.warning(
+                                    "Failed to parse metric attributes JSON for metric=%s: %s",
+                                    row[0],
+                                    exc,
+                                )
+                        else:
+                            logger.warning(
+                                "Unexpected metric attributes type for metric=%s: %s",
+                                row[0],
+                                type(raw_attributes).__name__,
+                            )
 
                     metrics.append({
                         'metric_name': row[0],
@@ -1341,9 +1409,11 @@ class StorageAdapter:
             # 构建 PREWHERE 条件
             prewhere_conditions = [f"timestamp > now() - INTERVAL {_STATS_DEFAULT_WINDOW}"]
             if service_name:
-                prewhere_conditions.append(f"service_name = '{service_name}'")
+                safe_service_name = _escape_sql_literal(service_name)
+                prewhere_conditions.append(f"service_name = '{safe_service_name}'")
             if trace_id:
-                prewhere_conditions.append(f"trace_id = '{trace_id}'")
+                safe_trace_id = _escape_sql_literal(trace_id)
+                prewhere_conditions.append(f"trace_id = '{safe_trace_id}'")
 
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
             safe_limit = _sanitize_limit(limit, default_value=100, max_value=10000)
@@ -1364,11 +1434,27 @@ class StorageAdapter:
                 if len(row) >= 9:
                     # 解析tags JSON
                     tags = {}
-                    try:
-                        if row[8]:  # tags字段
-                            tags = json.loads(row[8])
-                    except:
-                        pass
+                    raw_tags = row[8]
+                    if raw_tags:
+                        if isinstance(raw_tags, dict):
+                            tags = raw_tags
+                        elif isinstance(raw_tags, (str, bytes, bytearray)):
+                            try:
+                                tags = json.loads(raw_tags)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                logger.warning(
+                                    "Failed to parse trace tags JSON for trace_id=%s span_id=%s: %s",
+                                    row[0],
+                                    row[1],
+                                    exc,
+                                )
+                        else:
+                            logger.warning(
+                                "Unexpected trace tags type for trace_id=%s span_id=%s: %s",
+                                row[0],
+                                row[1],
+                                type(raw_tags).__name__,
+                            )
 
                     traces.append({
                         'trace_id': row[0],
@@ -1404,11 +1490,12 @@ class StorageAdapter:
                 logger.warning("ClickHouse client not available")
                 return []
 
+            safe_trace_id = _escape_sql_literal(trace_id)
             query = f"""
             SELECT trace_id, span_id, parent_span_id, service_name, operation_name,
                    toString(timestamp) as start_time_str, duration_ms, status, attributes_json AS tags
             FROM logs.traces
-            PREWHERE trace_id = '{trace_id}'
+            PREWHERE trace_id = '{safe_trace_id}'
             ORDER BY timestamp ASC
             """
             result = self.ch_client.execute(query)
@@ -1418,11 +1505,27 @@ class StorageAdapter:
                 if len(row) >= 9:
                     # 解析 tags JSON
                     tags = {}
-                    try:
-                        if row[8]:  # tags 字段
-                            tags = json.loads(row[8])
-                    except:
-                        pass
+                    raw_tags = row[8]
+                    if raw_tags:
+                        if isinstance(raw_tags, dict):
+                            tags = raw_tags
+                        elif isinstance(raw_tags, (str, bytes, bytearray)):
+                            try:
+                                tags = json.loads(raw_tags)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                logger.warning(
+                                    "Failed to parse span tags JSON for trace_id=%s span_id=%s: %s",
+                                    row[0],
+                                    row[1],
+                                    exc,
+                                )
+                        else:
+                            logger.warning(
+                                "Unexpected span tags type for trace_id=%s span_id=%s: %s",
+                                row[0],
+                                row[1],
+                                type(raw_tags).__name__,
+                            )
 
                     spans.append({
                         'trace_id': row[0],
@@ -1464,15 +1567,19 @@ class StorageAdapter:
             # 转换时间戳
             from utils.timestamp import rfc3339_to_datetime64, datetime64_to_rfc3339
             ts_datetime64 = rfc3339_to_datetime64(timestamp)
+            safe_pod_name = _escape_sql_literal(pod_name)
+            safe_timestamp = _escape_sql_literal(ts_datetime64)
+            safe_before_count = _sanitize_limit(before_count, default_value=5, max_value=1000)
+            safe_after_count = _sanitize_limit(after_count, default_value=5, max_value=1000)
 
             # 查询之前的日志
             before_query = f"""
             SELECT id, toString(timestamp) as timestamp_str, service_name, level, message
             FROM logs.logs
-            PREWHERE pod_name = '{pod_name}'
-                AND timestamp < '{ts_datetime64}'
+            PREWHERE pod_name = '{safe_pod_name}'
+                AND timestamp < '{safe_timestamp}'
             ORDER BY timestamp DESC
-            LIMIT {before_count}
+            LIMIT {safe_before_count}
             """
             before_result = self.ch_client.execute(before_query)
             before_logs = []
@@ -1491,10 +1598,10 @@ class StorageAdapter:
             after_query = f"""
             SELECT id, toString(timestamp) as timestamp_str, service_name, level, message
             FROM logs.logs
-            PREWHERE pod_name = '{pod_name}'
-                AND timestamp > '{ts_datetime64}'
+            PREWHERE pod_name = '{safe_pod_name}'
+                AND timestamp > '{safe_timestamp}'
             ORDER BY timestamp ASC
-            LIMIT {after_count}
+            LIMIT {safe_after_count}
             """
             after_result = self.ch_client.execute(after_query)
             after_logs = []
@@ -1513,8 +1620,8 @@ class StorageAdapter:
             current_query = f"""
             SELECT id, toString(timestamp) as timestamp_str, service_name, pod_name, namespace, level, message
             FROM logs.logs
-            PREWHERE pod_name = '{pod_name}'
-                AND timestamp = '{ts_datetime64}'
+            PREWHERE pod_name = '{safe_pod_name}'
+                AND timestamp = '{safe_timestamp}'
             LIMIT 1
             """
             current_result = self.ch_client.execute(current_query)
@@ -1755,36 +1862,8 @@ class StorageAdapter:
 
                     # 如果有 parent_span_id，说明这是子服务，存在调用关系
                     if parent_span_id and parent_span_id != "":
-                        # 这里简化处理：假设 parent_span_id 对应的服务
-                        # 实际可能需要额外的查询来获取父服务名
-                        # 暂时使用 "unknown" 作为占位
-                        parent_service = "unknown"
-                        if parent_service not in nodes:
-                            nodes[parent_service] = {
-                                "id": parent_service,
-                                "label": parent_service,
-                                "type": "service",
-                                "metrics": {
-                                    "request_count": 0,
-                                    "error_count": 0,
-                                    "avg_duration": 0,
-                                    "error_rate": 0
-                                }
-                            }
-
-                        # 添加边
-                        edge_id = f"{parent_service}-{service_name}"
-                        edges.append({
-                            "id": edge_id,
-                            "source": parent_service,
-                            "target": service_name,
-                            "label": "calls",
-                            "metrics": {
-                                "request_count": call_count,
-                                "avg_duration": avg_duration,
-                                "error_rate": error_count / call_count if call_count > 0 else 0
-                            }
-                        })
+                        # parent_span_id 无法直接反查父服务名，避免构造 unknown 假边污染拓扑。
+                        continue
 
             # 计算每个节点的错误率和平均延迟
             for node in nodes.values():
@@ -1964,26 +2043,67 @@ class StorageAdapter:
         Returns:
             List[Any] 或 List[Dict[str, Any]]: 查询结果
         """
-        if not self.ch_client:
+        if not self.ch_client and not self.ch_http_client:
             logger.warning("ClickHouse client not available")
             return []
 
-        try:
-            if as_dict:
-                result = self.ch_client.execute(
-                    query, 
-                    params or {},
-                    with_column_types=True
-                )
-                if not result or len(result) < 2:
-                    return []
-                rows, columns = result
-                column_names = [col[0] for col in columns]
-                return [dict(zip(column_names, row)) for row in rows]
-            else:
+        if self.ch_client:
+            try:
+                if as_dict:
+                    result = self.ch_client.execute(
+                        query,
+                        params or {},
+                        with_column_types=True
+                    )
+                    if not result or len(result) < 2:
+                        return []
+                    rows, columns = result
+                    column_names = [col[0] for col in columns]
+                    return [dict(zip(column_names, row)) for row in rows]
                 return self.ch_client.execute(query, params or {})
+            except Exception as e:
+                logger.error(f"Error executing query with native client: {e}")
+                # 若存在 HTTP 客户端，继续走回退逻辑。
+                if not self.ch_http_client:
+                    return []
+
+        try:
+            def _to_clickhouse_literal(value: Any) -> str:
+                if value is None:
+                    return "NULL"
+                if isinstance(value, bool):
+                    return "1" if value else "0"
+                if isinstance(value, (int, float)):
+                    return str(value)
+                if isinstance(value, datetime):
+                    escaped_time = value.strftime("%Y-%m-%d %H:%M:%S.%f")
+                    return f"'{escaped_time}'"
+                escaped = str(value)
+                escaped = escaped.replace("\\", "\\\\")
+                escaped = escaped.replace("'", "\\'")
+                escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+                return f"'{escaped}'"
+
+            final_query = query
+            if params:
+                for key, value in params.items():
+                    literal = _to_clickhouse_literal(value)
+                    typed_pattern = r'\{' + re.escape(key) + r':[^}]+\}'
+                    final_query = re.sub(typed_pattern, lambda _: literal, final_query)
+                    plain_pattern = r'\{' + re.escape(key) + r'\}'
+                    final_query = re.sub(plain_pattern, lambda _: literal, final_query)
+
+            result = self._execute_clickhouse_http(final_query)
+            if isinstance(result, dict):
+                rows = result.get("data")
+                if isinstance(rows, list):
+                    return rows
+                return []
+            if isinstance(result, list):
+                return result
+            return []
         except Exception as e:
-            logger.error(f"Error executing query: {e}")
+            logger.error(f"Error executing query with HTTP client: {e}")
             return []
 
     def execute_neo4j_query(self, query: str, parameters: Dict = None) -> List[Dict]:

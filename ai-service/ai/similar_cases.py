@@ -13,8 +13,9 @@ Date: 2026-02-22
 import os
 import json
 import logging
+import time
 from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 import re
@@ -325,9 +326,17 @@ class CaseStore:
             or "logs"
         )
         self.clickhouse_table = os.getenv("AI_CASE_STORE_CH_TABLE", f"{default_database}.ai_cases")
+        self.clickhouse_latest_view = os.getenv(
+            "AI_CASE_STORE_LATEST_VIEW",
+            f"{default_database}.v_ai_cases_latest",
+        )
         self.case_change_history_table = os.getenv(
             "AI_CASE_CHANGE_HISTORY_CH_TABLE",
             f"{default_database}.ai_case_change_history",
+        )
+        self._read_source_cache_ttl_seconds = max(
+            5,
+            int(os.getenv("AI_CASE_READ_SOURCE_CACHE_TTL_SECONDS", "30")),
         )
         env_enabled = os.getenv("AI_CASE_STORE_PERSIST", "true").strip().lower() == "true"
         self.persistence_enabled = env_enabled if persistence_enabled is None else persistence_enabled
@@ -337,6 +346,8 @@ class CaseStore:
             or "/tmp/logoscope-ai-cases.json"
         )
         self._case_change_history: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._case_read_source_cache: Optional[Tuple[str, bool]] = None
+        self._case_read_source_cache_checked_at = 0.0
         if self._is_clickhouse_available():
             self._ensure_clickhouse_table()
             self._ensure_case_change_history_table()
@@ -345,6 +356,8 @@ class CaseStore:
     def attach_storage(self, storage_adapter) -> None:
         """挂载 storage adapter 并启用 ClickHouse 案例库。"""
         self.storage = storage_adapter
+        self._case_read_source_cache = None
+        self._case_read_source_cache_checked_at = 0.0
         if self._is_clickhouse_available():
             self._ensure_clickhouse_table()
             self._ensure_case_change_history_table()
@@ -355,9 +368,51 @@ class CaseStore:
         return bool(self.storage and getattr(self.storage, "ch_client", None))
 
     @staticmethod
+    def _split_table_name(table_name: str) -> Tuple[str, str]:
+        normalized = str(table_name or "").strip()
+        if "." in normalized:
+            db_name, tbl_name = normalized.split(".", 1)
+            return db_name, tbl_name
+        return "default", normalized
+
+    def _table_exists(self, table_name: str) -> bool:
+        if not self._is_clickhouse_available():
+            return False
+        db_name, tbl_name = self._split_table_name(table_name)
+        try:
+            rows = self.storage.ch_client.execute(
+                """
+                SELECT count()
+                FROM system.tables
+                WHERE database = %(database)s
+                  AND name = %(name)s
+                """,
+                {"database": db_name, "name": tbl_name},
+            )
+            return bool(rows and rows[0] and int(rows[0][0]) > 0)
+        except Exception:
+            return False
+
+    def _get_case_read_source(self) -> Tuple[str, bool]:
+        """
+        案例读取优先使用 latest 视图；如果不存在则回退 FINAL 表查询。
+        """
+        now_ts = time.time()
+        cached = self._case_read_source_cache
+        if cached is not None and (now_ts - self._case_read_source_cache_checked_at) < self._read_source_cache_ttl_seconds:
+            return cached
+
+        if self._table_exists(self.clickhouse_latest_view):
+            self._case_read_source_cache = (self.clickhouse_latest_view, False)
+        else:
+            self._case_read_source_cache = (self.clickhouse_table, True)
+        self._case_read_source_cache_checked_at = now_ts
+        return self._case_read_source_cache
+
+    @staticmethod
     def _now_iso() -> str:
         """返回当前 UTC ISO 时间。"""
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime:
@@ -366,13 +421,13 @@ class CaseStore:
             return value
         text = str(value or "").strip()
         if not text:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc).replace(tzinfo=None)
         normalized = text.replace("Z", "+00:00")
         try:
             parsed = datetime.fromisoformat(normalized)
             return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
         except ValueError:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     def _to_iso(value: Any) -> str:
@@ -859,14 +914,16 @@ class CaseStore:
         if not self._is_clickhouse_available():
             return
         query_limit = max(1, int(limit))
+        source_table, use_final = self._get_case_read_source()
+        final_clause = "FINAL" if use_final else ""
         select_sql = f"""
         SELECT
             case_id, problem_type, severity, summary, log_content, service_name,
             root_causes_json, solutions_json, context_json, tags_json, similarity_features_json,
             resolved, resolution, created_at, updated_at, resolved_at,
             llm_provider, llm_model, llm_metadata_json, source, is_deleted
-        FROM {self.clickhouse_table}
-        FINAL
+        FROM {source_table}
+        {final_clause}
         ORDER BY updated_at DESC
         LIMIT {query_limit}
         """
@@ -1173,6 +1230,364 @@ class SimilarCaseRecommender:
 
 _case_store: Optional[CaseStore] = None
 _recommender: Optional[SimilarCaseRecommender] = None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 5 additions: RemediationStep, RemediationPlan, FaultMatcher
+# mark_case_verified() extension on CaseStore
+# ──────────────────────────────────────────────────────────────────────────────
+
+import hashlib as _hashlib
+
+
+@dataclass
+class RemediationStep:
+    """
+    One ordered step in a remediation plan.
+
+    ``action`` is a short human-readable command or instruction.
+    ``verification`` describes how to confirm the step succeeded.
+    ``rollback``    describes how to undo the step if it made things worse.
+    ``risk_level``  is one of "low" | "medium" | "high".
+    ``auto_fixable`` marks whether this step can be run autonomously after
+                      explicit human authorization.
+    """
+    action: str
+    verification: str = ""
+    rollback: str = ""
+    risk_level: str = "low"
+    auto_fixable: bool = False
+    estimated_duration_s: int = 0
+    requires_service_restart: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "verification": self.verification,
+            "rollback": self.rollback,
+            "risk_level": self.risk_level,
+            "auto_fixable": self.auto_fixable,
+            "estimated_duration_s": self.estimated_duration_s,
+            "requires_service_restart": self.requires_service_restart,
+        }
+
+
+@dataclass
+class RemediationPlan:
+    """
+    Structured fix plan produced after a successful diagnostic run.
+
+    Stored in the knowledge base as part of a ``Case`` so that future
+    similar faults can be matched and (with human authorization) auto-fixed.
+
+    ``fault_fingerprint`` is a SHA-256 of
+    (sorted(components) + error_category + sorted(keywords) + service)
+    used for fast similarity matching.
+
+    ``auto_fix_authorized`` is False by default; set to True via the
+    POST /api/ai/remediation/{case_id}/authorize-auto-fix endpoint after
+    a human has verified the plan is correct.
+    """
+    plan_id: str
+    case_id: str
+    run_id: str
+    service: str
+    error_category: str
+    components: List[str] = field(default_factory=list)
+    keywords: List[str] = field(default_factory=list)
+    steps: List[RemediationStep] = field(default_factory=list)
+    overall_risk: str = "low"
+    estimated_total_duration_s: int = 0
+    verification_summary: str = ""
+    rollback_summary: str = ""
+    # Meta
+    fault_fingerprint: str = ""
+    created_at: str = ""
+    human_verified: bool = False
+    verified_at: str = ""
+    verified_by: str = ""
+    verification_notes: str = ""
+    auto_fix_authorized: bool = False
+    authorized_by: str = ""
+    authorized_at: str = ""
+    execution_count: int = 0
+    last_executed_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.fault_fingerprint:
+            self.fault_fingerprint = self._compute_fingerprint()
+        if not self.created_at:
+            self.created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if not self.plan_id:
+            self.plan_id = f"rp-{uuid.uuid4().hex[:16]}"
+
+    def _compute_fingerprint(self) -> str:
+        """
+        Compute a stable fault fingerprint for similarity matching.
+
+        SHA-256 of canonical JSON of
+        (sorted_components, error_category, sorted_keywords, service).
+        """
+        payload = {
+            "components": sorted(c.lower() for c in self.components),
+            "error_category": self.error_category.lower(),
+            "keywords": sorted(k.lower() for k in self.keywords),
+            "service": self.service.lower(),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return _hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "case_id": self.case_id,
+            "run_id": self.run_id,
+            "service": self.service,
+            "error_category": self.error_category,
+            "components": list(self.components),
+            "keywords": list(self.keywords),
+            "steps": [s.to_dict() for s in self.steps],
+            "overall_risk": self.overall_risk,
+            "estimated_total_duration_s": self.estimated_total_duration_s,
+            "verification_summary": self.verification_summary,
+            "rollback_summary": self.rollback_summary,
+            "fault_fingerprint": self.fault_fingerprint,
+            "created_at": self.created_at,
+            "human_verified": self.human_verified,
+            "verified_at": self.verified_at,
+            "verified_by": self.verified_by,
+            "verification_notes": self.verification_notes,
+            "auto_fix_authorized": self.auto_fix_authorized,
+            "authorized_by": self.authorized_by,
+            "authorized_at": self.authorized_at,
+            "execution_count": self.execution_count,
+            "last_executed_at": self.last_executed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RemediationPlan":
+        steps_raw = data.get("steps") or []
+        steps = [
+            RemediationStep(**{
+                k: v for k, v in s.items()
+                if k in RemediationStep.__dataclass_fields__
+            })
+            if isinstance(s, dict) else RemediationStep(action=str(s))
+            for s in steps_raw
+        ]
+        return cls(
+            plan_id=str(data.get("plan_id") or ""),
+            case_id=str(data.get("case_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            service=str(data.get("service") or ""),
+            error_category=str(data.get("error_category") or ""),
+            components=list(data.get("components") or []),
+            keywords=list(data.get("keywords") or []),
+            steps=steps,
+            overall_risk=str(data.get("overall_risk") or "low"),
+            estimated_total_duration_s=int(data.get("estimated_total_duration_s") or 0),
+            verification_summary=str(data.get("verification_summary") or ""),
+            rollback_summary=str(data.get("rollback_summary") or ""),
+            fault_fingerprint=str(data.get("fault_fingerprint") or ""),
+            created_at=str(data.get("created_at") or ""),
+            human_verified=bool(data.get("human_verified")),
+            verified_at=str(data.get("verified_at") or ""),
+            verified_by=str(data.get("verified_by") or ""),
+            verification_notes=str(data.get("verification_notes") or ""),
+            auto_fix_authorized=bool(data.get("auto_fix_authorized")),
+            authorized_by=str(data.get("authorized_by") or ""),
+            authorized_at=str(data.get("authorized_at") or ""),
+            execution_count=int(data.get("execution_count") or 0),
+            last_executed_at=str(data.get("last_executed_at") or ""),
+        )
+
+
+def mark_case_verified(
+    store: "CaseStore",
+    case_id: str,
+    *,
+    verified_by: str = "human",
+    verification_notes: str = "",
+    verification_result: str = "verified_correct",
+) -> Optional["Case"]:
+    """
+    Mark a case's remediation plan as human-verified.
+
+    Updates ``Case.verification_result``, ``Case.verification_notes``,
+    and ``Case.knowledge_version`` (incremented).  The updated case is
+    persisted back to the store.
+
+    Returns the updated Case, or None if not found.
+    """
+    existing = store.get_case(case_id)
+    if not existing:
+        logger.warning("mark_case_verified: case %r not found", case_id)
+        return None
+
+    updated = Case(**existing.to_dict())
+    updated.verification_result = verification_result
+    updated.verification_notes = verification_notes
+    updated.last_editor = verified_by
+    updated.knowledge_version = (existing.knowledge_version or 1) + 1
+    updated.updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Persist using the standard add_case path (upserts via ReplacingMergeTree)
+    store.add_case(updated, persist=True, sync_clickhouse=True)
+
+    logger.info(
+        "mark_case_verified: case %r marked as %r (version=%d) by %r",
+        case_id,
+        verification_result,
+        updated.knowledge_version,
+        verified_by,
+    )
+    return updated
+
+
+class FaultMatcher:
+    """
+    Match an incoming fault against stored remediation plans to find
+    a previously verified, human-authorized auto-fix.
+
+    Uses fault_fingerprint for exact matching, then falls back to
+    feature-based similarity scoring.
+    """
+
+    # Minimum similarity score to suggest a plan (even without exact fingerprint)
+    _MIN_SIMILARITY = 0.65
+
+    def __init__(self, case_store: "CaseStore"):
+        self.case_store = case_store
+
+    def find_authorized_auto_fix(
+        self,
+        *,
+        service: str,
+        error_category: str,
+        components: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+        log_content: str = "",
+    ) -> Optional[RemediationPlan]:
+        """
+        Search for a verified, auto-fix-authorized remediation plan that
+        matches the current fault.
+
+        Matching priority:
+          1. Exact fault_fingerprint match on an authorized plan
+          2. Feature similarity ≥ _MIN_SIMILARITY on an authorized plan
+
+        Returns None if no authorized plan is found.
+        """
+        components = list(components or [])
+        keywords = list(keywords or [])
+
+        # Build the fingerprint for the incoming fault
+        payload = {
+            "components": sorted(c.lower() for c in components),
+            "error_category": error_category.lower(),
+            "keywords": sorted(k.lower() for k in keywords),
+            "service": service.lower(),
+        }
+        target_fingerprint = _hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        best_plan: Optional[RemediationPlan] = None
+        best_score: float = 0.0
+
+        all_cases = list(self.case_store._cases.values())
+        for case in all_cases:
+            if case.is_deleted:
+                continue
+
+            # Extract remediation plan from case context
+            plan_dict = (case.context or {}).get("remediation_plan")
+            if not isinstance(plan_dict, dict):
+                continue
+
+            plan = RemediationPlan.from_dict(plan_dict)
+
+            # Must be human-verified AND auto-fix-authorized
+            if not plan.human_verified or not plan.auto_fix_authorized:
+                continue
+
+            # Exact fingerprint match — best possible
+            if plan.fault_fingerprint == target_fingerprint:
+                logger.info(
+                    "FaultMatcher: exact fingerprint match for case %r plan %r",
+                    case.id,
+                    plan.plan_id,
+                )
+                return plan
+
+            # Feature similarity scoring
+            score = self._compute_plan_similarity(
+                plan=plan,
+                service=service,
+                error_category=error_category,
+                components=components,
+                keywords=keywords,
+                log_content=log_content,
+                case=case,
+            )
+            if score >= self._MIN_SIMILARITY and score > best_score:
+                best_score = score
+                best_plan = plan
+
+        if best_plan:
+            logger.info(
+                "FaultMatcher: similarity match (score=%.2f) for plan %r",
+                best_score,
+                best_plan.plan_id,
+            )
+
+        return best_plan
+
+    def _compute_plan_similarity(
+        self,
+        *,
+        plan: RemediationPlan,
+        service: str,
+        error_category: str,
+        components: List[str],
+        keywords: List[str],
+        log_content: str,
+        case: "Case",
+    ) -> float:
+        """Compute a similarity score [0,1] between the fault and a stored plan."""
+        score = 0.0
+
+        # Service match
+        if service and plan.service and service.lower() == plan.service.lower():
+            score += 0.30
+
+        # Error category match
+        if error_category and plan.error_category:
+            if error_category.lower() == plan.error_category.lower():
+                score += 0.25
+
+        # Component overlap
+        if components and plan.components:
+            overlap = set(c.lower() for c in components) & set(
+                c.lower() for c in plan.components
+            )
+            score += min(len(overlap) * 0.08, 0.24)
+
+        # Keyword overlap
+        if keywords and plan.keywords:
+            overlap = set(k.lower() for k in keywords) & set(
+                k.lower() for k in plan.keywords
+            )
+            score += min(len(overlap) * 0.05, 0.15)
+
+        # Log content feature similarity (use existing FeatureExtractor)
+        if log_content and case.log_content:
+            features_target = FeatureExtractor.extract_features(log_content, service)
+            features_case = FeatureExtractor.extract_features(case.log_content, case.service_name)
+            feat_score, _ = FeatureExtractor.compute_similarity(features_target, features_case)
+            score += feat_score * 0.10
+
+        return min(score, 1.0)
 
 
 def get_case_store(storage_adapter=None) -> CaseStore:

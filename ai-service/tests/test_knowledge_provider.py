@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from ai.knowledge_provider import KnowledgeGateway
+from ai.knowledge_provider import KnowledgeGateway, RAGFlowKnowledgeProvider
 
 
 def _build_gateway(provider=None) -> KnowledgeGateway:
@@ -142,6 +142,32 @@ class TestSearchBehavior:
         assert case2["similarity_score"] == pytest.approx(0.92)
         assert case2["source_backend"] == "external"
 
+
+
+
+    def test_search_remote_only_uses_remote_results(self):
+        provider = Mock()
+        provider.search_cases.return_value = [
+            {
+                "id": "ext-9",
+                "summary": "gateway timeout on remote kb",
+                "similarity_score": 0.88,
+                "problem_type": "network",
+                "service_name": "api-gateway",
+            }
+        ]
+        gateway = _build_gateway(provider=provider)
+        gateway._local_search = Mock(return_value=[
+            {"id": "case-1", "summary": "local should be skipped", "similarity_score": 0.5, "source_backend": "local"}
+        ])
+        gateway.get_provider_status = Mock(return_value={"remote_available": True})
+
+        result = gateway.search(query="timeout", retrieval_mode="remote_only", top_k=5)
+
+        gateway._local_search.assert_not_called()
+        assert result["sources"] == {"local": 0, "external": 1}
+        assert result["total"] == 1
+        assert result["cases"][0]["source_backend"] == "external"
 
 class TestUpsertRemoteModes:
     """upsert_remote_if_needed behavior."""
@@ -310,9 +336,87 @@ class TestProviderSelection:
             {
                 "KB_REMOTE_PROVIDER": "ragflow",
                 "KB_REMOTE_BASE_URL": "http://ragflow:9380",
+                "KB_RAGFLOW_DATASET_ID": "dataset-001",
             },
             clear=False,
         ):
             gateway = KnowledgeGateway(storage_adapter=None)
             assert gateway.provider is not None
             assert gateway.provider.name == "ragflow"
+            assert isinstance(gateway.provider, RAGFlowKnowledgeProvider)
+
+
+class TestRAGFlowProvider:
+    """native RAGFlow provider behavior."""
+
+    def test_health_requires_dataset_id(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "KB_REMOTE_BASE_URL": "http://ragflow:9380",
+                "KB_REMOTE_API_KEY": "token",
+            },
+            clear=True,
+        ):
+            provider = RAGFlowKnowledgeProvider()
+
+        health = provider.health()
+
+        assert health["configured"] is False
+        assert health["available"] is False
+        assert "DATASET_ID" in health["message"]
+
+    def test_health_rejects_non_zero_business_code(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "KB_REMOTE_BASE_URL": "http://ragflow:9380",
+                "KB_REMOTE_API_KEY": "token",
+                "KB_RAGFLOW_DATASET_ID": "dataset-001",
+            },
+            clear=True,
+        ):
+            provider = RAGFlowKnowledgeProvider()
+
+        provider._request_json = Mock(return_value=(200, {"code": 100, "message": "NotFound"}))
+
+        health = provider.health()
+
+        assert health["configured"] is True
+        assert health["available"] is False
+        assert "NotFound" in health["message"]
+
+    def test_upsert_case_uses_native_document_flow(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "KB_REMOTE_BASE_URL": "http://ragflow:9380",
+                "KB_REMOTE_API_KEY": "token",
+                "KB_RAGFLOW_DATASET_ID": "dataset-001",
+            },
+            clear=True,
+        ):
+            provider = RAGFlowKnowledgeProvider()
+
+        provider._upload_document = Mock(return_value="doc-new")
+        provider._update_document_config = Mock()
+        provider._trigger_chunk_parse = Mock()
+        provider._delete_document_best_effort = Mock()
+
+        result = provider.upsert_case(
+            {
+                "id": "case-1",
+                "summary": "timeout",
+                "service_name": "query-service",
+                "problem_type": "timeout",
+                "severity": "high",
+                "external_doc_id": "doc-old",
+            }
+        )
+
+        assert result["doc_id"] == "doc-new"
+        assert result["dataset_id"] == "dataset-001"
+        provider._upload_document.assert_called_once()
+        provider._update_document_config.assert_called_once()
+        provider._trigger_chunk_parse.assert_called_once_with("doc-new")
+        provider._delete_document_best_effort.assert_called_once_with("doc-old")

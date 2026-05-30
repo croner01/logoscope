@@ -169,6 +169,22 @@ class TestSaveSnapshot:
         with pytest.raises(Exception, match="Insert failed"):
             manager.save_snapshot(sample_topology)
 
+    def test_save_snapshot_invalid_generated_at_logs_warning(self, manager, mock_storage, sample_topology, caplog):
+        """generated_at 非法时应记录 warning 并回退到当前时间。"""
+        sample_topology["metadata"]["generated_at"] = "invalid-time-format"
+        caplog.set_level("WARNING")
+
+        snapshot_id = manager.save_snapshot(sample_topology)
+
+        assert snapshot_id is not None
+        call_args = mock_storage.ch_client.execute.call_args[0][1]
+        data = call_args[0]
+        assert isinstance(data["timestamp"], datetime)
+        assert any(
+            "Failed to parse topology generated_at timestamp" in record.message
+            for record in caplog.records
+        )
+
 
 class TestGetSnapshot:
     """测试快照查询功能"""

@@ -13,7 +13,29 @@ import { formatTimeCST, formatTimeUTC, formatDuration } from '../utils/formatter
 import { Search, RefreshCw, X, Clock, AlertCircle, FileText, Network, BrainCircuit } from 'lucide-react';
 import TraceTimeline from '../components/traces/TraceTimeline';
 
-const resolveSpanDurationMs = (span: any): number => {
+interface TraceItem {
+  trace_id: string;
+  service_name: string;
+  operation_name: string;
+  start_time: string;
+  duration_ms: number;
+  status_code?: string;
+  status?: string;
+}
+
+interface SpanItem {
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string;
+  service_name: string;
+  operation_name: string;
+  start_time: string;
+  duration_ms: number;
+  status: string;
+  tags: Record<string, unknown>;
+}
+
+const resolveSpanDurationMs = (span: SpanItem | null | undefined): number => {
   const direct = Number(span?.duration_ms);
   if (Number.isFinite(direct) && direct > 0) {
     return direct;
@@ -43,25 +65,80 @@ const resolveSpanDurationMs = (span: any): number => {
   return 0;
 };
 
+const DEFAULT_TRACE_TIME_WINDOW = '24 HOUR';
+
+const TRACE_TIME_WINDOW_OPTIONS = [
+  '15 MINUTE',
+  '30 MINUTE',
+  '1 HOUR',
+  '6 HOUR',
+  '24 HOUR',
+  '7 DAY',
+];
+
+const toIsoTimeOrUndefined = (value: string): string | undefined => {
+  const text = String(value || '').trim();
+  if (!text) {
+    return undefined;
+  }
+  const dt = new Date(text);
+  if (Number.isNaN(dt.getTime())) {
+    return undefined;
+  }
+  return dt.toISOString();
+};
+
 const TracesExplorer: React.FC = () => {
   const location = useLocation();
   const navigation = useNavigation();
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedTrace, setSelectedTrace] = useState<any>(null);
-  const [selectedSpan, setSelectedSpan] = useState<any>(null);
+  const [selectedTrace, setSelectedTrace] = useState<TraceItem | null>(null);
+  const [selectedSpan, setSelectedSpan] = useState<SpanItem | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [limit, setLimit] = useState(100);
+  const [pageSize, setPageSize] = useState(200);
+  const [page, setPage] = useState(1);
+  const [timeWindow, setTimeWindow] = useState(DEFAULT_TRACE_TIME_WINDOW);
+  const [startTimeInput, setStartTimeInput] = useState('');
+  const [endTimeInput, setEndTimeInput] = useState('');
   const queryParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
   const serviceFilter = queryParams.get('service') || undefined;
   const traceIdFilter = queryParams.get('trace_id') || undefined;
+  const tracesQuery = useMemo(() => {
+    const startTime = toIsoTimeOrUndefined(startTimeInput);
+    const endTime = toIsoTimeOrUndefined(endTimeInput);
+    const query: Record<string, unknown> = {
+      limit: pageSize,
+      offset: Math.max((page - 1) * pageSize, 0),
+      service_name: serviceFilter,
+      trace_id: traceIdFilter,
+      start_time: startTime,
+      end_time: endTime,
+    };
+    if (!startTime && !endTime) {
+      query.time_window = timeWindow;
+    }
+    return query;
+  }, [endTimeInput, page, pageSize, serviceFilter, startTimeInput, timeWindow, traceIdFilter]);
+  const statsQuery = useMemo(() => {
+    const startTime = toIsoTimeOrUndefined(startTimeInput);
+    const endTime = toIsoTimeOrUndefined(endTimeInput);
+    const query: Record<string, unknown> = {
+      start_time: startTime,
+      end_time: endTime,
+    };
+    if (!startTime && !endTime) {
+      query.time_window = timeWindow;
+    }
+    return query;
+  }, [endTimeInput, startTimeInput, timeWindow]);
 
-  const { data, loading, error, refetch } = useTraces({
-    limit,
-    service_name: serviceFilter,
-    trace_id: traceIdFilter,
-  });
-  const { data: statsData } = useTraceStats();
+  const { data, loading, error, refetch } = useTraces(tracesQuery);
+  const { data: statsData } = useTraceStats(statsQuery);
   const { data: spansData, loading: spansLoading } = useTraceSpans(selectedTrace?.trace_id || null);
+
+  useEffect(() => {
+    setPage(1);
+  }, [serviceFilter, traceIdFilter, pageSize, timeWindow, startTimeInput, endTimeInput]);
 
   useEffect(() => {
     if (traceIdFilter) {
@@ -80,6 +157,17 @@ const TracesExplorer: React.FC = () => {
       setSelectedTrace(matchedTrace);
     }
   }, [data?.traces, traceIdFilter]);
+
+  useEffect(() => {
+    if (!selectedTrace?.trace_id) {
+      return;
+    }
+    const existsInCurrentPage = Boolean(data?.traces?.some((trace) => trace.trace_id === selectedTrace.trace_id));
+    if (!existsInCurrentPage) {
+      setSelectedTrace(null);
+      setSelectedSpan(null);
+    }
+  }, [data?.traces, selectedTrace?.trace_id]);
 
   // 过滤追踪
   const filteredTraces = useMemo(() => {
@@ -109,6 +197,13 @@ const TracesExplorer: React.FC = () => {
 
     return traces;
   }, [data?.traces, searchQuery, statusFilter]);
+  const totalTraces = Number(data?.total || 0);
+  const currentOffset = Number(data?.offset || Math.max((page - 1) * pageSize, 0));
+  const pageCount = Math.max(1, Math.ceil(totalTraces / Math.max(pageSize, 1)));
+  const pageStart = totalTraces > 0 ? currentOffset + 1 : 0;
+  const pageEnd = totalTraces > 0 ? Math.min(currentOffset + Number(data?.count || 0), totalTraces) : 0;
+  const hasPrevPage = page > 1;
+  const hasNextPage = Boolean(data?.has_more || currentOffset + Number(data?.count || 0) < totalTraces);
 
   if (loading) return <LoadingState message="加载追踪数据..." />;
   if (error) return <ErrorState message={error.message} onRetry={refetch} />;
@@ -135,34 +230,38 @@ const TracesExplorer: React.FC = () => {
         <div className="grid grid-cols-4 gap-4 mb-4">
           <div className="bg-white rounded-lg shadow-md p-4">
             <div className="text-sm text-gray-500">总追踪数</div>
-            <div className="text-2xl font-bold text-gray-900">{data?.total || 0}</div>
+            <div className="text-2xl font-bold text-gray-900">{totalTraces}</div>
           </div>
           <div className="bg-white rounded-lg shadow-md p-4">
-            <div className="text-sm text-gray-500">平均延迟</div>
-            <div className="text-2xl font-bold text-gray-900">
-              {statsData.avg_duration || statsData.avg_latency ? formatDuration(statsData.avg_duration || statsData.avg_latency) : '-'}
+              <div className="text-sm text-gray-500">平均延迟</div>
+              <div className="text-2xl font-bold text-gray-900">
+              {statsData.avg_duration || statsData.avg_latency
+                ? formatDuration(Number(statsData.avg_duration ?? statsData.avg_latency ?? 0))
+                : '-'}
+              </div>
             </div>
-          </div>
-          <div className="bg-white rounded-lg shadow-md p-4">
-            <div className="text-sm text-gray-500">P99 延迟</div>
-            <div className="text-2xl font-bold text-gray-900">
-              {statsData.p99_duration || statsData.p99_latency ? formatDuration(statsData.p99_duration || statsData.p99_latency) : '-'}
+            <div className="bg-white rounded-lg shadow-md p-4">
+              <div className="text-sm text-gray-500">P99 延迟</div>
+              <div className="text-2xl font-bold text-gray-900">
+              {statsData.p99_duration || statsData.p99_latency
+                ? formatDuration(Number(statsData.p99_duration ?? statsData.p99_latency ?? 0))
+                : '-'}
+              </div>
             </div>
-          </div>
-          <div className="bg-white rounded-lg shadow-md p-4">
-            <div className="text-sm text-gray-500">错误率</div>
-            <div className="text-2xl font-bold text-red-600">
+            <div className="bg-white rounded-lg shadow-md p-4">
+              <div className="text-sm text-gray-500">错误率</div>
+              <div className="text-2xl font-bold text-red-600">
               {statsData.error_rate !== undefined && statsData.error_rate !== null
-                ? `${(statsData.error_rate * 100).toFixed(2)}%`
+                ? `${(Number(statsData.error_rate) * 100).toFixed(2)}%`
                 : '0%'}
+              </div>
             </div>
-          </div>
         </div>
       )}
 
       {/* 搜索栏 */}
       <div className="bg-white rounded-lg shadow-md p-4 mb-4">
-        <div className="flex items-center space-x-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-8">
           <div className="flex-1 relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
             <input
@@ -183,14 +282,65 @@ const TracesExplorer: React.FC = () => {
             <option value="error">错误</option>
           </select>
           <select
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            value={timeWindow}
+            onChange={(e) => setTimeWindow(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2"
+            disabled={Boolean(startTimeInput || endTimeInput)}
+            title={startTimeInput || endTimeInput ? '已启用绝对时间范围，时间窗口暂不生效' : '时间窗口'}
+          >
+            {TRACE_TIME_WINDOW_OPTIONS.map((option) => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+          </select>
+          <input
+            type="datetime-local"
+            value={startTimeInput}
+            onChange={(e) => setStartTimeInput(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2"
+            title="开始时间（可选）"
+          />
+          <input
+            type="datetime-local"
+            value={endTimeInput}
+            onChange={(e) => setEndTimeInput(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2"
+            title="结束时间（可选）"
+          />
+          <select
+            value={pageSize}
+            onChange={(e) => setPageSize(Number(e.target.value))}
             className="border border-gray-300 rounded-lg px-3 py-2"
           >
-            <option value={50}>50 条</option>
             <option value={100}>100 条</option>
             <option value={200}>200 条</option>
+            <option value={500}>500 条</option>
+            <option value={1000}>1000 条</option>
           </select>
+          <button
+            onClick={() => {
+              setStartTimeInput('');
+              setEndTimeInput('');
+            }}
+            className="px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg border border-gray-300"
+            title="清空时间范围并回退到时间窗口"
+          >
+            清空时间
+          </button>
+          <input
+            type="number"
+            min={1}
+            max={Math.max(pageCount, 1)}
+            value={page}
+            onChange={(e) => {
+              const next = Number(e.target.value) || 1;
+              setPage(Math.max(1, Math.min(next, Math.max(pageCount, 1))));
+            }}
+            className="border border-gray-300 rounded-lg px-3 py-2"
+            title="页码"
+          />
+          <div className="col-span-full text-xs text-gray-500">
+            当前范围: {startTimeInput || endTimeInput ? '绝对时间筛选' : `时间窗口 ${timeWindow}`}，返回 {data?.count || 0} 条，累计 {totalTraces} 条
+          </div>
         </div>
       </div>
 
@@ -369,11 +519,11 @@ const TracesExplorer: React.FC = () => {
                       <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 border-t-transparent"></div>
                     </div>
                   ) : spansData && spansData.length > 0 ? (
-                    <TraceTimeline
-                      spans={spansData}
-                      selectedSpanId={selectedSpan?.span_id || null}
-                      onSpanClick={(span) => setSelectedSpan(span)}
-                    />
+      <TraceTimeline
+        spans={spansData}
+        selectedSpanId={selectedSpan?.span_id || null}
+        onSpanClick={(span) => setSelectedSpan(span)}
+      />
                   ) : (
                     <div className="bg-gray-50 rounded-lg p-8 h-48 flex items-center justify-center">
                       <p className="text-sm text-gray-400">该追踪暂无 Span 数据</p>
@@ -452,8 +602,34 @@ const TracesExplorer: React.FC = () => {
       </div>
 
       {/* 统计信息 */}
-      <div className="mt-4 text-sm text-gray-500">
-        显示 {filteredTraces.length} 条追踪（共 {data?.total || 0} 条）
+      <div className="mt-4 flex items-center justify-between text-sm text-gray-500">
+        <div>
+          显示 {filteredTraces.length} 条追踪（第 {pageStart}-{pageEnd} 条，共 {totalTraces} 条）
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+            disabled={!hasPrevPage}
+            className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            上一页
+          </button>
+          <span className="text-xs text-gray-500">
+            第 {page} / {pageCount} 页
+          </span>
+          <button
+            onClick={() => {
+              if (!hasNextPage) {
+                return;
+              }
+              setPage((prev) => prev + 1);
+            }}
+            disabled={!hasNextPage}
+            className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            下一页
+          </button>
+        </div>
       </div>
     </div>
   );

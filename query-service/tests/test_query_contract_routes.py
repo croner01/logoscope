@@ -17,7 +17,7 @@ from fastapi import HTTPException
 # 添加 query-service 根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api import query_routes, data_quality
+from api import query_routes, data_quality, query_logs_service as logs_service
 
 
 def _business_calls(storage: "FakeContractStorageAdapter") -> List[Dict[str, Any]]:
@@ -81,7 +81,24 @@ class FakeContractStorageAdapter:
                 }
             ]
 
-        if "FROM logs.logs" in condensed and "GROUP BY service_name" in condensed and "count() AS count" in condensed:
+        if (
+            "FROM logs.logs" in condensed
+            and "trim(namespace)" in condensed
+            and "count() AS count" in condensed
+            and " AS value" in condensed
+            and "level_norm AS value" not in condensed
+        ):
+            return [
+                {"value": "prod", "count": 18},
+                {"value": "staging", "count": 2},
+            ]
+
+        if (
+            "FROM logs.logs" in condensed
+            and "count() AS count" in condensed
+            and " AS value" in condensed
+            and "level_norm AS value" not in condensed
+        ):
             return [
                 {"value": "checkout", "count": 12},
                 {"value": "payment", "count": 8},
@@ -201,6 +218,16 @@ def reset_state():
     query_routes._TRACE_COLUMNS_CACHE = None
 
 
+@pytest.fixture(autouse=True)
+def inline_query_routes_run_blocking(monkeypatch: pytest.MonkeyPatch):
+    """在单测中内联执行阻塞逻辑，避免线程池导致的假死。"""
+
+    async def _inline_run_blocking(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(query_routes, "_run_blocking", _inline_run_blocking)
+
+
 @pytest.mark.asyncio
 async def test_logs_explicit_filters_override_topology_context():
     """显式 service/search/start_time 应覆盖拓扑上下文回填。"""
@@ -233,6 +260,34 @@ async def test_logs_explicit_filters_override_topology_context():
 
 
 @pytest.mark.asyncio
+async def test_logs_support_structured_request_id_filter():
+    """logs 查询应支持 request_id 结构化精确过滤。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    result = await query_routes.query_logs(
+        limit=20,
+        service_name=None,
+        trace_id=None,
+        request_id="req-1",
+        pod_name=None,
+        level=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+    )
+
+    query_call = _first_business_call(storage)
+    assert query_call["params"]["request_id"] == "req-1"
+    assert "JSONExtractString(attributes_json, 'request_id') = {request_id:String}" in query_call["query"]
+    assert result["context"]["effective_request_id"] == "req-1"
+
+
+@pytest.mark.asyncio
 async def test_logs_support_multi_value_filters():
     """logs 查询应支持 service_names/levels 多值过滤。"""
     storage = FakeContractStorageAdapter()
@@ -256,8 +311,9 @@ async def test_logs_support_multi_value_filters():
     )
 
     query_call = _first_business_call(storage)
-    assert "service_name = {service_name_0:String}" in query_call["query"]
-    assert "service_name = {service_name_1:String}" in query_call["query"]
+    assert "{service_name_0:String}" in query_call["query"]
+    assert "{service_name_1:String}" in query_call["query"]
+    assert "replaceRegexpOne" in query_call["query"]
     assert "level_norm = {level_0:String}" in query_call["query"]
     assert "level_norm = {level_1:String}" in query_call["query"]
     assert query_call["params"]["service_name_0"] == "checkout"
@@ -266,6 +322,72 @@ async def test_logs_support_multi_value_filters():
     assert query_call["params"]["level_1"] == "WARN"
     assert result["context"]["effective_service_names"] == ["checkout", "payment"]
     assert result["context"]["effective_levels"] == ["ERROR", "WARN"]
+
+
+@pytest.mark.asyncio
+async def test_logs_support_multi_trace_and_request_id_filters():
+    """logs 查询应支持多值 trace_ids/request_ids 精确过滤。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    result = await query_routes.query_logs(
+        limit=20,
+        service_name=None,
+        trace_id=None,
+        trace_ids=["trace-1", "trace-2"],
+        request_id=None,
+        request_ids=["req-1", "req-2"],
+        pod_name=None,
+        level=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+    )
+
+    query_call = _first_business_call(storage)
+    assert "trace_id IN {trace_ids:Array(String)}" in query_call["query"]
+    assert "request_ids:Array(String)" in query_call["query"]
+    assert query_call["params"]["trace_ids"] == ["trace-1", "trace-2"]
+    assert query_call["params"]["request_ids"] == ["req-1", "req-2"]
+    assert result["context"]["effective_trace_ids"] == ["trace-1", "trace-2"]
+    assert result["context"]["effective_request_ids"] == ["req-1", "req-2"]
+
+
+@pytest.mark.asyncio
+async def test_logs_support_or_correlation_mode_for_trace_and_request_filters():
+    """logs 查询支持 correlation_mode=or，将 trace/request 组合为并集过滤。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    result = await query_routes.query_logs(
+        limit=20,
+        service_name=None,
+        trace_id=None,
+        trace_ids=["trace-1"],
+        correlation_mode="or",
+        request_id=None,
+        request_ids=["req-missing"],
+        pod_name=None,
+        level=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+    )
+
+    query_call = _first_business_call(storage)
+    assert "trace_id = {trace_id:String} OR (" in query_call["query"]
+    assert "request_ids:Array(String)" in query_call["query"]
+    assert query_call["params"]["trace_id"] == "trace-1"
+    assert query_call["params"]["request_ids"] == ["req-missing"]
+    assert result["context"]["effective_correlation_mode"] == "or"
 
 
 @pytest.mark.asyncio
@@ -289,24 +411,250 @@ async def test_logs_facets_disjunctive_contract():
         target_service=None,
         time_window=None,
         limit_services=10,
+        limit_namespaces=10,
         limit_levels=10,
     )
 
     business_calls = _business_calls(storage)
-    assert len(business_calls) == 2
+    assert len(business_calls) == 3
     service_query = business_calls[0]["query"]
     level_query = business_calls[1]["query"]
+    namespace_query = business_calls[2]["query"]
 
-    assert "GROUP BY service_name" in service_query
+    assert "GROUP BY value" in service_query
     assert "level_norm = {facet_level:String}" in service_query
-    assert "service_name = {facet_service:String}" not in service_query
+    assert "{facet_service:String}" not in service_query
 
     assert "GROUP BY value" in level_query
-    assert "service_name = {facet_service:String}" in level_query
+    assert "{facet_service:String}" in level_query
+    assert "replaceRegexpOne" in level_query
     assert "level = {facet_level:String}" not in level_query
 
+    assert "GROUP BY value" in namespace_query
+    assert "{facet_service_for_namespace:String}" in namespace_query
+    assert "level_norm = {facet_level_for_namespace:String}" in namespace_query
+    assert "{facet_namespace:String}" not in namespace_query
+
     assert result["services"][0]["value"] == "checkout"
+    assert result["namespaces"][0]["value"] == "prod"
     assert result["levels"][0]["value"] == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_logs_facets_support_or_correlation_mode_for_trace_and_request_filters():
+    """logs facets 在 correlation_mode=or 下应沿用并集语义，保持与列表一致。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    result = await query_routes.query_logs_facets(
+        service_name=None,
+        service_names=None,
+        namespace=None,
+        namespaces=None,
+        trace_id=None,
+        trace_ids=["trace-1"],
+        correlation_mode="or",
+        request_id=None,
+        request_ids=["req-missing"],
+        pod_name=None,
+        container_name=None,
+        level=None,
+        levels=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+        anchor_time=None,
+        limit_services=10,
+        limit_namespaces=10,
+        limit_levels=10,
+    )
+
+    query_call = _first_business_call(storage)
+    assert "trace_id = {trace_id:String} OR (" in query_call["query"]
+    assert "request_ids:Array(String)" in query_call["query"]
+    assert result["context"]["effective_correlation_mode"] == "or"
+
+
+@pytest.mark.asyncio
+async def test_logs_facets_support_structured_request_id_filter():
+    """logs facets 查询应支持 request_id 结构化精确过滤。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    result = await query_routes.query_logs_facets(
+        service_name=None,
+        service_names=None,
+        trace_id=None,
+        request_id="req-1",
+        pod_name=None,
+        level=None,
+        levels=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+        limit_services=10,
+        limit_namespaces=10,
+        limit_levels=10,
+    )
+
+    query_call = _first_business_call(storage)
+    assert query_call["params"]["request_id"] == "req-1"
+    assert "JSONExtractString(attributes_json, 'request_id') = {request_id:String}" in query_call["query"]
+    assert result["context"]["effective_request_id"] == "req-1"
+
+
+@pytest.mark.asyncio
+async def test_logs_aggregated_support_structured_request_id_filter():
+    """聚合日志查询应支持 request_id 结构化精确过滤。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    await query_routes.query_logs_aggregated(
+        limit=50,
+        min_pattern_count=1,
+        max_patterns=10,
+        max_samples=2,
+        service_name=None,
+        trace_id=None,
+        request_id="req-1",
+        pod_name=None,
+        level=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+    )
+
+    query_call = _first_business_call(storage)
+    assert query_call["params"]["request_id"] == "req-1"
+    assert "JSONExtractString(attributes_json, 'request_id') = {request_id:String}" in query_call["query"]
+
+
+@pytest.mark.asyncio
+async def test_logs_aggregated_support_or_correlation_mode_for_trace_and_request_filters():
+    """聚合日志查询在 correlation_mode=or 下应使用并集语义。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    await query_routes.query_logs_aggregated(
+        limit=50,
+        min_pattern_count=1,
+        max_patterns=10,
+        max_samples=2,
+        service_name=None,
+        trace_id=None,
+        trace_ids=["trace-1"],
+        correlation_mode="or",
+        request_id=None,
+        request_ids=["req-missing"],
+        pod_name=None,
+        level=None,
+        start_time="2026-02-27T10:00:00Z",
+        end_time="2026-02-27T10:10:00Z",
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window=None,
+    )
+
+    query_call = _first_business_call(storage)
+    assert "trace_id = {trace_id:String} OR (" in query_call["query"]
+    assert "request_ids:Array(String)" in query_call["query"]
+    assert query_call["params"]["trace_id"] == "trace-1"
+    assert query_call["params"]["request_ids"] == ["req-missing"]
+
+
+@pytest.mark.asyncio
+async def test_logs_facets_accept_anchor_time_and_container_name_contract():
+    """logs facets 查询应透传 anchor_time/container_name，保持与主日志列表一致。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    result = await query_routes.query_logs_facets(
+        service_name=None,
+        service_names=None,
+        namespace=None,
+        namespaces=None,
+        trace_id=None,
+        trace_ids=None,
+        request_id=None,
+        request_ids=None,
+        pod_name=None,
+        container_name="checkout",
+        level=None,
+        levels=None,
+        start_time=None,
+        end_time=None,
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window="1 HOUR",
+        anchor_time="2026-02-27T10:05:00Z",
+        limit_services=10,
+        limit_namespaces=10,
+        limit_levels=10,
+    )
+
+    query_call = _first_business_call(storage)
+    assert query_call["params"]["container_name"] == "checkout"
+    assert query_call["params"]["anchor_time"] in {"2026-02-27 10:05:00.000", "2026-02-27 10:05:00.000000"}
+    assert "container_name = {container_name:String}" in query_call["query"]
+    assert "timestamp <= toDateTime64({anchor_time:String}, 9, 'UTC')" in query_call["query"]
+    assert result["context"]["effective_container_name"] == "checkout"
+    assert result["context"]["anchor_time"] == "2026-02-27T10:05:00Z"
+
+
+@pytest.mark.asyncio
+async def test_logs_aggregated_accept_anchor_time_contract():
+    """聚合日志查询应透传 anchor_time，避免与日志列表快照错位。"""
+    storage = FakeContractStorageAdapter()
+    query_routes.set_storage_adapter(storage)
+
+    await query_routes.query_logs_aggregated(
+        limit=50,
+        min_pattern_count=1,
+        max_patterns=10,
+        max_samples=2,
+        service_name=None,
+        service_names=None,
+        namespace=None,
+        namespaces=None,
+        trace_id=None,
+        trace_ids=None,
+        request_id=None,
+        request_ids=None,
+        pod_name=None,
+        container_name="checkout",
+        level=None,
+        levels=None,
+        start_time=None,
+        end_time=None,
+        exclude_health_check=False,
+        search=None,
+        source_service=None,
+        target_service=None,
+        time_window="1 HOUR",
+        anchor_time="2026-02-27T10:05:00Z",
+    )
+
+    query_call = _first_business_call(storage)
+    assert query_call["params"]["container_name"] == "checkout"
+    assert query_call["params"]["anchor_time"] in {"2026-02-27 10:05:00.000", "2026-02-27 10:05:00.000000"}
+    assert "container_name = {container_name:String}" in query_call["query"]
+    assert "timestamp <= toDateTime64({anchor_time:String}, 9, 'UTC')" in query_call["query"]
 
 
 @pytest.mark.asyncio
@@ -335,8 +683,12 @@ async def test_logs_aggregated_accepts_topology_context_params():
 
     query_call = _first_business_call(storage)
     assert "timestamp > now() - INTERVAL 15 MINUTE" in query_call["query"]
-    assert query_call["params"]["service_name"] == "checkout"
-    assert query_call["params"]["search"] == "payment"
+    assert "replaceRegexpOne" in query_call["query"]
+    assert "message ILIKE concat('%', {target_service:String}, '%')" in query_call["query"]
+    assert query_call["params"]["source_service"] == "checkout"
+    assert query_call["params"]["target_service"] == "payment"
+    assert "service_name" not in query_call["params"]
+    assert "search" not in query_call["params"]
 
 
 @pytest.mark.asyncio
@@ -359,15 +711,15 @@ async def test_metrics_query_uses_parameterized_filters():
 
     assert "service_name = {service_name:String}" in query_text
     assert "metric_name = {metric_name:String}" in query_text
-    assert "toDateTime64({start_time:String}, 9)" in query_text
-    assert "toDateTime64({end_time:String}, 9)" in query_text
+    assert "toDateTime64({start_time:String}, 9, 'UTC')" in query_text
+    assert "toDateTime64({end_time:String}, 9, 'UTC')" in query_text
     assert "LIMIT {limit:Int32}" in query_text
     assert "DROP TABLE" not in query_text
 
     assert params["service_name"] == "checkout'; DROP TABLE logs.metrics --"
     assert params["metric_name"] == "http.server.duration"
-    assert params["start_time"] == "2026-02-27 10:00:00.000"
-    assert params["end_time"] == "2026-02-27 11:00:00.000"
+    assert params["start_time"] in {"2026-02-27 10:00:00.000", "2026-02-27 10:00:00.000000"}
+    assert params["end_time"] in {"2026-02-27 11:00:00.000", "2026-02-27 11:00:00.000000"}
     assert params["limit"] == 50
 
 
@@ -393,8 +745,9 @@ async def test_logs_query_end_time_only_backfills_default_window():
     )
 
     query_call = _first_business_call(storage)
-    assert "timestamp <= toDateTime64({end_time:String}, 9)" in query_call["query"]
-    assert "timestamp > toDateTime64({end_time:String}, 9) - INTERVAL 24 HOUR" in query_call["query"]
+    expected_interval = logs_service._resolve_query_logs_default_window()
+    assert "timestamp <= toDateTime64({end_time:String}, 9, 'UTC')" in query_call["query"]
+    assert f"timestamp > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {expected_interval}" in query_call["query"]
 
 
 @pytest.mark.asyncio

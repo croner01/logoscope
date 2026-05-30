@@ -9,12 +9,21 @@ export interface ProblemSummary {
   suggestion: string;
 }
 
-function toNum(value: any, fallback: number): number {
+type LooseRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): LooseRecord | null {
+  if (value && typeof value === 'object') {
+    return value as LooseRecord;
+  }
+  return null;
+}
+
+function toNum(value: unknown, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function normalizeRiskLevel(value: any): RiskLevel {
+function normalizeRiskLevel(value: unknown): RiskLevel {
   if (value === '高风险' || value === '中风险' || value === '低风险') {
     return value;
   }
@@ -32,26 +41,28 @@ function defaultSummary(headline = ''): ProblemSummary {
   };
 }
 
-export function resolveEdgeProblemSummary(edge: any): ProblemSummary {
-  const raw = edge?.problem_summary || edge?.metrics?.problem_summary;
-  if (raw && typeof raw === 'object') {
+export function resolveEdgeProblemSummary(edge: unknown): ProblemSummary {
+  const edgeRecord = asRecord(edge) || {};
+  const edgeMetrics = asRecord(edgeRecord.metrics);
+  const rawObj = asRecord(edgeRecord.problem_summary ?? edgeMetrics?.problem_summary);
+  if (rawObj) {
     return {
-      hasIssue: Boolean(raw.has_issue ?? raw.hasIssue),
-      riskLevel: normalizeRiskLevel(raw.risk_level ?? raw.riskLevel),
-      issueScore: toNum(raw.issue_score ?? raw.issueScore, 0),
-      reasons: Array.isArray(raw.reasons) ? raw.reasons.map((item: any) => String(item)) : [],
-      headline: String(raw.headline || ''),
-      suggestion: String(raw.suggestion || ''),
+      hasIssue: Boolean(rawObj.has_issue ?? rawObj.hasIssue),
+      riskLevel: normalizeRiskLevel(rawObj.risk_level ?? rawObj.riskLevel),
+      issueScore: toNum(rawObj.issue_score ?? rawObj.issueScore, 0),
+      reasons: Array.isArray(rawObj.reasons) ? rawObj.reasons.map((item) => String(item)) : [],
+      headline: String(rawObj.headline || ''),
+      suggestion: String(rawObj.suggestion || ''),
     };
   }
 
-  const metrics = edge?.metrics || {};
+  const metrics = edgeMetrics || {};
   const errorRate = toNum(metrics.error_rate, 0);
-  const timeoutRate = toNum(metrics.timeout_rate ?? edge?.timeout_rate, 0);
-  const p95 = toNum(metrics.p95 ?? edge?.p95, 0);
-  const p99 = toNum(metrics.p99 ?? edge?.p99, 0);
-  const qualityScore = toNum(metrics.quality_score ?? edge?.quality_score, 100);
-  const evidence = String(metrics.evidence_type || edge?.evidence_type || 'observed').toLowerCase();
+  const timeoutRate = toNum(metrics.timeout_rate ?? edgeRecord.timeout_rate, 0);
+  const p95 = toNum(metrics.p95 ?? edgeRecord.p95, 0);
+  const p99 = toNum(metrics.p99 ?? edgeRecord.p99, 0);
+  const qualityScore = toNum(metrics.quality_score ?? edgeRecord.quality_score, 100);
+  const evidence = String(metrics.evidence_type || edgeRecord.evidence_type || 'observed').toLowerCase();
 
   const latencyScore = Math.min((p95 + p99) / 2500, 1) * 30;
   const qualityPenalty = Math.max(0, (70 - qualityScore) / 70) * 30;
@@ -73,24 +84,26 @@ export function resolveEdgeProblemSummary(edge: any): ProblemSummary {
   };
 }
 
-export function resolveNodeProblemSummary(node: any): ProblemSummary {
-  const raw = node?.problem_summary || node?.metrics?.problem_summary;
-  if (raw && typeof raw === 'object') {
+export function resolveNodeProblemSummary(node: unknown): ProblemSummary {
+  const nodeRecord = asRecord(node) || {};
+  const nodeMetrics = asRecord(nodeRecord.metrics);
+  const rawObj = asRecord(nodeRecord.problem_summary ?? nodeMetrics?.problem_summary);
+  if (rawObj) {
     return {
-      hasIssue: Boolean(raw.has_issue ?? raw.hasIssue),
-      riskLevel: normalizeRiskLevel(raw.risk_level ?? raw.riskLevel),
-      issueScore: toNum(raw.issue_score ?? raw.issueScore, 0),
-      reasons: Array.isArray(raw.reasons) ? raw.reasons.map((item: any) => String(item)) : [],
-      headline: String(raw.headline || ''),
-      suggestion: String(raw.suggestion || ''),
+      hasIssue: Boolean(rawObj.has_issue ?? rawObj.hasIssue),
+      riskLevel: normalizeRiskLevel(rawObj.risk_level ?? rawObj.riskLevel),
+      issueScore: toNum(rawObj.issue_score ?? rawObj.issueScore, 0),
+      reasons: Array.isArray(rawObj.reasons) ? rawObj.reasons.map((item) => String(item)) : [],
+      headline: String(rawObj.headline || ''),
+      suggestion: String(rawObj.suggestion || ''),
     };
   }
 
-  const metrics = node?.metrics || {};
+  const metrics = nodeMetrics || {};
   const errorCount = toNum(metrics.error_count, 0);
   const errorRate = toNum(metrics.error_rate, 0);
   const timeoutRate = toNum(metrics.timeout_rate, 0);
-  const qualityScore = toNum(metrics.quality_score ?? node?.quality_score, 100);
+  const qualityScore = toNum(metrics.quality_score ?? nodeRecord.quality_score, 100);
 
   const issueScore = Math.round(
     (
@@ -114,9 +127,9 @@ export function resolveNodeProblemSummary(node: any): ProblemSummary {
 }
 
 export function resolveIssueSummary(
-  nodes: any[],
-  edges: any[],
-  metadata?: Record<string, any> | null
+  nodes: unknown[],
+  edges: unknown[],
+  metadata?: unknown
 ): {
   unhealthyNodes: number;
   unhealthyEdges: number;
@@ -125,8 +138,9 @@ export function resolveIssueSummary(
   highRiskEdges: number;
   mediumRiskEdges: number;
 } {
-  const raw = metadata?.issue_summary;
-  if (raw && typeof raw === 'object') {
+  const metadataRecord = asRecord(metadata);
+  const raw = asRecord(metadataRecord?.issue_summary);
+  if (raw) {
     const unhealthyNodes = toNum(raw.unhealthy_nodes, 0);
     const unhealthyEdges = toNum(raw.unhealthy_edges, 0);
     const highRiskNodes = toNum(raw.high_risk_nodes, 0);
@@ -181,7 +195,7 @@ export function resolveIssueSummary(
   };
 }
 
-export function resolveEdgeIssueScore(edge: any): number {
+export function resolveEdgeIssueScore(edge: unknown): number {
   return resolveEdgeProblemSummary(edge).issueScore;
 }
 

@@ -15,7 +15,7 @@ export interface Span {
   start_time: string;
   duration_ms: number;
   status: string;
-  tags: Record<string, any>;
+  tags: Record<string, unknown>;
 }
 
 interface SpanDetailPanelProps {

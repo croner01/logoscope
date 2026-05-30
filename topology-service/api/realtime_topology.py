@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple, Callable, Awaitable
 import asyncio
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from collections import deque, OrderedDict
@@ -18,6 +19,12 @@ from collections import deque, OrderedDict
 from graph.hybrid_topology import get_hybrid_topology_builder
 from graph.enhanced_topology import get_enhanced_topology_builder
 from storage.topology_snapshots import get_topology_snapshot_manager
+
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_SHARED_SRC_DIR = os.path.join(_PROJECT_ROOT, "shared_src")
+for _path in (_PROJECT_ROOT, _SHARED_SRC_DIR):
+    if os.path.isdir(_path) and _path not in sys.path:
+        sys.path.append(_path)
 
 try:
     from shared_src.monitoring import increment as metric_increment, gauge as metric_gauge
@@ -63,9 +70,14 @@ TOPOLOGY_CACHE_PREFIX_HYBRID = "hybrid_topology:"
 TOPOLOGY_CACHE_PREFIX_REALTIME_STATS = "realtime_stats:"
 
 
+async def _run_blocking(func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Execute blocking work inline to avoid executor shutdown deadlocks."""
+    return func(*args, **kwargs)
+
+
 async def _build_topology_async(builder: Any, **kwargs) -> Dict[str, Any]:
-    """Run blocking topology build in thread pool to avoid event-loop stalls."""
-    return await asyncio.to_thread(builder.build_topology, **kwargs)
+    """Run blocking topology build inline."""
+    return await _run_blocking(builder.build_topology, **kwargs)
 
 _TOPOLOGY_CACHE_METRICS: Dict[str, int] = {
     "requests": 0,
@@ -370,6 +382,8 @@ async def get_hybrid_topology(
 
         return topology
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting hybrid topology: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -405,7 +419,7 @@ async def get_topology_changes(
     """
     try:
         # 解析时间
-        from_iso = datetime.fromisoformat(since.replace('Z', '+00:00'))
+        _ = datetime.fromisoformat(since.replace('Z', '+00:00'))
         to_iso = datetime.now(timezone.utc)
 
         # 查询变化（简化版本，实际应该持久化历史）
@@ -419,11 +433,15 @@ async def get_topology_changes(
 
         return {
             "from": since,
-            "to": to_iso.isoformat() + "Z",
+            "to": to_iso.isoformat(),
             "current_topology": current_topology,
             "note": "完整历史变化记录功能待实现"
         }
 
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid 'since' timestamp: {since}") from exc
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting topology changes: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -515,6 +533,8 @@ async def get_topology_stats(
         _set_cached_topology(cache_key, result, ttl_seconds=TOPOLOGY_STATS_CACHE_TTL_SECONDS)
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting topology stats: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -732,8 +752,9 @@ storage = None
 
 def set_storage_adapter(storage_adapter):
     """设置 storage adapter"""
-    global storage
+    global storage, _snapshot_manager
     storage = storage_adapter
+    _snapshot_manager = None
     _topology_inflight_tasks.clear()
     _clear_topology_cache(reason="storage_reset")
 
@@ -867,7 +888,7 @@ async def broadcast_topology_update(topology: Dict[str, Any]):
     # 记录需要移除的断开连接
     dead_connections = set()
 
-    for websocket in _websocket_connections:
+    for websocket in list(_websocket_connections):
         try:
             await websocket.send_json(message)
         except Exception as e:
@@ -970,7 +991,7 @@ async def create_topology_snapshot(
 
         # 保存快照
         snapshot_mgr = _get_snapshot_manager()
-        snapshot_id = await asyncio.to_thread(
+        snapshot_id = await _run_blocking(
             snapshot_mgr.save_snapshot,
             topology=topology,
             time_window=time_window,
@@ -986,6 +1007,8 @@ async def create_topology_snapshot(
             "edge_count": len(topology.get("edges", []))
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating topology snapshot: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1034,7 +1057,7 @@ async def list_topology_snapshots(
             to_dt = datetime.fromisoformat(to_time.replace('Z', '+00:00'))
 
         # 查询快照列表
-        snapshots = await asyncio.to_thread(
+        snapshots = await _run_blocking(
             snapshot_mgr.list_snapshots,
             from_time=from_dt,
             to_time=to_dt,
@@ -1047,6 +1070,10 @@ async def list_topology_snapshots(
             "count": len(snapshots)
         }
 
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid from_time/to_time format, expected ISO 8601") from exc
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error listing topology snapshots: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1074,7 +1101,7 @@ async def get_topology_snapshot(snapshot_id: str) -> Dict[str, Any]:
     """
     try:
         snapshot_mgr = _get_snapshot_manager()
-        snapshot = await asyncio.to_thread(snapshot_mgr.get_snapshot, snapshot_id)
+        snapshot = await _run_blocking(snapshot_mgr.get_snapshot, snapshot_id)
 
         if not snapshot:
             raise HTTPException(status_code=404, detail=f"Snapshot {snapshot_id} not found")
@@ -1125,7 +1152,7 @@ async def compare_topology_snapshots(
     """
     try:
         snapshot_mgr = _get_snapshot_manager()
-        comparison = await asyncio.to_thread(snapshot_mgr.compare_snapshots, snapshot_id_1, snapshot_id_2)
+        comparison = await _run_blocking(snapshot_mgr.compare_snapshots, snapshot_id_1, snapshot_id_2)
 
         if 'error' in comparison:
             raise HTTPException(status_code=404, detail=comparison['error'])
@@ -1160,7 +1187,7 @@ async def cleanup_old_snapshots(
     """
     try:
         snapshot_mgr = _get_snapshot_manager()
-        deleted_count = await asyncio.to_thread(
+        deleted_count = await _run_blocking(
             snapshot_mgr.delete_old_snapshots,
             retention_days=retention_days,
         )
@@ -1171,6 +1198,8 @@ async def cleanup_old_snapshots(
             "retention_days": retention_days
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error cleaning up old snapshots: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

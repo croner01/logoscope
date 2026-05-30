@@ -114,7 +114,7 @@ ATTEMPTS=12 SLEEP_SECONDS=2 scripts/trace-e2e-smoke.sh
 2. ingest `/v1/traces` 返回 `200`
 3. ClickHouse `logs.traces` 首轮查询命中
 4. query-service `/api/v1/traces`、`/spans`、`/stats` 返回正常
-5. Redis `traces.raw` 消费组 pending=`0`
+5. Kafka `traces.raw` 消费组 lag=`0`（与原 pending 口径等价迁移）
 
 ### 4.2 相关率检查（通过）
 

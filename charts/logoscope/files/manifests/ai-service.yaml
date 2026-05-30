@@ -91,6 +91,12 @@ spec:
           value: "service.name=ai-service,deployment.environment=production"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector.islap.svc.cluster.local:4318"
+        - name: AI_AGENT_QUERY_API_BASE
+          value: "http://query-service:8002"
+        - name: AI_AGENT_QUERY_API_TIMEOUT_SECONDS
+          value: "6"
+        - name: EXEC_SERVICE_BASE_URL
+          value: "http://exec-service:8095"
         - name: LLM_PROVIDER
           value: "deepseek"
         - name: LLM_API_BASE
@@ -131,8 +137,54 @@ spec:
               optional: true
         - name: LLM_MODEL
           value: "deepseek-chat"
+        - name: AI_FOLLOWUP_ENGINE
+          value: "langchain"
+        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_ENABLED
+          value: "true"
+        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_SESSION_LIMIT
+          value: "6"
+        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_MAX_SNIPPETS
+          value: "6"
+        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_MESSAGE_LIMIT
+          value: "4"
+        - name: AI_FOLLOWUP_WEB_SEARCH_ENABLED
+          value: "false"
+        - name: AI_FOLLOWUP_WEB_SEARCH_ENDPOINT
+          value: ""
+        - name: AI_FOLLOWUP_WEB_SEARCH_TIMEOUT_SECONDS
+          value: "6"
         - name: AI_FOLLOWUP_LLM_TIMEOUT_SECONDS
           value: "90"
+        - name: AI_FOLLOWUP_COMMAND_EXEC_ENABLED
+          value: "true"
+        - name: AI_FOLLOWUP_COMMAND_WRITE_ENABLED
+          value: "true"
+        - name: AI_FOLLOWUP_COMMAND_TEST_PERMISSIVE
+          value: "false"
+        - name: AI_RUNTIME_V1_API_ENABLED
+          value: "false"
+        - name: AI_RUNTIME_V4_OUTER_ENGINE
+          value: "temporal_required"
+        - name: AI_RUNTIME_V4_INNER_ENGINE
+          value: "langgraph_required"
+        - name: AI_RUNTIME_V4_TEMPORAL_ADDRESS
+          value: "temporal-frontend:7233"
+        - name: AI_RUNTIME_V4_TEMPORAL_NAMESPACE
+          value: "default"
+        - name: AI_RUNTIME_V4_TEMPORAL_TASK_QUEUE
+          value: "ai-runtime-v4"
+        - name: AI_RUNTIME_V4_TEMPORAL_WORKER_ENABLED
+          value: "true"
+        - name: AI_RUNTIME_V4_TEMPORAL_CONNECT_TIMEOUT_SECONDS
+          value: "5"
+        - name: AI_RUNTIME_V4_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS
+          value: "3600"
+        - name: AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS
+          value: "15"
+        - name: AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS
+          value: "200"
+        - name: AI_RUNTIME_V4_GRAPH_CHECKPOINT_TABLE
+          value: "logs.ai_runtime_v4_graph_checkpoints"
         resources:
           limits:
             memory: 1Gi

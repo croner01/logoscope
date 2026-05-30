@@ -1,0 +1,48 @@
+# Observability profile: Accuracy-first
+#
+# Usage:
+# helm upgrade --install logoscope charts/logoscope \
+#   -n islap --create-namespace \
+#   -f charts/logoscope/values.yaml \
+#   -f charts/logoscope/profiles/values-observability-accuracy.yaml
+#
+# Notes:
+# - This overlay assumes charts/logoscope templates already include these env keys.
+
+components:
+  ingestService:
+    hpa:
+      minReplicas: 4
+      maxReplicas: 14
+    env:
+      # Keep queue buffering headroom during Redis hiccups.
+      MEMORY_QUEUE_MAX_SIZE: "40000"
+      # Smaller envelope batches reduce per-request burst size.
+      QUEUE_LOG_RECORD_BATCH_SIZE: "120"
+      BATCH_SIZE: "80"
+      BATCH_TIMEOUT: "3"
+      MEMORY_QUEUE_DROP_OLDEST_WHEN_FULL: "false"
+
+  semanticEngine:
+    hpa:
+      minReplicas: 3
+      maxReplicas: 10
+    env:
+      CH_BATCH_SIZE: "1000"
+      CH_FLUSH_INTERVAL: "0.2"
+      CH_BATCH_ASYNC_INSERT: "true"
+      CH_BATCH_WAIT_FOR_ASYNC_INSERT: "true"
+      DLQ_ENABLED: "true"
+
+  semanticEngineWorker:
+    hpa:
+      minReplicas: 4
+      maxReplicas: 20
+    env:
+      DLQ_ENABLED: "true"
+      DLQ_MAX_RETRIES: "5"
+      CH_BATCH_SIZE: "1200"
+      CH_FLUSH_INTERVAL: "0.2"
+      CH_BATCH_ASYNC_INSERT: "true"
+      CH_BATCH_WAIT_FOR_ASYNC_INSERT: "true"
+      CH_BATCH_LOG_EVERY: "20"

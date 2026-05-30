@@ -95,6 +95,10 @@ spec:
           value: "true"
         - name: SERVICE_NODE_SYNC_INTERVAL_SECONDS
           value: "300"
+        - name: TOPOLOGY_BUILD_PROCESS_ISOLATION_ENABLED
+          value: "false"
+        - name: TOPOLOGY_BUILD_PROCESS_TIMEOUT_SECONDS
+          value: "10"
         resources:
           limits:
             memory: 1Gi

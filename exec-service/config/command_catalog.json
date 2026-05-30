@@ -1,0 +1,121 @@
+{
+  "kubernetes": {
+    "readonly_verbs": [
+      "get",
+      "describe",
+      "logs",
+      "top",
+      "events",
+      "wait",
+      "version",
+      "cluster-info",
+      "explain",
+      "api-resources",
+      "api-versions"
+    ],
+    "mutating_verbs": [
+      "apply",
+      "delete",
+      "patch",
+      "edit",
+      "replace",
+      "scale",
+      "set",
+      "annotate",
+      "label",
+      "create",
+      "expose",
+      "autoscale",
+      "cordon",
+      "uncordon",
+      "drain",
+      "taint"
+    ],
+    "rollout": {
+      "readonly_subverbs": [
+        "status",
+        "history"
+      ],
+      "mutating_subverbs": [
+        "restart",
+        "undo",
+        "pause",
+        "resume"
+      ]
+    },
+    "query_whitelist": {
+      "verbs": [
+        "get",
+        "describe",
+        "logs",
+        "top",
+        "events",
+        "wait",
+        "version",
+        "cluster-info",
+        "explain",
+        "api-resources",
+        "api-versions",
+        "rollout"
+      ],
+      "rollout_subverbs": [
+        "status",
+        "history"
+      ]
+    }
+  },
+  "openstack": {
+    "readonly_verbs": [
+      "list",
+      "show"
+    ],
+    "mutating_verbs": [
+      "create",
+      "delete",
+      "set",
+      "unset",
+      "add",
+      "remove",
+      "reboot",
+      "pause",
+      "unpause",
+      "lock",
+      "unlock",
+      "start",
+      "stop",
+      "shelve",
+      "unshelve",
+      "migrate",
+      "live-migrate",
+      "resize",
+      "confirm",
+      "revert",
+      "failover"
+    ]
+  },
+  "sql_clients": {
+    "readonly_prefixes": [
+      "select",
+      "show",
+      "describe",
+      "desc",
+      "explain",
+      "with"
+    ],
+    "mutating_prefixes": [
+      "insert",
+      "update",
+      "delete",
+      "alter",
+      "create",
+      "drop",
+      "truncate",
+      "grant",
+      "revoke",
+      "replace",
+      "merge",
+      "analyze",
+      "vacuum"
+    ]
+  }
+}

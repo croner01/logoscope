@@ -118,57 +118,10 @@ print('=== All BatchClickHouseWriter tests PASSED ===')
 "
         
         echo ""
-        echo "=== Running redis_consumer tests ==="
-        python3 -c "
-import sys
-sys.path.insert(0, 'shared_src')
-from batch.redis_consumer import BatchConfig, Message, DeadLetterQueue
-
-# Test 1: BatchConfig
-config = BatchConfig()
-assert config.redis_batch_size == 100
-assert config.dlq_enabled == True
-print('✓ BatchConfig test passed')
-
-# Test 2: Message basic
-msg = Message(subject='test.stream', data=b'test data', message_id='msg-1')
-assert msg.subject == 'test.stream'
-assert msg.data == b'test data'
-assert msg.message_id == 'msg-1'
-assert msg.retry_count == 0
-print('✓ Message basic test passed')
-
-# Test 3: Message with all params
-msg2 = Message(subject='test', data=b'data', headers={'key': 'value'}, message_id='123', retry_count=5)
-assert msg2.headers == {'key': 'value'}
-assert msg2.retry_count == 5
-print('✓ Message full params test passed')
-
-# Test 4: DeadLetterQueue
-class MockRedis:
-    async def xadd(self, *args, **kwargs):
-        return 'dlq-msg-1'
-        
-import asyncio
-async def test_dlq():
-    redis = MockRedis()
-    dlq = DeadLetterQueue(redis)
-    assert dlq.get_dlq_name('logs.raw') == 'logs.raw:dlq'
-    print('✓ DeadLetterQueue test passed')
-
-asyncio.run(test_dlq())
-
-print('')
-echo '=== All redis_consumer tests PASSED ==='
-"
-        
-        echo ""
         echo "=========================================="
         echo "=== ALL TESTS PASSED SUCCESSFULLY ==="
         echo "=========================================="
     env:
-    - name: REDIS_BATCH_SIZE
-      value: "100"
     - name: CH_BATCH_SIZE
       value: "2000"
     - name: CH_FLUSH_INTERVAL

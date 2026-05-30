@@ -10,6 +10,7 @@ import EmptyState from '../components/common/EmptyState';
 import LoadingState from '../components/common/LoadingState';
 import HistoryDiffView from '../components/ai/HistoryDiffView';
 import { api } from '../utils/api';
+import { formatTime } from '../utils/formatters';
 
 type TabKey = 'cases' | 'history';
 const HISTORY_PAGE_SIZE = 50;
@@ -39,7 +40,7 @@ interface CaseItem {
   sync_error?: string;
   last_editor?: string;
   content_update_history_count?: number;
-  remediation_history?: Array<Record<string, any>>;
+  remediation_history?: Array<Record<string, unknown>>;
 }
 
 interface RemediationHistoryItem {
@@ -70,7 +71,7 @@ interface KBEditableCase {
   knowledge_version?: number;
   sync_status?: string;
   external_doc_id?: string;
-  content_update_history?: Array<Record<string, any>>;
+  content_update_history?: Array<Record<string, unknown>>;
 }
 
 interface KBContentUpdateHistoryItem {
@@ -80,7 +81,7 @@ interface KBContentUpdateHistoryItem {
   updated_at: string;
   editor: string;
   changed_fields: string[];
-  changes: Record<string, { before?: any; after?: any }>;
+  changes: Record<string, { before?: unknown; after?: unknown }>;
   requested_fields: string[];
   unchanged_requested_fields: string[];
   no_effective_change_reason: string;
@@ -134,12 +135,8 @@ interface AIHistorySessionItem {
 
 const toLocaleTime = (value?: string): string => {
   if (!value) return '-';
-  const raw = String(value).trim().replace(/([+-]\d{2}:\d{2})Z$/i, '$1');
-  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
-  const normalized = hasTimezone ? raw : `${raw}Z`;
-  const d = new Date(normalized);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+  const formatted = formatTime(String(value));
+  return formatted === '--' ? value : formatted;
 };
 
 const HISTORY_FIELD_LABELS: Record<string, string> = {
@@ -191,7 +188,7 @@ const syncStatusClass = (syncStatus?: string): string => {
   return 'bg-amber-100 text-amber-700';
 };
 
-const normalizeRemediationHistory = (value: any): RemediationHistoryItem[] => {
+const normalizeRemediationHistory = (value: unknown): RemediationHistoryItem[] => {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -214,7 +211,7 @@ const normalizeRemediationHistory = (value: any): RemediationHistoryItem[] => {
   return mapped;
 };
 
-const normalizeKBContentUpdateHistory = (value: any): KBContentUpdateHistoryItem[] => {
+const normalizeKBContentUpdateHistory = (value: unknown): KBContentUpdateHistoryItem[] => {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -230,7 +227,7 @@ const normalizeKBContentUpdateHistory = (value: any): KBContentUpdateHistoryItem
         ? item.changed_fields.map((field: unknown) => String(field || '').trim()).filter(Boolean)
         : [],
       changes: item.changes && typeof item.changes === 'object'
-        ? item.changes as Record<string, { before?: any; after?: any }>
+        ? item.changes as Record<string, { before?: unknown; after?: unknown }>
         : {},
       requested_fields: Array.isArray(item.requested_fields)
         ? item.requested_fields.map((field: unknown) => String(field || '').trim()).filter(Boolean)
@@ -259,6 +256,18 @@ const parseTagText = (value: string): string[] =>
     .split(/[,\n，]/)
     .map((item) => item.trim())
     .filter(Boolean);
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+const getErrorMessage = (error: unknown, fallback: string): string => {
+  const record = asRecord(error);
+  const message = record.message;
+  if (typeof message === 'string' && message.trim()) {
+    return message.trim();
+  }
+  return fallback;
+};
 
 const formatSolutionsToEditorText = (solutions: Array<{ title?: string; description?: string; steps?: string[] }>): string => {
   if (!Array.isArray(solutions) || solutions.length === 0) {
@@ -361,8 +370,8 @@ const AICaseManagement: React.FC = () => {
         return bt - at;
       });
       setItems(nextItems as CaseItem[]);
-    } catch (err: any) {
-      setError(err?.message || '加载知识库列表失败');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, '加载知识库列表失败'));
       setItems([]);
     } finally {
       setLoading(false);
@@ -382,9 +391,9 @@ const AICaseManagement: React.FC = () => {
     try {
       const payload = await api.getKBOutboxStatus();
       setOutboxStatus(payload as KBOutboxStatus);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setOutboxStatus(null);
-      setOutboxError(err?.message || '加载 Outbox 状态失败');
+      setOutboxError(getErrorMessage(err, '加载 Outbox 状态失败'));
     } finally {
       setOutboxLoading(false);
     }
@@ -429,14 +438,14 @@ const AICaseManagement: React.FC = () => {
       } else {
         setHistoryHasMore(offset + sessions.length < totalAll);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (reset) {
-        setError(err?.message || '加载 AI 历史失败');
+        setError(getErrorMessage(err, '加载 AI 历史失败'));
         setHistorySessions([]);
         setHistoryTotalAll(0);
         setHistoryHasMore(false);
       } else {
-        alert(err?.message || '加载更多 AI 历史失败');
+        alert(getErrorMessage(err, '加载更多 AI 历史失败'));
       }
     } finally {
       if (reset) {
@@ -498,8 +507,8 @@ const AICaseManagement: React.FC = () => {
     try {
       await api.deleteCase(caseId);
       await fetchCases();
-    } catch (err: any) {
-      alert(err?.message || '删除失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '删除失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -511,8 +520,8 @@ const AICaseManagement: React.FC = () => {
     try {
       await api.resolveCase(caseId, resolution);
       await fetchCases();
-    } catch (err: any) {
-      alert(err?.message || '标记已解决失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '标记已解决失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -527,8 +536,8 @@ const AICaseManagement: React.FC = () => {
           historyCase: detail,
         },
       });
-    } catch (err: any) {
-      alert(err?.message || '加载知识条目详情失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '加载知识条目详情失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -580,39 +589,38 @@ const AICaseManagement: React.FC = () => {
       setRemediationRemoteEnabled(false);
       setRemediationHistory(history);
       setRemediationEditorOpen(true);
-    } catch (err: any) {
-      alert(err?.message || '加载修复详情失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '加载修复详情失败'));
     } finally {
       setActionLoadingId(null);
       setRemediationLoading(false);
     }
   };
 
-  const hydrateKBEditorFromDetail = useCallback((detail: any) => {
-    const metadata = (detail?.llm_metadata && typeof detail.llm_metadata === 'object')
-      ? detail.llm_metadata as Record<string, unknown>
-      : {};
+  const hydrateKBEditorFromDetail = useCallback((detail: unknown) => {
+    const detailRecord = asRecord(detail);
+    const metadata = asRecord(detailRecord.llm_metadata);
     const contentHistory = normalizeKBContentUpdateHistory(
-      detail?.content_update_history
-      || metadata?.content_update_history
+      detailRecord.content_update_history
+      || metadata.content_update_history
     );
     const target: KBEditableCase = {
-      id: detail.id,
-      problem_type: detail.problem_type || 'unknown',
-      severity: detail.severity || 'medium',
-      summary: detail.summary || '',
-      service_name: detail.service_name || '',
-      root_causes: Array.isArray(detail.root_causes) ? detail.root_causes : [],
-      solutions: Array.isArray(detail.solutions) ? detail.solutions : [],
-      analysis_summary: detail.analysis_summary || detail.summary || '',
-      resolution: detail.resolution || '',
-      tags: Array.isArray(detail.tags) ? detail.tags : [],
-      log_content: String(detail.log_content || ''),
-      case_status: detail.case_status,
-      knowledge_version: detail.knowledge_version,
-      sync_status: detail.sync_status,
-      external_doc_id: detail.external_doc_id,
-      content_update_history: contentHistory as Array<Record<string, any>>,
+      id: String(detailRecord.id || ''),
+      problem_type: String(detailRecord.problem_type || 'unknown'),
+      severity: String(detailRecord.severity || 'medium'),
+      summary: String(detailRecord.summary || ''),
+      service_name: String(detailRecord.service_name || ''),
+      root_causes: Array.isArray(detailRecord.root_causes) ? detailRecord.root_causes.map((item) => String(item || '')) : [],
+      solutions: Array.isArray(detailRecord.solutions) ? (detailRecord.solutions as Array<{ title?: string; description?: string; steps?: string[] }>) : [],
+      analysis_summary: String(detailRecord.analysis_summary || detailRecord.summary || ''),
+      resolution: String(detailRecord.resolution || ''),
+      tags: Array.isArray(detailRecord.tags) ? detailRecord.tags.map((item) => String(item || '')) : [],
+      log_content: String(detailRecord.log_content || ''),
+      case_status: typeof detailRecord.case_status === 'string' ? detailRecord.case_status : undefined,
+      knowledge_version: Number.isFinite(Number(detailRecord.knowledge_version)) ? Number(detailRecord.knowledge_version) : undefined,
+      sync_status: typeof detailRecord.sync_status === 'string' ? detailRecord.sync_status : undefined,
+      external_doc_id: typeof detailRecord.external_doc_id === 'string' ? detailRecord.external_doc_id : undefined,
+      content_update_history: contentHistory as unknown as Array<Record<string, unknown>>,
     };
 
     setKbEditorTarget(target);
@@ -637,8 +645,8 @@ const AICaseManagement: React.FC = () => {
       const detail = await api.getCaseDetail(caseId);
       hydrateKBEditorFromDetail(detail);
       setKbEditorOpen(true);
-    } catch (err: any) {
-      alert(err?.message || '加载知识库详情失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '加载知识库详情失败'));
     } finally {
       setActionLoadingId(null);
       setKbEditorLoading(false);
@@ -698,8 +706,8 @@ const AICaseManagement: React.FC = () => {
         const reason = String(result.llm_fallback_reason || '');
         alert(`内容优化已完成（规则模式${reason ? `，原因=${reason}` : ''}）`);
       }
-    } catch (err: any) {
-      alert(err?.message || '内容优化失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '内容优化失败'));
     } finally {
       setKbOptimizingSolutions(false);
     }
@@ -742,8 +750,8 @@ const AICaseManagement: React.FC = () => {
       const refreshedDetail = await api.getCaseDetail(kbEditorTarget.id);
       hydrateKBEditorFromDetail(refreshedDetail);
       await Promise.all([fetchCases(), fetchOutboxStatus()]);
-    } catch (err: any) {
-      alert(err?.message || '更新知识库内容失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '更新知识库内容失败'));
     } finally {
       setKbEditorSubmitting(false);
     }
@@ -785,8 +793,8 @@ const AICaseManagement: React.FC = () => {
       );
       closeRemediationEditor();
       await Promise.all([fetchCases(), fetchOutboxStatus()]);
-    } catch (err: any) {
-      alert(err?.message || '提交人工修复失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '提交人工修复失败'));
     } finally {
       setRemediationSubmitting(false);
     }
@@ -801,8 +809,8 @@ const AICaseManagement: React.FC = () => {
           historySession: detail,
         },
       });
-    } catch (err: any) {
-      alert(err?.message || '加载 AI 历史详情失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '加载 AI 历史详情失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -818,8 +826,8 @@ const AICaseManagement: React.FC = () => {
     try {
       await api.updateAIHistorySession(session.session_id, { title });
       await fetchHistory({ reset: true, offset: 0 });
-    } catch (err: any) {
-      alert(err?.message || '重命名失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '重命名失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -830,8 +838,8 @@ const AICaseManagement: React.FC = () => {
     try {
       await api.updateAIHistorySession(session.session_id, { is_pinned: !session.is_pinned });
       await fetchHistory({ reset: true, offset: 0 });
-    } catch (err: any) {
-      alert(err?.message || '更新 Pin 状态失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '更新 Pin 状态失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -842,8 +850,8 @@ const AICaseManagement: React.FC = () => {
     try {
       await api.updateAIHistorySession(session.session_id, { is_archived: !session.is_archived });
       await fetchHistory({ reset: true, offset: 0 });
-    } catch (err: any) {
-      alert(err?.message || '更新归档状态失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '更新归档状态失败'));
     } finally {
       setActionLoadingId(null);
     }
@@ -857,8 +865,8 @@ const AICaseManagement: React.FC = () => {
     try {
       await api.deleteAIHistorySession(session.session_id);
       await fetchHistory({ reset: true, offset: 0 });
-    } catch (err: any) {
-      alert(err?.message || '删除 AI 历史会话失败');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, '删除 AI 历史会话失败'));
     } finally {
       setActionLoadingId(null);
     }

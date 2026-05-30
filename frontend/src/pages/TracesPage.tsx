@@ -140,8 +140,8 @@ const TracesPage: React.FC = () => {
         critical_path: vizData?.analysis?.critical_path || [],
       };
       setAnalysis(traceAnalysis);
-    } catch (err: any) {
-      setError(err.message || '加载 Trace 数据失败');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '加载 Trace 数据失败');
     } finally {
       setLoading(false);
     }

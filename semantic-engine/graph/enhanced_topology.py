@@ -291,8 +291,12 @@ class EnhancedTopologyBuilder:
                             import json
                             attrs = json.loads(attributes_json)
                             duration_ms = attrs.get('duration_ms', 0) or attrs.get('duration', 0) or 0
-                    except:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to parse attributes_json for trace %s: %s",
+                            trace_id,
+                            exc,
+                        )
                     traces_by_id[trace_id].append({
                         "span_id": span_id,
                         "parent_span_id": parent_span_id,

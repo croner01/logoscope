@@ -460,13 +460,30 @@ class TraceAnalyzer:
                 })
 
         sorted_spans = sorted(spans, key=lambda s: s.start_time)
-        base_time = datetime.fromisoformat(sorted_spans[0].start_time) if sorted_spans else datetime.now()
+        if sorted_spans:
+            try:
+                base_time = datetime.fromisoformat(sorted_spans[0].start_time)
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Failed to parse base span start_time for trace %s, fallback to now: %s",
+                    trace_id,
+                    exc,
+                )
+                base_time = datetime.now()
+        else:
+            base_time = datetime.now()
 
         for span in sorted_spans:
             try:
                 start = datetime.fromisoformat(span.start_time)
                 offset_ms = int((start - base_time).total_seconds() * 1000)
-            except:
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Failed to parse span start_time for trace %s span %s, use offset 0: %s",
+                    trace_id,
+                    span.span_id,
+                    exc,
+                )
                 offset_ms = 0
 
             waterfall.append({

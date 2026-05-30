@@ -195,7 +195,17 @@ def inference_quality_metrics(
         and _is_meaningful_service_name(item.get("target_service"))
     }
 
-    observed_query = f"""
+    observed_edges_query = f"""
+    SELECT
+        source_service,
+        target_service
+    FROM logs.trace_edges_1m
+    PREWHERE ts_minute > now() - INTERVAL {safe_time_window}
+         AND notEmpty(source_service)
+         AND notEmpty(target_service)
+    GROUP BY source_service, target_service
+    """
+    observed_fallback_query = f"""
     SELECT
         parent.service_name AS source_service,
         child.service_name AS target_service
@@ -217,7 +227,16 @@ def inference_quality_metrics(
        AND child.parent_span_id = parent.span_id
     GROUP BY source_service, target_service
     """
-    observed_rows = storage_adapter.execute_query(observed_query)
+    observed_baseline_strategy = "trace_edges_1m"
+    try:
+        observed_rows = storage_adapter.execute_query(observed_edges_query)
+        if not observed_rows:
+            observed_baseline_strategy = "traces_self_join_fallback_empty"
+            observed_rows = storage_adapter.execute_query(observed_fallback_query)
+    except Exception:
+        observed_baseline_strategy = "traces_self_join_fallback_error"
+        observed_rows = storage_adapter.execute_query(observed_fallback_query)
+
     observed_pairs = {
         (row.get("source_service"), row.get("target_service"))
         for row in observed_rows
@@ -268,6 +287,7 @@ def inference_quality_metrics(
         "has_observed_baseline": has_observed_baseline,
         "inferred_pairs": len(inferred_pairs),
         "observed_pairs": len(observed_pairs),
+        "observed_baseline_strategy": observed_baseline_strategy,
         "false_positive_count": false_positive_count,
         "direction_mismatch_count": direction_mismatch_count,
         "strategy": stats.get("strategy"),

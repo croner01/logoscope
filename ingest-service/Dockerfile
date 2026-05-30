@@ -1,38 +1,30 @@
-FROM python:3.11-slim
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src/ingest-service
+
+COPY ingest-service/go.mod ingest-service/go.sum ./
+RUN go mod download
+
+COPY ingest-service/cmd ./cmd
+COPY ingest-service/internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/ingest-service ./cmd/ingest
+
+FROM alpine:3.20
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONFAULTHANDLER=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app/shared_lib
+ENV TZ=UTC
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/ingest-service /usr/local/bin/ingest-service
 
-# 复制依赖文件
-COPY ingest-service/requirements.txt .
+RUN addgroup -S ingest && adduser -S -G ingest ingest \
+    && chown ingest:ingest /usr/local/bin/ingest-service
 
-# 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements.txt
+USER ingest
 
-# 复制共享代码到独立目录
-COPY shared_src/ /app/shared_lib/
-RUN ln -s /app/shared_lib /app/shared_lib/shared_src
-
-# 复制应用代码
-COPY ingest-service/ .
-
-# 暴露端口
 EXPOSE 8080
 
-# 健康检查
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/health || exit 1
 
-# 运行应用
-CMD ["python", "main.py"]
+CMD ["/usr/local/bin/ingest-service"]

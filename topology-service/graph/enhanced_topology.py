@@ -166,7 +166,12 @@ class EnhancedTopologyBuilder:
 
             # 1. 从多个数据源收集数据
             traces_data = self._get_traces_topology(safe_time_window, namespace)
-            logs_data = self._get_logs_topology(safe_time_window, namespace, enable_time_correlation)
+            logs_data = self._get_logs_topology(
+                safe_time_window,
+                namespace,
+                enable_time_correlation,
+                enable_heuristics,
+            )
             metrics_data = self._get_metrics_topology(safe_time_window, namespace)
 
             # 2. 合并节点
@@ -297,26 +302,42 @@ class EnhancedTopologyBuilder:
             # 按 trace_id 分组
             traces_by_id = defaultdict(list)
             for row in result:
-                if len(row) >= 7:
-                    trace_id, span_id, parent_span_id, service_name, operation_name, status, timestamp, attributes_json = row
-                    # 从 attributes_json 中提取 duration_ms（如果存在）
-                    duration_ms = 0
-                    try:
-                        if attributes_json:
-                            import json
-                            attrs = json.loads(attributes_json)
-                            duration_ms = attrs.get('duration_ms', 0) or attrs.get('duration', 0) or 0
-                    except:
-                        pass
-                    traces_by_id[trace_id].append({
-                        "span_id": span_id,
-                        "parent_span_id": parent_span_id,
-                        "service_name": service_name,
-                        "operation_name": operation_name,
-                        "duration_ms": duration_ms,
-                        "status": status,
-                        "timestamp": timestamp
-                    })
+                if isinstance(row, dict):
+                    trace_id = row.get("trace_id")
+                    span_id = row.get("span_id")
+                    parent_span_id = row.get("parent_span_id")
+                    service_name = row.get("service_name")
+                    operation_name = row.get("operation_name")
+                    status = row.get("status")
+                    timestamp = row.get("timestamp")
+                    attributes_json = row.get("attributes_json")
+                elif isinstance(row, (list, tuple)) and len(row) >= 8:
+                    trace_id, span_id, parent_span_id, service_name, operation_name, status, timestamp, attributes_json = row[:8]
+                else:
+                    continue
+
+                # 从 attributes_json 中提取 duration_ms（如果存在）
+                duration_ms = 0
+                try:
+                    if attributes_json:
+                        import json
+                        attrs = json.loads(attributes_json)
+                        duration_ms = attrs.get('duration_ms', 0) or attrs.get('duration', 0) or 0
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to parse attributes_json for trace %s: %s",
+                        trace_id,
+                        exc,
+                    )
+                traces_by_id[trace_id].append({
+                    "span_id": span_id,
+                    "parent_span_id": parent_span_id,
+                    "service_name": service_name,
+                    "operation_name": operation_name,
+                    "duration_ms": duration_ms,
+                    "status": status,
+                    "timestamp": timestamp
+                })
 
             # 分析每个 trace 的调用关系
             for trace_id, spans in traces_by_id.items():
@@ -345,7 +366,7 @@ class EnhancedTopologyBuilder:
 
                     nodes[service_name]["metrics"]["span_count"] += 1
                     nodes[service_name]["metrics"]["avg_duration"] += span["duration_ms"]
-                    if span["status"].lower() in ["error", "failed"]:
+                    if str(span.get("status") or "").lower() in ["error", "failed"]:
                         nodes[service_name]["metrics"]["error_count"] += 1
 
                     # 如果有 parent_span_id，找到父服务
@@ -375,7 +396,7 @@ class EnhancedTopologyBuilder:
                         edge_key = (parent_service, service_name)
                         edges[edge_key]["call_count"] += 1
                         edges[edge_key]["total_duration"] += span["duration_ms"]
-                        if span["status"].lower() in ["error", "failed"]:
+                        if str(span.get("status") or "").lower() in ["error", "failed"]:
                             edges[edge_key]["error_count"] += 1
                         edges[edge_key]["data_sources"].add("traces")
 
@@ -432,7 +453,8 @@ class EnhancedTopologyBuilder:
         self,
         time_window: str,
         namespace: str = None,
-        enable_time_correlation: bool = True
+        enable_time_correlation: bool = True,
+        enable_heuristics: bool = True,
     ) -> Dict[str, Any]:
         """
         从 logs 表获取服务节点和时间关联关系
@@ -474,48 +496,64 @@ class EnhancedTopologyBuilder:
             service_logs = defaultdict(list)  # {service_name: [log_entries]}
 
             for row in result:
-                if len(row) >= 7:
-                    service_name, pod_name, ns, timestamp, level, trace_id, span_id, log_count = row
-                    service_logs[service_name].append({
-                        "pod_name": pod_name,
-                        "namespace": ns,
-                        "timestamp": timestamp,
-                        "level": level,
-                        "trace_id": trace_id,
-                        "span_id": span_id,
-                        "log_count": log_count
-                    })
+                if isinstance(row, dict):
+                    service_name = row.get("service_name")
+                    pod_name = row.get("pod_name")
+                    ns = row.get("namespace")
+                    timestamp = row.get("timestamp")
+                    level = row.get("level")
+                    trace_id = row.get("trace_id")
+                    span_id = row.get("span_id")
+                    log_count = int(row.get("log_count") or 0)
+                elif isinstance(row, (list, tuple)) and len(row) >= 8:
+                    service_name, pod_name, ns, timestamp, level, trace_id, span_id, log_count = row[:8]
+                    log_count = int(log_count or 0)
+                else:
+                    continue
 
-                    # 添加节点
-                    if service_name not in nodes:
-                        nodes[service_name] = {
-                            "id": service_name,
-                            "label": service_name,
-                            "type": "service",
-                            "name": service_name,
-                            "metrics": {
-                                "log_count": 0,
-                                "error_count": 0,
-                                "pod_count": 0,
-                                "data_source": "logs",
-                                "confidence": 0.5,
-                                "has_traces": False
-                            }
+                if not service_name:
+                    continue
+
+                service_logs[service_name].append({
+                    "pod_name": pod_name,
+                    "namespace": ns,
+                    "timestamp": timestamp,
+                    "level": level,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "log_count": log_count
+                })
+
+                # 添加节点
+                if service_name not in nodes:
+                    nodes[service_name] = {
+                        "id": service_name,
+                        "label": service_name,
+                        "type": "service",
+                        "name": service_name,
+                        "metrics": {
+                            "log_count": 0,
+                            "error_count": 0,
+                            "pod_count": 0,
+                            "data_source": "logs",
+                            "confidence": 0.5,
+                            "has_traces": False
                         }
+                    }
 
-                    nodes[service_name]["metrics"]["log_count"] += log_count
-                    if level and level.lower() in ["error", "fatal", "critical"]:
-                        nodes[service_name]["metrics"]["error_count"] += log_count
+                nodes[service_name]["metrics"]["log_count"] += log_count
+                if level and str(level).lower() in ["error", "fatal", "critical"]:
+                    nodes[service_name]["metrics"]["error_count"] += log_count
 
-                    if trace_id:
-                        nodes[service_name]["metrics"]["has_traces"] = True
-                        nodes[service_name]["metrics"]["confidence"] = 0.6  # 有trace_id的日志置信度更高
+                if trace_id:
+                    nodes[service_name]["metrics"]["has_traces"] = True
+                    nodes[service_name]["metrics"]["confidence"] = 0.6  # 有trace_id的日志置信度更高
 
-                    # 统计pod数量
-                    if pod_name:
-                        nodes[service_name]["metrics"]["pod_count"] = len(set(
-                            log["pod_name"] for log in service_logs[service_name]
-                        ))
+                # 统计pod数量
+                if pod_name:
+                    nodes[service_name]["metrics"]["pod_count"] = len(set(
+                        log["pod_name"] for log in service_logs[service_name]
+                    ))
 
             # 时间关联算法（核心亮点）
             edges = []
@@ -824,21 +862,32 @@ class EnhancedTopologyBuilder:
 
             nodes = []
             for row in result:
-                if len(row) >= 3:
-                    service_name, metric_count, unique_metrics = row
+                if isinstance(row, dict):
+                    service_name = row.get("service_name")
+                    metric_count = int(row.get("metric_count") or 0)
+                    unique_metrics = int(row.get("unique_metrics") or 0)
+                elif isinstance(row, (list, tuple)) and len(row) >= 3:
+                    service_name, metric_count, unique_metrics = row[:3]
+                    metric_count = int(metric_count or 0)
+                    unique_metrics = int(unique_metrics or 0)
+                else:
+                    continue
 
-                    nodes.append({
-                        "id": service_name,
-                        "label": service_name,
-                        "type": "service",
-                        "name": service_name,
-                        "metrics": {
-                            "metric_count": metric_count,
-                            "unique_metrics": unique_metrics,
-                            "data_source": "metrics",
-                            "confidence": 0.4
-                        }
-                    })
+                if not service_name:
+                    continue
+
+                nodes.append({
+                    "id": service_name,
+                    "label": service_name,
+                    "type": "service",
+                    "name": service_name,
+                    "metrics": {
+                        "metric_count": metric_count,
+                        "unique_metrics": unique_metrics,
+                        "data_source": "metrics",
+                        "confidence": 0.4
+                    }
+                })
 
             return {
                 "nodes": nodes,

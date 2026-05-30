@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-relay-config
+  namespace: islap
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush                     1
+        Daemon                    off
+        Log_Level                 info
+        Parsers_File              parsers.conf
+        HTTP_Server               On
+        HTTP_Listen               0.0.0.0
+        HTTP_Port                 2020
+        storage.path              /buffers/
+        storage.sync              normal
+        storage.backlog.mem_limit 256MB
+
+    [INPUT]
+        Name                      forward
+        Listen                    0.0.0.0
+        Port                      24224
+        storage.type              filesystem
+
+    [FILTER]
+        Name                      modify
+        Match                     *
+        Add                       relay_name fluent-bit-relay
+        Add                       relay_namespace islap
+
+    [OUTPUT]
+        Name                      opentelemetry
+        Match                     *
+        Host                      otel-collector.islap.svc.cluster.local
+        Port                      4318
+        Logs_uri                  /v1/logs
+        tls                       off
+        Logs_body_key_attributes  true
+        Retry_Limit               False
+
+  parsers.conf: |
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Strict Off
+        Time_Keep   On
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-relay
+  namespace: islap
+  labels:
+    app: fluent-bit-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit-relay
+  template:
+    metadata:
+      labels:
+        app: fluent-bit-relay
+    spec:
+      containers:
+      - name: fluent-bit
+        image: localhost:5000/logoscope/fluent-bit:3.1.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: forward
+          containerPort: 24224
+          protocol: TCP
+        - name: http
+          containerPort: 2020
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /fluent-bit/etc/fluent-bit.conf
+          subPath: fluent-bit.conf
+        - name: config
+          mountPath: /fluent-bit/etc/parsers.conf
+          subPath: parsers.conf
+        - name: buffers
+          mountPath: /buffers
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: fluent-bit-relay-config
+      - name: buffers
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit-relay
+  namespace: islap
+  labels:
+    app: fluent-bit-relay
+spec:
+  type: ClusterIP
+  selector:
+    app: fluent-bit-relay
+  ports:
+  - name: forward
+    port: 24224
+    targetPort: forward
+    protocol: TCP
+  - name: http
+    port: 2020
+    targetPort: http
+    protocol: TCP

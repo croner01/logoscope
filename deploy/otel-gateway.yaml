@@ -40,7 +40,7 @@ metadata:
   labels:
     app: otel-gateway
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: otel-gateway
@@ -52,7 +52,7 @@ spec:
       serviceAccountName: otel-gateway
       containers:
       - name: otel-gateway
-        image: localhost:5000/logoscope/opentelemetry-collector:0.111.0
+        image: crpi-69dqzledzukvkhrd.cn-beijing.personal.cr.aliyuncs.com/logoscope/opentelemetry-collector:0.111.0
         imagePullPolicy: IfNotPresent
         command:
         - "/otelcol"
@@ -74,9 +74,10 @@ spec:
           mountPath: /var/log/otel-gateway
         resources:
           limits:
+            cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 200m
+            cpu: 500m
             memory: 1Gi
       terminationGracePeriodSeconds: 30
       volumes:
@@ -107,10 +108,14 @@ data:
             endpoint: 0.0.0.0:4318
 
     processors:
+      memory_limiter:
+        limit_mib: 1500
+        spike_limit_mib: 512
+        check_interval: 2s
       batch:
-        timeout: 10s
-        send_batch_size: 100
-        send_batch_max_size: 200
+        timeout: 2s
+        send_batch_size: 2000
+        send_batch_max_size: 4000
       attributes:
         actions:
           - key: env
@@ -121,38 +126,83 @@ data:
             action: upsert
 
     exporters:
-      debug:
-        verbosity: detailed
       otlphttp/ingest-service:
         endpoint: http://ingest-service:8080
         tls:
           insecure: true
-        compression: none
+        compression: gzip
         timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
       otlphttp/ingest-service-metrics:
         endpoint: http://ingest-service:8080
         tls:
           insecure: true
-        compression: none
+        compression: gzip
         timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
       otlphttp/ingest-service-traces:
         endpoint: http://ingest-service:8080
         tls:
           insecure: true
-        compression: none
+        compression: gzip
         timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 8
+          queue_size: 20000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_interval: 30s
+          max_elapsed_time: 300s
 
     service:
       pipelines:
         logs:
           receivers: [otlp]
-          processors: [batch, attributes]
-          exporters: [otlphttp/ingest-service, debug]
+          processors: [memory_limiter, attributes, batch]
+          exporters: [otlphttp/ingest-service]
         metrics:
           receivers: [otlp]
-          processors: [batch, attributes]
-          exporters: [otlphttp/ingest-service-metrics, debug]
+          processors: [memory_limiter, attributes, batch]
+          exporters: [otlphttp/ingest-service-metrics]
         traces:
           receivers: [otlp]
-          processors: [batch, attributes]
-          exporters: [otlphttp/ingest-service-traces, debug]
+          processors: [memory_limiter, attributes, batch]
+          exporters: [otlphttp/ingest-service-traces]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: otel-gateway-hpa
+  namespace: islap
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: otel-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

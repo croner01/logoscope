@@ -23,7 +23,7 @@ metadata:
   labels:
     app: query-service
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: query-service
@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
       - name: query-service
-        image: localhost:5000/logoscope/query-service:latest
+        image: localhost:5000/logoscope/query-service:20260324-fe08fix1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8002
@@ -93,12 +93,21 @@ spec:
           value: "http://otel-collector.islap.svc.cluster.local:4318"
         - name: PREAGG_SCHEMA_VERSION
           value: "v2"
+        - name: QUERY_LOGS_DEFAULT_TIME_WINDOW
+          value: "1 HOUR"
+        - name: QUERY_LOGS_MAX_THREADS
+          value: "4"
+        - name: QUERY_LOGS_HARD_MAX_WINDOW_MINUTES
+          value: "10080"
+        - name: QUERY_LOGS_FACETS_DEGRADE_WINDOW_MINUTES
+          value: "10080"
         resources:
           limits:
+            cpu: "2"
             memory: 1Gi
           requests:
-            cpu: 200m
-            memory: 256Mi
+            cpu: 500m
+            memory: 512Mi
         livenessProbe:
           httpGet:
             path: /health
@@ -115,3 +124,23 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 10
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: query-service-hpa
+  namespace: islap
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: query-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70

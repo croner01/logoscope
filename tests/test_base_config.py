@@ -5,7 +5,7 @@ import os
 import pytest
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'shared_src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared_src'))
 
 from config.base import BaseConfig
 
@@ -70,17 +70,6 @@ class TestBaseConfig:
         
         assert neo4j_config["host"] == "neo4j-server"
         assert neo4j_config["port"] == 7688
-
-    def test_redis_config(self, monkeypatch):
-        """测试 Redis 配置"""
-        monkeypatch.setenv("REDIS_HOST", "redis-server")
-        monkeypatch.setenv("REDIS_PORT", "6380")
-        
-        config = BaseConfig()
-        redis_config = config.get_redis_config()
-        
-        assert redis_config["host"] == "redis-server"
-        assert redis_config["port"] == 6380
 
     def test_storage_config(self):
         """测试完整存储配置"""

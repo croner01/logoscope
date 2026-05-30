@@ -1,7 +1,7 @@
 /**
- * 相似知识库展示组件
+ * 本地相似案例展示组件
  *
- * 展示与当前日志相似的历史知识条目，包括：
+ * 展示本地知识库内与当前日志相似的历史案例，包括：
  * - 相似度评分
  * - 匹配特征
  * - 解决方案
@@ -63,8 +63,8 @@ const SimilarCases: React.FC<SimilarCasesProps> = ({ cases, loading, onSelectCas
     return (
       <div className="text-center py-8 text-gray-500">
         <BookOpen className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-        <p>未找到相似知识条目</p>
-        <p className="text-sm mt-1">知识库中暂无相似的历史问题</p>
+        <p>未找到本地相似案例</p>
+        <p className="text-sm mt-1">本地知识库中暂无相似的历史问题</p>
       </div>
     );
   }
@@ -72,7 +72,7 @@ const SimilarCases: React.FC<SimilarCasesProps> = ({ cases, loading, onSelectCas
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="font-medium text-gray-900">相似知识库推荐</h4>
+        <h4 className="font-medium text-gray-900">本地相似案例推荐</h4>
         <span className="text-sm text-gray-500">{cases.length} 个相关条目</span>
       </div>
 

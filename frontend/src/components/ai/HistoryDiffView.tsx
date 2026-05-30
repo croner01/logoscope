@@ -10,12 +10,12 @@ interface DiffLine {
 }
 
 interface HistoryDiffViewProps {
-  beforeValue: any;
-  afterValue: any;
+  beforeValue: unknown;
+  afterValue: unknown;
   maxHeightClassName?: string;
 }
 
-const formatDiffValue = (value: any): string => {
+const formatDiffValue = (value: unknown): string => {
   if (value === null || value === undefined) {
     return '-';
   }
@@ -32,10 +32,10 @@ const formatDiffValue = (value: any): string => {
   }
 };
 
-const toLines = (value: any): string[] =>
+const toLines = (value: unknown): string[] =>
   formatDiffValue(value).replace(/\r\n/g, '\n').split('\n');
 
-const buildLineDiff = (beforeValue: any, afterValue: any): DiffLine[] => {
+const buildLineDiff = (beforeValue: unknown, afterValue: unknown): DiffLine[] => {
   const beforeLines = toLines(beforeValue);
   const afterLines = toLines(afterValue);
   const n = beforeLines.length;

@@ -4,6 +4,11 @@ realtime_topology 缓存策略测试
 import asyncio
 import os
 import sys
+import time
+from datetime import datetime, timezone
+
+import pytest
+from fastapi import HTTPException
 
 # 添加 topology-service 根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -173,3 +178,85 @@ def test_hybrid_invalidation_keeps_realtime_stats_cache(monkeypatch):
 
     assert realtime_topology._get_cached_topology(stats_cache_key) == {"total_nodes": 9}
     assert realtime_topology._get_cached_topology(hybrid_cache_key) is not None
+
+
+def test_get_topology_changes_to_timestamp_is_valid_iso8601(monkeypatch):
+    """changes 接口返回的 to 字段应是可解析的 ISO8601 UTC 时间。"""
+    _reset_cache_state()
+    fake_builder = _FakeBuilder()
+    monkeypatch.setattr(realtime_topology, "get_hybrid_topology_builder", lambda _: fake_builder)
+
+    result = asyncio.run(
+        realtime_topology.get_topology_changes(since="2026-03-01T00:00:00Z")
+    )
+
+    to_value = result.get("to")
+    assert isinstance(to_value, str)
+    assert not to_value.endswith("+00:00Z")
+    parsed = datetime.fromisoformat(to_value.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+
+
+def test_get_topology_changes_invalid_since_returns_400():
+    """changes 接口对非法 since 参数应返回 400。"""
+    _reset_cache_state()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(realtime_topology.get_topology_changes(since="not-a-time"))
+    assert exc.value.status_code == 400
+    assert "invalid 'since' timestamp" in str(exc.value.detail)
+
+
+def test_broadcast_topology_update_tolerates_connection_set_mutation():
+    """广播过程中连接集合变化不应触发 RuntimeError。"""
+    _reset_cache_state()
+
+    class _MutatingWebSocket:
+        def __init__(self, mutate_once: bool = False):
+            self.messages = []
+            self._mutate_once = mutate_once
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+            if self._mutate_once:
+                self._mutate_once = False
+                realtime_topology._websocket_connections.add(_MutatingWebSocket())
+
+    ws = _MutatingWebSocket(mutate_once=True)
+    realtime_topology._websocket_connections.add(ws)
+
+    asyncio.run(realtime_topology.broadcast_topology_update({"nodes": [], "edges": []}))
+
+    assert len(ws.messages) == 1
+    sent = ws.messages[0]
+    assert sent.get("type") == "topology_update"
+    assert sent.get("data") == {"nodes": [], "edges": []}
+
+
+def test_set_storage_adapter_resets_snapshot_manager_and_cache():
+    """切换 storage 时应重置快照管理器并清空缓存。"""
+    _reset_cache_state()
+    realtime_topology._snapshot_manager = object()
+    realtime_topology._topology_cache["k1"] = ({"v": 1}, time.time() + 60)
+    realtime_topology._topology_inflight_tasks["k1"] = object()
+
+    realtime_topology.set_storage_adapter(object())
+
+    assert realtime_topology._snapshot_manager is None
+    assert len(realtime_topology._topology_cache) == 0
+    assert len(realtime_topology._topology_inflight_tasks) == 0
+
+
+def test_list_topology_snapshots_invalid_time_returns_400(monkeypatch):
+    """快照列表接口对非法时间参数应返回 400。"""
+    _reset_cache_state()
+
+    class _FakeSnapshotManager:
+        def list_snapshots(self, **kwargs):
+            _ = kwargs
+            return []
+
+    monkeypatch.setattr(realtime_topology, "_get_snapshot_manager", lambda: _FakeSnapshotManager())
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(realtime_topology.list_topology_snapshots(from_time="invalid-time"))
+    assert exc.value.status_code == 400

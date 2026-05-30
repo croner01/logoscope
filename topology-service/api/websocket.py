@@ -12,12 +12,19 @@ import asyncio
 import os
 from typing import Set, Dict, Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
+
+from api.topology_build_coordinator import build_hybrid_topology_coalesced
 
 logger = logging.getLogger(__name__)
 WS_BROADCAST_BATCH_SIZE = max(1, int(os.getenv("WS_BROADCAST_BATCH_SIZE", "32")))
 WS_SEND_TIMEOUT_SECONDS = max(0.1, float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "1.0")))
+
+
+def _utc_now_iso() -> str:
+    """Return timezone-aware UTC timestamp in ISO 8601 format."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class TopologyConnectionManager:
@@ -100,6 +107,20 @@ class TopologyConnectionManager:
         max_text = "default" if max_per_log is None else str(max_per_log)
         return f"{normalized['time_window']}|{namespace}|{threshold}|{inference_mode}|{enabled}|{patterns}|{min_text}|{max_text}"
 
+    def _cleanup_stale_topology_cache_keys(self) -> None:
+        """Remove cached topology entries that no active subscription references."""
+        active_keys = {
+            self._subscription_key(params)
+            for params in self._subscriptions.values()
+        }
+        stale_keys = [
+            key for key in self._last_topology_hash_by_key.keys()
+            if key not in active_keys
+        ]
+        for key in stale_keys:
+            self._last_topology_hash_by_key.pop(key, None)
+            self._last_topology_data_by_key.pop(key, None)
+
     async def connect(self, websocket: WebSocket):
         """接受新的 WebSocket 连接"""
         await websocket.accept()
@@ -111,6 +132,7 @@ class TopologyConnectionManager:
         """断开 WebSocket 连接"""
         self.active_connections.discard(websocket)
         self._subscriptions.pop(websocket, None)
+        self._cleanup_stale_topology_cache_keys()
         logger.info(f"Topology WebSocket disconnected. Total: {len(self.active_connections)}")
 
     async def send_to(self, websocket: WebSocket, message: Dict[str, Any]):
@@ -164,6 +186,7 @@ class TopologyConnectionManager:
             current = self._subscriptions.get(websocket) or self._normalize_subscription()
             merged = {**current, **(params or {})}
             self._subscriptions[websocket] = self._normalize_subscription(merged)
+            self._cleanup_stale_topology_cache_keys()
 
     def get_subscription(self, websocket: WebSocket) -> Dict[str, Any]:
         """获取订阅参数"""
@@ -178,7 +201,7 @@ class TopologyConnectionManager:
             }
         """
         groups: Dict[str, Dict[str, Any]] = {}
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             params = self.get_subscription(connection)
             key = self._subscription_key(params)
             if key not in groups:
@@ -244,8 +267,8 @@ async def topology_poller(hybrid_builder, interval: float = 5.0):
                     if not connections:
                         continue
 
-                    topology = await asyncio.to_thread(
-                        hybrid_builder.build_topology,
+                    topology = await build_hybrid_topology_coalesced(
+                        hybrid_builder,
                         time_window=params.get("time_window", "1 HOUR"),
                         namespace=params.get("namespace"),
                         confidence_threshold=params.get("confidence_threshold", 0.3),
@@ -262,7 +285,7 @@ async def topology_poller(hybrid_builder, interval: float = 5.0):
                         "type": "topology_update",
                         "data": topology,
                         "subscription": params,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": _utc_now_iso(),
                     }
                     await topology_manager.broadcast_to(connections, message)
                     logger.debug("Topology change detected and sent for subscription %s", subscription_key)
@@ -292,7 +315,7 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
         await topology_manager.send_to(websocket, {
             "type": "connected",
             "message": "Topology WebSocket connected",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": _utc_now_iso(),
         })
 
         # 发送当前订阅下的缓存拓扑
@@ -302,7 +325,7 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
             await topology_manager.send_to(websocket, {
                 "type": "topology_update",
                 "data": last_topology,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": _utc_now_iso(),
             })
 
         while True:
@@ -319,7 +342,7 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
                     if action == "ping":
                         await topology_manager.send_to(websocket, {
                             "type": "pong",
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": _utc_now_iso(),
                         })
 
                     elif action == "subscribe":
@@ -329,10 +352,10 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
                         await topology_manager.send_to(websocket, {
                             "type": "subscribed",
                             "params": normalized,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": _utc_now_iso(),
                         })
-                        topology = await asyncio.to_thread(
-                            hybrid_builder.build_topology,
+                        topology = await build_hybrid_topology_coalesced(
+                            hybrid_builder,
                             time_window=normalized.get("time_window", "1 HOUR"),
                             namespace=normalized.get("namespace"),
                             confidence_threshold=normalized.get("confidence_threshold", 0.3),
@@ -347,13 +370,13 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
                             "type": "topology_update",
                             "data": topology,
                             "subscription": normalized,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": _utc_now_iso(),
                         })
 
                     elif action == "get":
                         subscription = topology_manager.get_subscription(websocket)
-                        topology = await asyncio.to_thread(
-                            hybrid_builder.build_topology,
+                        topology = await build_hybrid_topology_coalesced(
+                            hybrid_builder,
                             time_window=subscription.get("time_window", "1 HOUR"),
                             namespace=subscription.get("namespace"),
                             confidence_threshold=subscription.get("confidence_threshold", 0.3),
@@ -368,20 +391,20 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
                             "type": "topology_update",
                             "data": topology,
                             "subscription": subscription,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": _utc_now_iso(),
                         })
 
                 except json.JSONDecodeError:
                     await topology_manager.send_to(websocket, {
                         "type": "error",
                         "message": "Invalid JSON format",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": _utc_now_iso(),
                     })
 
             except asyncio.TimeoutError:
                 await topology_manager.send_to(websocket, {
                     "type": "ping",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": _utc_now_iso(),
                 })
 
     except WebSocketDisconnect:
@@ -402,5 +425,5 @@ async def broadcast_topology_event(event_type: str, data: Dict[str, Any]):
     await topology_manager.broadcast({
         "type": event_type,
         "data": data,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": _utc_now_iso(),
     })

@@ -1,5 +1,5 @@
-# 构建阶段
-FROM node:20-alpine AS builder
+# 依赖阶段
+FROM node:20-alpine AS deps
 
 WORKDIR /app
 
@@ -10,8 +10,17 @@ RUN npm config set registry https://registry.npmmirror.com
 COPY frontend/package*.json ./
 RUN npm install --legacy-peer-deps
 
-# 复制源代码并构建
-COPY frontend/ .
+# 质量检查阶段（在镜像构建期间执行）
+#FROM deps AS qa
+#
+#COPY frontend/ .
+#RUN npm run lint
+#RUN npm run typecheck
+
+# 构建阶段
+FROM deps AS builder
+
+COPY frontend/ ./
 RUN npm run build
 
 # 生产阶段

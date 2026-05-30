@@ -18,7 +18,8 @@ import asyncio
 from collections import defaultdict, OrderedDict
 from typing import Dict, Any, List, Optional, Tuple, Set
 from fastapi import APIRouter, HTTPException, Query, Response
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 _SHARED_LIB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "shared_src"))
 if os.path.isdir(_SHARED_LIB_PATH) and _SHARED_LIB_PATH not in sys.path:
@@ -78,6 +79,30 @@ _TRACE_TIME_COLUMN_CANDIDATES: Tuple[str, ...] = ("timestamp", "start_time")
 _TRACE_ATTRS_COLUMN_CANDIDATES: Tuple[str, ...] = ("attributes_json", "tags")
 _TRACE_DURATION_COLUMN_CANDIDATES: Tuple[str, ...] = ("duration_ms", "duration", "duration_us", "duration_ns")
 _VALUE_KPI_CACHE: "OrderedDict[str, Tuple[Dict[str, Any], float]]" = OrderedDict()
+_QUERY_TIME_INPUT_DEFAULT_TZ_ENV = "QUERY_TIME_INPUT_DEFAULT_TZ"
+_QUERY_TIME_INPUT_DEFAULT_TZ = str(os.getenv(_QUERY_TIME_INPUT_DEFAULT_TZ_ENV, "UTC") or "UTC").strip() or "UTC"
+
+
+def _resolve_query_input_tz() -> tzinfo:
+    """Resolve default timezone used for naive request timestamps."""
+    tz_text = _QUERY_TIME_INPUT_DEFAULT_TZ
+    if tz_text.upper() == "UTC":
+        return timezone.utc
+    offset_match = re.fullmatch(r"([+-])(\d{2}):?(\d{2})", tz_text)
+    if offset_match:
+        sign, hh, mm = offset_match.groups()
+        minutes = int(hh) * 60 + int(mm)
+        if sign == "-":
+            minutes = -minutes
+        return timezone(timedelta(minutes=minutes))
+    try:
+        return ZoneInfo(tz_text)
+    except Exception:
+        logger.warning("Invalid %s=%s, fallback to UTC", _QUERY_TIME_INPUT_DEFAULT_TZ_ENV, tz_text)
+        return timezone.utc
+
+
+_QUERY_INPUT_TZINFO = _resolve_query_input_tz()
 
 
 def _get_expected_preagg_tables() -> Tuple[str, ...]:
@@ -104,7 +129,34 @@ _PREAGG_LAST_LOGGED_STATE: Optional[str] = None
 
 async def _run_blocking(func, *args, **kwargs):
     """Execute blocking storage-heavy logic in thread pool to avoid event-loop stalls."""
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        return func(*args, **kwargs)
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _coerce_int_query_param(
+    value: Any,
+    *,
+    default_value: int,
+    minimum: int,
+    maximum: Optional[int] = None,
+) -> int:
+    """
+    Normalize integer-like query arguments for direct route calls in tests.
+
+    FastAPI route functions can be invoked directly (without request parsing),
+    and in that case default values may still be `Query(...)` objects.
+    """
+    raw_value = getattr(value, "default", value)
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = int(default_value)
+
+    normalized = max(int(minimum), parsed)
+    if maximum is not None:
+        normalized = min(normalized, int(maximum))
+    return normalized
 
 
 def _read_int_env(name: str, default_value: int) -> int:
@@ -461,8 +513,10 @@ def _select_first_allowed_column(
 
 
 def _append_health_check_exclusion(conditions: List[str], params: Dict[str, Any]) -> None:
-    """追加健康检查日志过滤条件（使用低开销子串匹配）。"""
-    escaped = [token.replace("\\", "\\\\").replace("'", "\\'") for token in HEALTH_CHECK_FAST_TOKENS]
+    """追加健康检查日志过滤条件（大小写不敏感匹配，避免 lowerUTF8 整列开销）。"""
+    _ = params
+    normalized_tokens = [str(token or "").strip().lower() for token in HEALTH_CHECK_FAST_TOKENS if str(token or "").strip()]
+    escaped = [token.replace("\\", "\\\\").replace("'", "\\'") for token in normalized_tokens]
     tokens_literal = ", ".join(f"'{token}'" for token in escaped)
     conditions.append(f"multiSearchAnyCaseInsensitiveUTF8(message, [{tokens_literal}]) = 0")
 
@@ -519,6 +573,42 @@ def _expand_level_match_values(levels: List[str]) -> List[str]:
     return query_param_utils.expand_level_match_values(levels)
 
 
+def _normalize_int_param(
+    value: Any,
+    *,
+    default: int,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    """归一化整数参数，兼容直接函数调用时传入的 Query 对象。"""
+    try:
+        if isinstance(value, bool):
+            raise ValueError("bool is not treated as int param")
+        resolved = int(str(value).strip())
+    except Exception:
+        resolved = default
+    if minimum is not None:
+        resolved = max(resolved, minimum)
+    if maximum is not None:
+        resolved = min(resolved, maximum)
+    return resolved
+
+
+def _normalize_bool_param(value: Any, *, default: bool) -> bool:
+    """归一化布尔参数，兼容直接函数调用时传入的 Query 对象。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
 def _append_exact_match_filter(
     *,
     conditions: List[str],
@@ -543,8 +633,37 @@ def _convert_timestamp(ts: Optional[str]) -> Optional[str]:
         return ts
 
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        if isinstance(ts, datetime):
+            dt = ts
+        else:
+            text = str(ts).strip()
+            if not text:
+                return text
+            if text.replace(".", "", 1).isdigit():
+                numeric_value = float(text)
+                absolute_value = abs(numeric_value)
+                if absolute_value >= 1e17:  # nanoseconds
+                    dt = datetime.fromtimestamp(numeric_value / 1_000_000_000, tz=timezone.utc)
+                elif absolute_value >= 1e14:  # microseconds
+                    dt = datetime.fromtimestamp(numeric_value / 1_000_000, tz=timezone.utc)
+                elif absolute_value >= 1e11:  # milliseconds
+                    dt = datetime.fromtimestamp(numeric_value / 1_000, tz=timezone.utc)
+                else:  # seconds
+                    dt = datetime.fromtimestamp(numeric_value, tz=timezone.utc)
+            else:
+                normalized = text
+                if " " in normalized and "T" not in normalized:
+                    normalized = normalized.replace(" ", "T")
+                if normalized.endswith("Z"):
+                    normalized = f"{normalized[:-1]}+00:00"
+                if len(normalized) >= 5 and normalized[-5] in {"+", "-"} and normalized[-3] != ":":
+                    normalized = f"{normalized[:-2]}:{normalized[-2:]}"
+                dt = datetime.fromisoformat(normalized)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_QUERY_INPUT_TZINFO)
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
     except Exception:
         return ts
 
@@ -573,8 +692,8 @@ def _extract_duration_ms(row: Dict[str, Any], tags: Dict[str, Any]) -> float:
             # 当显式字段为 0（旧数据/无该列回填值）时，继续尝试 tags 回退
             if duration_value > 0:
                 return duration_value
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to parse duration_ms from row: %r (%s)", raw_duration, exc)
 
     candidate_keys = [
         "duration_ms",
@@ -694,6 +813,27 @@ def _build_grouped_trace_duration_expr(schema: Dict[str, Optional[str]]) -> str:
         return f"greatest(max({duration_ms_expr}), {fallback_expr})"
 
     return fallback_expr
+
+
+def _build_grouped_trace_duration_expr_light(schema: Dict[str, Optional[str]]) -> str:
+    """
+    构建轻量 trace 时长聚合表达式（用于 traces 列表分页）。
+
+    与完整表达式相比，避免读取 attributes_json/tags 大字段，
+    以降低 ClickHouse 在高并发分页查询下的内存峰值。
+    """
+    time_col = schema.get("time_col")
+    duration_col = schema.get("duration_col")
+
+    base_expr = (
+        f"toFloat64(greatest(dateDiff('millisecond', min({time_col}), max({time_col})), 0))"
+        if time_col
+        else "0.0"
+    )
+    if duration_col:
+        duration_ms_expr = _duration_column_to_ms_expr(duration_col) or "0.0"
+        return f"greatest(max({duration_ms_expr}), {base_expr})"
+    return base_expr
 
 
 def _extract_request_id(attrs: Dict[str, Any], message: str = "") -> str:
@@ -929,8 +1069,15 @@ async def query_logs(
     limit: int = Query(100, ge=1, le=10000),
     service_name: Optional[str] = Query(None),
     service_names: Optional[List[str]] = Query(None, description="服务名多选过滤"),
+    namespace: Optional[str] = Query(None, description="命名空间过滤"),
+    namespaces: Optional[List[str]] = Query(None, description="命名空间多选过滤"),
     trace_id: Optional[str] = Query(None),
+    trace_ids: Optional[List[str]] = Query(None, description="Trace ID 多值精确过滤"),
+    correlation_mode: Optional[str] = Query("and", description="trace/request 组合模式: and|or"),
+    request_id: Optional[str] = Query(None, description="Request ID 精确过滤"),
+    request_ids: Optional[List[str]] = Query(None, description="Request ID 多值精确过滤"),
     pod_name: Optional[str] = Query(None),
+    container_name: Optional[str] = Query(None, description="容器名称过滤"),
     level: Optional[str] = Query(None),
     levels: Optional[List[str]] = Query(None, description="日志级别多选过滤"),
     start_time: Optional[str] = Query(None),
@@ -939,6 +1086,8 @@ async def query_logs(
     search: Optional[str] = Query(None, description="搜索关键词"),
     source_service: Optional[str] = Query(None, description="拓扑上下文: 源服务"),
     target_service: Optional[str] = Query(None, description="拓扑上下文: 目标服务"),
+    source_namespace: Optional[str] = Query(None, description="拓扑上下文: 源命名空间"),
+    target_namespace: Optional[str] = Query(None, description="拓扑上下文: 目标命名空间"),
     time_window: Optional[str] = Query(None, description="拓扑上下文: 时间窗口（如 1 HOUR）"),
     cursor: Optional[str] = Query(None, description="分页游标（用于加载下一页）"),
     anchor_time: Optional[str] = Query(None, description="查询锚点时间，分页期间保持稳定"),
@@ -950,7 +1099,9 @@ async def query_logs(
         limit: 返回数量限制
         service_name: 服务名过滤
         trace_id: Trace ID 过滤
+        request_id: Request ID 精确过滤
         pod_name: Pod 名称过滤
+        container_name: 容器名称过滤
         level: 日志级别过滤
         start_time: 开始时间
         end_time: 结束时间
@@ -964,25 +1115,54 @@ async def query_logs(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        normalized_limit = _normalize_int_param(limit, default=100, minimum=1, maximum=10000)
+        normalized_exclude_health_check = _normalize_bool_param(exclude_health_check, default=False)
+        normalized_service_name = _normalize_optional_str(service_name)
+        normalized_namespace = _normalize_optional_str(namespace)
+        normalized_trace_id = _normalize_optional_str(trace_id)
+        normalized_correlation_mode = _normalize_optional_str(correlation_mode)
+        normalized_request_id = _normalize_optional_str(request_id)
+        normalized_pod_name = _normalize_optional_str(pod_name)
+        normalized_container_name = _normalize_optional_str(container_name)
+        normalized_level = _normalize_optional_str(level)
+        normalized_start_time = _normalize_optional_str(start_time)
+        normalized_end_time = _normalize_optional_str(end_time)
+        normalized_search = _normalize_optional_str(search)
+        normalized_source_service = _normalize_optional_str(source_service)
+        normalized_target_service = _normalize_optional_str(target_service)
+        normalized_source_namespace = _normalize_optional_str(source_namespace)
+        normalized_target_namespace = _normalize_optional_str(target_namespace)
+        normalized_time_window = _normalize_optional_str(time_window)
+        normalized_cursor = _normalize_optional_str(cursor)
+        normalized_anchor_time = _normalize_optional_str(anchor_time)
         return await _run_blocking(
             logs_query_utils.query_logs,
             storage_adapter=_STORAGE_ADAPTER,
-            limit=limit,
-            service_name=service_name,
+            limit=normalized_limit,
+            service_name=normalized_service_name,
             service_names=service_names,
-            trace_id=trace_id,
-            pod_name=pod_name,
-            level=level,
+            namespace=normalized_namespace,
+            namespaces=namespaces,
+            trace_id=normalized_trace_id,
+            correlation_mode=normalized_correlation_mode,
+            request_id=normalized_request_id,
+            pod_name=normalized_pod_name,
+            trace_ids=_normalize_optional_str_list(trace_ids),
+            request_ids=_normalize_optional_str_list(request_ids),
+            container_name=normalized_container_name,
+            level=normalized_level,
             levels=levels,
-            start_time=start_time,
-            end_time=end_time,
-            exclude_health_check=exclude_health_check,
-            search=search,
-            source_service=source_service,
-            target_service=target_service,
-            time_window=time_window,
-            cursor=cursor,
-            anchor_time=anchor_time,
+            start_time=normalized_start_time,
+            end_time=normalized_end_time,
+            exclude_health_check=normalized_exclude_health_check,
+            search=normalized_search,
+            source_service=normalized_source_service,
+            target_service=normalized_target_service,
+            source_namespace=normalized_source_namespace,
+            target_namespace=normalized_target_namespace,
+            time_window=normalized_time_window,
+            cursor=normalized_cursor,
+            anchor_time=normalized_anchor_time,
             normalize_optional_str_fn=_normalize_optional_str,
             normalize_topology_context_fn=_normalize_topology_context,
             normalize_optional_str_list_fn=_normalize_optional_str_list,
@@ -996,6 +1176,8 @@ async def query_logs(
             logger=logger,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"查询日志数据时出错: {e}", extra={"error": str(e)})
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1005,18 +1187,27 @@ async def query_logs(
 async def query_logs_facets(
     service_name: Optional[str] = Query(None),
     service_names: Optional[List[str]] = Query(None, description="服务名多选过滤"),
+    namespace: Optional[str] = Query(None, description="命名空间过滤"),
+    namespaces: Optional[List[str]] = Query(None, description="命名空间多选过滤"),
     trace_id: Optional[str] = Query(None),
+    trace_ids: Optional[List[str]] = Query(None, description="Trace ID 多值精确过滤"),
+    correlation_mode: Optional[str] = Query("and", description="trace/request 组合模式: and|or"),
+    request_id: Optional[str] = Query(None, description="Request ID 精确过滤"),
+    request_ids: Optional[List[str]] = Query(None, description="Request ID 多值精确过滤"),
     pod_name: Optional[str] = Query(None),
+    container_name: Optional[str] = Query(None, description="容器名称过滤"),
     level: Optional[str] = Query(None),
     levels: Optional[List[str]] = Query(None, description="日志级别多选过滤"),
     start_time: Optional[str] = Query(None),
     end_time: Optional[str] = Query(None),
-    exclude_health_check: bool = Query(True, description="过滤健康检查日志"),
+    exclude_health_check: bool = Query(False, description="过滤健康检查日志"),
     search: Optional[str] = Query(None, description="搜索关键词"),
     source_service: Optional[str] = Query(None, description="拓扑上下文: 源服务"),
     target_service: Optional[str] = Query(None, description="拓扑上下文: 目标服务"),
     time_window: Optional[str] = Query(None, description="拓扑上下文: 时间窗口（如 1 HOUR）"),
+    anchor_time: Optional[str] = Query(None, description="查询锚点时间，保持 Facet 与日志列表一致"),
     limit_services: int = Query(200, ge=1, le=1000, description="服务 Facet 返回数量"),
+    limit_namespaces: int = Query(200, ge=1, le=1000, description="命名空间 Facet 返回数量"),
     limit_levels: int = Query(20, ge=1, le=50, description="级别 Facet 返回数量"),
 ) -> Dict[str, Any]:
     """返回日志筛选 Facet（服务、级别）统计。"""
@@ -1024,24 +1215,52 @@ async def query_logs_facets(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        normalized_limit_services = _normalize_int_param(limit_services, default=200, minimum=1, maximum=1000)
+        normalized_limit_namespaces = _normalize_int_param(limit_namespaces, default=200, minimum=1, maximum=1000)
+        normalized_limit_levels = _normalize_int_param(limit_levels, default=20, minimum=1, maximum=50)
+        normalized_exclude_health_check = _normalize_bool_param(exclude_health_check, default=False)
+        normalized_service_name = _normalize_optional_str(service_name)
+        normalized_namespace = _normalize_optional_str(namespace)
+        normalized_trace_id = _normalize_optional_str(trace_id)
+        normalized_correlation_mode = _normalize_optional_str(correlation_mode)
+        normalized_request_id = _normalize_optional_str(request_id)
+        normalized_pod_name = _normalize_optional_str(pod_name)
+        normalized_container_name = _normalize_optional_str(container_name)
+        normalized_level = _normalize_optional_str(level)
+        normalized_start_time = _normalize_optional_str(start_time)
+        normalized_end_time = _normalize_optional_str(end_time)
+        normalized_search = _normalize_optional_str(search)
+        normalized_source_service = _normalize_optional_str(source_service)
+        normalized_target_service = _normalize_optional_str(target_service)
+        normalized_time_window = _normalize_optional_str(time_window)
+        normalized_anchor_time = _normalize_optional_str(anchor_time)
         return await _run_blocking(
             logs_query_utils.query_logs_facets,
             storage_adapter=_STORAGE_ADAPTER,
-            service_name=service_name,
+            service_name=normalized_service_name,
             service_names=service_names,
-            trace_id=trace_id,
-            pod_name=pod_name,
-            level=level,
+            namespace=normalized_namespace,
+            namespaces=namespaces,
+            trace_id=normalized_trace_id,
+            correlation_mode=normalized_correlation_mode,
+            request_id=normalized_request_id,
+            pod_name=normalized_pod_name,
+            container_name=normalized_container_name,
+            trace_ids=_normalize_optional_str_list(trace_ids),
+            request_ids=_normalize_optional_str_list(request_ids),
+            level=normalized_level,
             levels=levels,
-            start_time=start_time,
-            end_time=end_time,
-            exclude_health_check=exclude_health_check,
-            search=search,
-            source_service=source_service,
-            target_service=target_service,
-            time_window=time_window,
-            limit_services=limit_services,
-            limit_levels=limit_levels,
+            start_time=normalized_start_time,
+            end_time=normalized_end_time,
+            exclude_health_check=normalized_exclude_health_check,
+            search=normalized_search,
+            source_service=normalized_source_service,
+            target_service=normalized_target_service,
+            time_window=normalized_time_window,
+            anchor_time=normalized_anchor_time,
+            limit_services=normalized_limit_services,
+            limit_namespaces=normalized_limit_namespaces,
+            limit_levels=normalized_limit_levels,
             normalize_topology_context_fn=_normalize_topology_context,
             normalize_optional_str_list_fn=_normalize_optional_str_list,
             normalize_level_values_fn=_normalize_level_values,
@@ -1050,6 +1269,8 @@ async def query_logs_facets(
             append_health_check_exclusion_fn=_append_health_check_exclusion,
             convert_timestamp_fn=_convert_timestamp,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error(f"查询日志 Facet 时出错: {exc}", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1059,7 +1280,11 @@ async def query_logs_facets(
 async def query_topology_edge_logs_preview(
     source_service: str = Query(..., min_length=1, description="拓扑链路源服务"),
     target_service: str = Query(..., min_length=1, description="拓扑链路目标服务"),
+    namespace: Optional[str] = Query(None, description="命名空间过滤"),
+    source_namespace: Optional[str] = Query(None, description="拓扑链路源命名空间"),
+    target_namespace: Optional[str] = Query(None, description="拓扑链路目标命名空间"),
     time_window: str = Query("1 HOUR", description="查询窗口"),
+    anchor_time: Optional[str] = Query(None, description="查询锚点时间"),
     limit: int = Query(20, ge=1, le=200),
     exclude_health_check: bool = Query(True, description="是否过滤健康检查日志"),
 ) -> Dict[str, Any]:
@@ -1071,16 +1296,30 @@ async def query_topology_edge_logs_preview(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        normalized_limit = _normalize_int_param(limit, default=20, minimum=1, maximum=200)
+        normalized_exclude_health_check = _normalize_bool_param(exclude_health_check, default=True)
+        normalized_source_service = _normalize_optional_str(source_service)
+        normalized_target_service = _normalize_optional_str(target_service)
+        normalized_namespace = _normalize_optional_str(namespace)
+        normalized_source_namespace = _normalize_optional_str(source_namespace)
+        normalized_target_namespace = _normalize_optional_str(target_namespace)
+        normalized_time_window = _normalize_optional_str(time_window) or "1 HOUR"
+        normalized_anchor_time = _normalize_optional_str(anchor_time)
         return await _run_blocking(
             logs_query_utils.query_topology_edge_logs_preview,
             storage_adapter=_STORAGE_ADAPTER,
-            source_service=source_service,
-            target_service=target_service,
-            time_window=time_window,
-            limit=limit,
-            exclude_health_check=exclude_health_check,
+            source_service=normalized_source_service,
+            target_service=normalized_target_service,
+            time_window=normalized_time_window,
+            limit=normalized_limit,
+            exclude_health_check=normalized_exclude_health_check,
+            namespace=normalized_namespace,
+            source_namespace=normalized_source_namespace,
+            target_namespace=normalized_target_namespace,
+            anchor_time=normalized_anchor_time,
             sanitize_interval_fn=_sanitize_interval,
             append_health_check_exclusion_fn=_append_health_check_exclusion,
+            convert_timestamp_fn=_convert_timestamp,
             to_datetime_fn=_to_datetime,
         )
     except HTTPException:
@@ -1097,9 +1336,18 @@ async def query_logs_aggregated(
     max_patterns: int = Query(50, ge=1, le=200, description="返回最大 pattern 数"),
     max_samples: int = Query(3, ge=1, le=10, description="每个 pattern 保留示例数"),
     service_name: Optional[str] = Query(None, description="服务名过滤"),
+    service_names: Optional[List[str]] = Query(None, description="服务名多选过滤"),
+    namespace: Optional[str] = Query(None, description="命名空间过滤"),
+    namespaces: Optional[List[str]] = Query(None, description="命名空间多选过滤"),
     trace_id: Optional[str] = Query(None, description="Trace ID 过滤"),
+    trace_ids: Optional[List[str]] = Query(None, description="Trace ID 多值精确过滤"),
+    correlation_mode: Optional[str] = Query("and", description="trace/request 组合模式: and|or"),
+    request_id: Optional[str] = Query(None, description="Request ID 精确过滤"),
+    request_ids: Optional[List[str]] = Query(None, description="Request ID 多值精确过滤"),
     pod_name: Optional[str] = Query(None, description="Pod 名称过滤"),
+    container_name: Optional[str] = Query(None, description="容器名称过滤"),
     level: Optional[str] = Query(None, description="日志级别过滤"),
+    levels: Optional[List[str]] = Query(None, description="日志级别多选过滤"),
     start_time: Optional[str] = Query(None, description="开始时间"),
     end_time: Optional[str] = Query(None, description="结束时间"),
     exclude_health_check: bool = Query(True, description="过滤健康检查日志"),
@@ -1107,6 +1355,7 @@ async def query_logs_aggregated(
     source_service: Optional[str] = Query(None, description="拓扑上下文: 源服务"),
     target_service: Optional[str] = Query(None, description="拓扑上下文: 目标服务"),
     time_window: Optional[str] = Query(None, description="拓扑上下文: 时间窗口（如 1 HOUR）"),
+    anchor_time: Optional[str] = Query(None, description="查询锚点时间，保持聚合与日志列表一致"),
 ) -> Dict[str, Any]:
     """
     智能 Pattern 聚合查询
@@ -1148,25 +1397,60 @@ async def query_logs_aggregated(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        normalized_limit = _normalize_int_param(limit, default=500, minimum=10, maximum=5000)
+        normalized_min_pattern_count = _normalize_int_param(min_pattern_count, default=2, minimum=1, maximum=100)
+        normalized_max_patterns = _normalize_int_param(max_patterns, default=50, minimum=1, maximum=200)
+        normalized_max_samples = _normalize_int_param(max_samples, default=3, minimum=1, maximum=10)
+        normalized_exclude_health_check = _normalize_bool_param(exclude_health_check, default=True)
+        normalized_service_names = _normalize_optional_str_list(service_names)
+        normalized_namespaces = _normalize_optional_str_list(namespaces)
+        normalized_levels = _normalize_optional_str_list(levels)
+        normalized_service_name = _normalize_optional_str(service_name)
+        normalized_namespace = _normalize_optional_str(namespace)
+        normalized_trace_id = _normalize_optional_str(trace_id)
+        normalized_correlation_mode = _normalize_optional_str(correlation_mode)
+        normalized_request_id = _normalize_optional_str(request_id)
+        normalized_pod_name = _normalize_optional_str(pod_name)
+        normalized_container_name = _normalize_optional_str(container_name)
+        normalized_level = _normalize_optional_str(level)
+        normalized_start_time = _normalize_optional_str(start_time)
+        normalized_end_time = _normalize_optional_str(end_time)
+        normalized_search = _normalize_optional_str(search)
+        normalized_source_service = _normalize_optional_str(source_service)
+        normalized_target_service = _normalize_optional_str(target_service)
+        normalized_time_window = _normalize_optional_str(time_window)
+        normalized_anchor_time = _normalize_optional_str(anchor_time)
         return await _run_blocking(
             logs_query_utils.query_logs_aggregated,
             storage_adapter=_STORAGE_ADAPTER,
-            limit=limit,
-            min_pattern_count=min_pattern_count,
-            max_patterns=max_patterns,
-            max_samples=max_samples,
-            service_name=service_name,
-            trace_id=trace_id,
-            pod_name=pod_name,
-            level=level,
-            start_time=start_time,
-            end_time=end_time,
-            exclude_health_check=exclude_health_check,
-            search=search,
-            source_service=source_service,
-            target_service=target_service,
-            time_window=time_window,
+            limit=normalized_limit,
+            min_pattern_count=normalized_min_pattern_count,
+            max_patterns=normalized_max_patterns,
+            max_samples=normalized_max_samples,
+            service_name=normalized_service_name,
+            service_names=normalized_service_names,
+            namespace=normalized_namespace,
+            namespaces=normalized_namespaces,
+            trace_id=normalized_trace_id,
+            correlation_mode=normalized_correlation_mode,
+            request_id=normalized_request_id,
+            pod_name=normalized_pod_name,
+            trace_ids=_normalize_optional_str_list(trace_ids),
+            request_ids=_normalize_optional_str_list(request_ids),
+            container_name=normalized_container_name,
+            level=normalized_level,
+            levels=normalized_levels,
+            start_time=normalized_start_time,
+            end_time=normalized_end_time,
+            exclude_health_check=normalized_exclude_health_check,
+            search=normalized_search,
+            source_service=normalized_source_service,
+            target_service=normalized_target_service,
+            time_window=normalized_time_window,
+            anchor_time=normalized_anchor_time,
             normalize_topology_context_fn=_normalize_topology_context,
+            normalize_optional_str_list_fn=_normalize_optional_str_list,
+            normalize_level_values_fn=_normalize_level_values,
             expand_level_match_values_fn=_expand_level_match_values,
             append_exact_match_filter_fn=_append_exact_match_filter,
             append_health_check_exclusion_fn=_append_health_check_exclusion,
@@ -1174,6 +1458,8 @@ async def query_logs_aggregated(
             logger=logger,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"聚合查询日志时出错: {e}", extra={"error": str(e)})
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1190,8 +1476,10 @@ async def query_logs_stats(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
-        return await _run_blocking(obs_query_utils.query_logs_stats, _STORAGE_ADAPTER, time_window=time_window)
-
+        normalized_time_window = _normalize_optional_str(time_window) or "24 HOUR"
+        return await _run_blocking(obs_query_utils.query_logs_stats, _STORAGE_ADAPTER, time_window=normalized_time_window)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"获取日志统计信息时出错: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1212,10 +1500,11 @@ async def query_metrics(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        safe_limit = _coerce_int_query_param(limit, default_value=100, minimum=1, maximum=10000)
         return await _run_blocking(
             obs_query_utils.query_metrics,
             storage_adapter=_STORAGE_ADAPTER,
-            limit=limit,
+            limit=safe_limit,
             service_name=service_name,
             metric_name=metric_name,
             start_time=start_time,
@@ -1249,6 +1538,7 @@ async def query_metrics_stats(
 @router.get("/traces")
 async def query_traces(
     limit: int = Query(100, ge=1, le=10000),
+    offset: int = Query(0, ge=0, le=200000),
     service_name: Optional[str] = Query(None),
     trace_id: Optional[str] = Query(None),
     start_time: Optional[str] = Query(None),
@@ -1262,17 +1552,20 @@ async def query_traces(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        safe_limit = _coerce_int_query_param(limit, default_value=100, minimum=1, maximum=10000)
+        safe_offset = _coerce_int_query_param(offset, default_value=0, minimum=0, maximum=200000)
         return await _run_blocking(
             obs_query_utils.query_traces,
             storage_adapter=_STORAGE_ADAPTER,
-            limit=limit,
+            limit=safe_limit,
+            offset=safe_offset,
             service_name=service_name,
             trace_id=trace_id,
             start_time=start_time,
             end_time=end_time,
             time_window=time_window,
             resolve_trace_schema_fn=_resolve_trace_schema,
-            build_grouped_trace_duration_expr_fn=_build_grouped_trace_duration_expr,
+            build_grouped_trace_duration_expr_fn=_build_grouped_trace_duration_expr_light,
             normalize_trace_status_fn=_normalize_trace_status,
             convert_timestamp_fn=_convert_timestamp,
         )
@@ -1295,11 +1588,12 @@ async def query_trace_spans(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        safe_limit = _coerce_int_query_param(limit, default_value=5000, minimum=1, maximum=20000)
         return await _run_blocking(
             obs_query_utils.query_trace_spans,
             storage_adapter=_STORAGE_ADAPTER,
             trace_id=trace_id,
-            limit=limit,
+            limit=safe_limit,
             resolve_trace_schema_fn=_resolve_trace_schema,
             parse_json_dict_fn=_parse_json_dict,
             extract_duration_ms_fn=_extract_duration_ms,
@@ -1350,6 +1644,7 @@ async def query_logs_context(
     trace_id: Optional[str] = Query(None, description="追踪ID"),
     pod_name: Optional[str] = Query(None, description="Pod名称"),
     namespace: Optional[str] = Query(None, description="命名空间"),
+    container_name: Optional[str] = Query(None, description="容器名称"),
     timestamp: Optional[str] = Query(None, description="时间戳（ISO 8601格式）"),
     before_count: int = Query(5, ge=0, le=50, description="当前日志之前的条数"),
     after_count: int = Query(5, ge=0, le=50, description="当前日志之后的条数"),
@@ -1358,7 +1653,7 @@ async def query_logs_context(
     """
     查询日志上下文（支持 log_id / trace_id / pod_name + timestamp 模式）
     
-    模式1: 通过 log_id 精确锚定日志，并返回同 Pod/命名空间的前后文
+    模式1: 通过 log_id 精确锚定日志，并返回同 Pod/命名空间/容器（若可用）的前后文
     模式2: 通过 trace_id 查询关联日志
     模式3: 通过 pod_name + timestamp 查询前后日志
     
@@ -1367,6 +1662,7 @@ async def query_logs_context(
         trace_id: 追踪ID（模式2）
         pod_name: Pod名称（模式3）
         namespace: 命名空间（模式3，可选）
+        container_name: 容器名称（模式3，可选）
         timestamp: 时间戳（模式3）
         before_count: 当前日志之前的条数（模式1/3）
         after_count: 当前日志之后的条数（模式1/3）
@@ -1379,17 +1675,27 @@ async def query_logs_context(
         raise HTTPException(status_code=503, detail="Storage adapter not initialized")
 
     try:
+        normalized_before_count = _normalize_int_param(before_count, default=5, minimum=0, maximum=50)
+        normalized_after_count = _normalize_int_param(after_count, default=5, minimum=0, maximum=50)
+        normalized_limit = _normalize_int_param(limit, default=100, minimum=1, maximum=1000)
+        normalized_log_id = _normalize_optional_str(log_id)
+        normalized_trace_id = _normalize_optional_str(trace_id)
+        normalized_pod_name = _normalize_optional_str(pod_name)
+        normalized_namespace = _normalize_optional_str(namespace)
+        normalized_container_name = _normalize_optional_str(container_name)
+        normalized_timestamp = _normalize_optional_str(timestamp)
         return await _run_blocking(
             logs_query_utils.query_logs_context,
             storage_adapter=_STORAGE_ADAPTER,
-            log_id=log_id,
-            trace_id=trace_id,
-            pod_name=pod_name,
-            namespace=namespace,
-            timestamp=timestamp,
-            before_count=before_count,
-            after_count=after_count,
-            limit=limit,
+            log_id=normalized_log_id,
+            trace_id=normalized_trace_id,
+            pod_name=normalized_pod_name,
+            namespace=normalized_namespace,
+            container_name=normalized_container_name,
+            timestamp=normalized_timestamp,
+            before_count=normalized_before_count,
+            after_count=normalized_after_count,
+            limit=normalized_limit,
             convert_timestamp_fn=_convert_timestamp,
         )
     except HTTPException:

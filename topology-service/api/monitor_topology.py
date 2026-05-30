@@ -50,8 +50,8 @@ storage = None
 
 
 async def _run_blocking(func, *args, **kwargs):
-    """Execute blocking topology builder calls in thread pool."""
-    return await asyncio.to_thread(func, *args, **kwargs)
+    """Execute blocking topology builder calls inline."""
+    return func(*args, **kwargs)
 
 
 def set_storage_adapter(storage_adapter):
@@ -586,6 +586,8 @@ async def search_topology_nodes(
             "count": len(matches)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error searching topology: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -698,6 +700,8 @@ async def get_aggregated_topology(
 
         return aggregated_topology
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting aggregated topology: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

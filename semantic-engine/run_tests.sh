@@ -21,9 +21,9 @@ fi
 echo "📦 激活虚拟环境..."
 source venv/bin/activate
 
-# 安装测试依赖
-echo "📥 安装测试依赖..."
-pip install -q -r requirements-test.txt
+# 安装运行时与测试依赖
+echo "📥 安装运行时与测试依赖..."
+pip install -q -r requirements-runtime.txt -r requirements-test.txt
 
 # 运行测试
 echo ""

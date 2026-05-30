@@ -73,3 +73,25 @@ def test_local_model_provider_uses_openai_compatible_client(monkeypatch):
     assert response.content == '{"summary":"ok"}'
     assert response.usage["total_tokens"] == 18
 
+
+def test_base_provider_cache_respects_max_entries():
+    class _DummyProvider(llm_service.BaseLLMProvider):
+        async def generate(self, prompt: str, system_prompt: str = "", **kwargs):
+            return llm_service.LLMResponse(content="", model="dummy", provider="dummy")
+
+    provider = _DummyProvider(
+        llm_service.LLMConfig(
+            provider="openai",
+            cache_enabled=True,
+            cache_ttl=3600,
+            cache_max_entries=2,
+        )
+    )
+
+    provider._set_cache("k1", "v1")
+    provider._set_cache("k2", "v2")
+    provider._set_cache("k3", "v3")
+
+    assert provider._get_cached("k1") is None
+    assert provider._get_cached("k2") == "v2"
+    assert provider._get_cached("k3") == "v3"

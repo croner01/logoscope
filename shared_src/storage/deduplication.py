@@ -37,6 +37,11 @@ def _sanitize_limit(value: Any, default_value: int = 1000, max_value: int = 1000
     return min(parsed, max_value)
 
 
+def _escape_sql_literal(value: Any) -> str:
+    """转义 SQL 字符串字面量中的单引号。"""
+    return str(value).replace("'", "''")
+
+
 class DataDeduplicator:
     """
     数据去重器
@@ -140,14 +145,22 @@ class DataDeduplicator:
         # 检查数据库
         if check_existing and self.storage.ch_client:
             try:
+                safe_event_id = _escape_sql_literal(event_id)
                 query = f"""
                 SELECT count()
                 FROM logs.logs
-                PREWHERE id = '{event_id}'
+                PREWHERE id = '{safe_event_id}'
                 LIMIT 1
                 """
                 result = self.storage.execute_query(query)
-                if result and result[0][0] > 0:
+                first_count = 0
+                if result:
+                    first_row = result[0]
+                    if isinstance(first_row, dict):
+                        first_count = int(first_row.get("count()", first_row.get("count", 0)) or 0)
+                    elif isinstance(first_row, (list, tuple)) and first_row:
+                        first_count = int(first_row[0] or 0)
+                if first_count > 0:
                     # 添加到缓存
                     self._event_id_cache.add(event_id)
                     return True
@@ -224,20 +237,29 @@ class DataDeduplicator:
                 service_name, timestamp_second, message_hash = parts
 
                 # 构建时间范围查询（该秒的前后 1 秒）
-                timestamp_start = f"{timestamp_second}.000000"
-                timestamp_end = f"{timestamp_second}.999999"
+                timestamp_start = _escape_sql_literal(f"{timestamp_second}.000000")
+                timestamp_end = _escape_sql_literal(f"{timestamp_second}.999999")
+                safe_service_name = _escape_sql_literal(service_name)
+                safe_message_hash = _escape_sql_literal(message_hash)
 
                 query = f"""
                 SELECT count()
                 FROM logs.logs
                 PREWHERE timestamp >= '{timestamp_start}'
                     AND timestamp <= '{timestamp_end}'
-                WHERE service_name = '{service_name}'
-                  AND substring(MD5(message), 1, 16) = '{message_hash}'
+                WHERE service_name = '{safe_service_name}'
+                  AND substring(MD5(message), 1, 16) = '{safe_message_hash}'
                 LIMIT 1
                 """
                 result = self.storage.execute_query(query)
-                if result and result[0][0] > 0:
+                first_count = 0
+                if result:
+                    first_row = result[0]
+                    if isinstance(first_row, dict):
+                        first_count = int(first_row.get("count()", first_row.get("count", 0)) or 0)
+                    elif isinstance(first_row, (list, tuple)) and first_row:
+                        first_count = int(first_row[0] or 0)
+                if first_count > 0:
                     # 添加到缓存
                     self._semantic_key_cache.add(semantic_key)
                     return True
@@ -365,19 +387,30 @@ class DataDeduplicator:
             }
 
             for row in result:
-                if len(row) >= 5:
-                    service_name, time_second, message_hash, dup_count, event_ids = row
+                if isinstance(row, dict):
+                    service_name = row.get("service_name")
+                    time_second = row.get("time_second")
+                    dup_count = int(row.get("duplicate_count", row.get("count", 0)) or 0)
+                    event_ids = row.get("event_ids") or []
+                elif isinstance(row, (list, tuple)) and len(row) >= 5:
+                    service_name, time_second, _message_hash, dup_count, event_ids = row[:5]
+                    dup_count = int(dup_count or 0)
+                else:
+                    continue
 
-                    analysis["duplicates_by_service"][service_name] += dup_count
-                    analysis["total_duplicate_events"] += dup_count
+                if not service_name or dup_count <= 0:
+                    continue
 
-                    if len(analysis["worst_offenders"]) < 10:
-                        analysis["worst_offenders"].append({
-                            "service": service_name,
-                            "time": str(time_second),
-                            "count": dup_count,
-                            "sample_ids": event_ids[:3]  # 只显示前 3 个
-                        })
+                analysis["duplicates_by_service"][service_name] += dup_count
+                analysis["total_duplicate_events"] += dup_count
+
+                if len(analysis["worst_offenders"]) < 10:
+                    analysis["worst_offenders"].append({
+                        "service": service_name,
+                        "time": str(time_second),
+                        "count": dup_count,
+                        "sample_ids": list(event_ids)[:3]  # 只显示前 3 个
+                    })
 
             # 转换 defaultdict 为普通 dict
             analysis["duplicates_by_service"] = dict(analysis["duplicates_by_service"])

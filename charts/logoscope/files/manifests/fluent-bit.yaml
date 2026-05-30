@@ -171,7 +171,7 @@ data:
         Refresh_Interval  5
         Mem_Buf_Limit     35MB
         Skip_Long_Lines   On
-        multiline.parser  multiline_openstack_traceback,docker,cri
+        multiline.parser  multiline_openstack_traceback,multiline_openstack_ts_boundary,docker,cri
         DB                /var/log/flb_kube.db
         DB.Sync           Normal
         Exclude_Path      /var/log/containers/*query-service*,/var/log/containers/*otel-collector*,/var/log/containers/*multiline-test*,/var/log/containers/*test-java-exception*,/var/log/containers/*fluent-bit*,/var/log/containers/*semantic-engine*,/var/log/containers/*otel-gateway*,/var/log/containers/*ingest-service*
@@ -229,7 +229,8 @@ data:
         Format      regex
         Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
         Time_Key    time
-        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Strict Off
         Time_Keep   On
 
     [PARSER]
@@ -287,5 +288,15 @@ data:
         parser        docker
         key_content   log
         flush_timeout 2500
-        rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+(?:ERROR|CRITICAL)\s+[A-Za-z0-9_\.\-]+\s+Traceback \(most recent call last\):)$/" "cont"
-        rule          "cont"        "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+(?:ERROR|CRITICAL)\s+[A-Za-z0-9_\.\-]+\s+(?:\s+.*|During handling of the above exception, another exception occurred:|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*))$/" "cont"
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\d+\s+(?:ERROR|CRITICAL)\s+[A-Za-z0-9_\.\-]+(?:\s+\[-\])?\s+.*(?:Traceback \(most recent call last\):|Error contacting|ConnectFailure|Max retries exceeded|No address found).*)$/" "cont"
+        rule          "cont"        "/^(Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*)$/" "cont"
+    [MULTILINE_PARSER]
+        name          multiline_openstack_ts_boundary
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 3000
+        # 有时间戳 + 级别 => 新日志开始
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|WARN|WARNING|FATAL)\s+.*)$/" "cont"
+        # 非“时间戳+级别”开头 => 归到上一条（含空行）
+        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|WARN|WARNING|FATAL)\s+).*$/" "cont"

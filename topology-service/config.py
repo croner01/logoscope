@@ -32,6 +32,37 @@ class Config(BaseServiceConfig):
             300,
             min_value=1,
         )
+        self.TOPOLOGY_BUILD_PROCESS_ISOLATION_ENABLED = self.parse_bool_env(
+            "TOPOLOGY_BUILD_PROCESS_ISOLATION_ENABLED",
+            True,
+        )
+        self.TOPOLOGY_BUILD_PROCESS_TIMEOUT_SECONDS = self.parse_int_env(
+            "TOPOLOGY_BUILD_PROCESS_TIMEOUT_SECONDS",
+            45,
+            min_value=3,
+        )
+        self.TOPOLOGY_BUILD_PROCESS_FALLBACK_LOCAL_ON_ERROR = self.parse_bool_env(
+            "TOPOLOGY_BUILD_PROCESS_FALLBACK_LOCAL_ON_ERROR",
+            True,
+        )
+        self.TOPOLOGY_BUILD_PROCESS_MAX_CONCURRENCY = self.parse_int_env(
+            "TOPOLOGY_BUILD_PROCESS_MAX_CONCURRENCY",
+            2,
+            min_value=1,
+        )
+        self.TOPOLOGY_BUILD_PROCESS_MAX_QUEUE_SIZE = self.parse_int_env(
+            "TOPOLOGY_BUILD_PROCESS_MAX_QUEUE_SIZE",
+            64,
+            min_value=1,
+        )
+        self.TOPOLOGY_BUILD_PROCESS_ACQUIRE_TIMEOUT_SECONDS = self.parse_int_env(
+            "TOPOLOGY_BUILD_PROCESS_ACQUIRE_TIMEOUT_SECONDS",
+            2,
+            min_value=1,
+        )
+        process_python = os.getenv("TOPOLOGY_BUILD_PROCESS_PYTHON", "")
+        process_python = process_python.strip()
+        self.TOPOLOGY_BUILD_PROCESS_PYTHON = process_python or None
 
     def get_clickhouse_config(self) -> Dict[str, Any]:
         return super().get_clickhouse_config()

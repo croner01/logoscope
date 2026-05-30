@@ -60,14 +60,14 @@ async def query_metrics(
             prewhere_conditions.append("metric_name = {metric_name:String}")
             params["metric_name"] = metric_name
         if start_time:
-            prewhere_conditions.append("timestamp >= toDateTime64({start_time:String}, 9)")
+            prewhere_conditions.append("timestamp >= toDateTime64({start_time:String}, 9, 'UTC')")
             params["start_time"] = start_time
         if end_time:
-            prewhere_conditions.append("timestamp <= toDateTime64({end_time:String}, 9)")
+            prewhere_conditions.append("timestamp <= toDateTime64({end_time:String}, 9, 'UTC')")
             params["end_time"] = end_time
             if not start_time:
                 prewhere_conditions.append(
-                    f"timestamp > toDateTime64({{end_time:String}}, 9) - INTERVAL {_DEFAULT_METRICS_WINDOW}"
+                    f"timestamp > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {_DEFAULT_METRICS_WINDOW}"
                 )
         if not start_time and not end_time:
             prewhere_conditions.append(f"timestamp > now() - INTERVAL {_DEFAULT_METRICS_WINDOW}")
@@ -188,14 +188,14 @@ async def query_traces(
             prewhere_conditions.append("trace_id = {trace_id:String}")
             params["trace_id"] = trace_id
         if start_time:
-            prewhere_conditions.append("timestamp >= toDateTime64({start_time:String}, 9)")
+            prewhere_conditions.append("timestamp >= toDateTime64({start_time:String}, 9, 'UTC')")
             params["start_time"] = start_time
         if end_time:
-            prewhere_conditions.append("timestamp <= toDateTime64({end_time:String}, 9)")
+            prewhere_conditions.append("timestamp <= toDateTime64({end_time:String}, 9, 'UTC')")
             params["end_time"] = end_time
             if not start_time and not trace_id:
                 prewhere_conditions.append(
-                    f"timestamp > toDateTime64({{end_time:String}}, 9) - INTERVAL {_DEFAULT_TRACES_WINDOW}"
+                    f"timestamp > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {_DEFAULT_TRACES_WINDOW}"
                 )
         if not start_time and not end_time:
             prewhere_conditions.append(f"timestamp > now() - INTERVAL {_DEFAULT_TRACES_WINDOW}")

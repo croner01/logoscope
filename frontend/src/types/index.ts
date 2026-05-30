@@ -38,7 +38,7 @@ export type DashboardCard = {
   id: string;
   type: 'metric' | 'chart' | 'log' | 'trace' | 'topology';
   title: string;
-  config: any;
+  config: Record<string, unknown>;
   position: {
     x: number;
     y: number;
@@ -146,9 +146,9 @@ export type TopologyNode = {
     confidence?: number;
     data_sources?: string[];
     data_source?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   };
-  [key: string]: any;
+  [key: string]: unknown;
 };
 
 /**
@@ -168,6 +168,6 @@ export type TopologyEdge = {
     confidence_boost?: number;
     avg_latency?: number;
     error_rate?: number;
-    [key: string]: any;
+    [key: string]: unknown;
   };
 };

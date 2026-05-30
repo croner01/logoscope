@@ -83,6 +83,7 @@ scripts/k8s-image-ops.sh rollout-status all
 
 - `docs/k8s-image-ops.md`
 - `docs/operations/int03-release-notes-2026-02-27.md`（本轮迭代发布说明与验证结果）
+- `docs/operations/clickhouse-release3-performance-2026-03-05.md`（ClickHouse Release 3 性能优化发布记录）
 
 ### 手动部署
 

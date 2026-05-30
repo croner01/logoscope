@@ -273,6 +273,18 @@ class TestExtractLogLevel:
         result = extract_log_level(log_data)
         assert result == "warn"
 
+    def test_extract_level_from_timestamp_pid_prefix_message(self):
+        """兼容 2026-... <pid> WARNING ... 这类 OpenStack 前缀级别。"""
+        log_data = {
+            "message": (
+                "2026-03-07 14:31:47.944 1711 WARNING "
+                "os_brick.initiator.connectors.iscsi [req-xxx] "
+                "Could not find the iSCSI Initiator File"
+            ),
+        }
+        result = extract_log_level(log_data)
+        assert result == "warn"
+
     def test_extract_level_from_bracket_prefix_message(self):
         """兼容 [WARNING] ... 这类行首级别。"""
         log_data = {
@@ -286,6 +298,30 @@ class TestExtractLogLevel:
         log_data = {
             "level": "info",
             "message": "[WARNING] query timeout detected",
+        }
+        result = extract_log_level(log_data)
+        assert result == "warn"
+
+    def test_extract_level_from_key_value_fragment_message(self):
+        """兼容 `time=... level=error msg=...` 结构化片段。"""
+        log_data = {
+            "level": "info",
+            "message": (
+                'time="2026-03-05T02:59:03.598707283Z" level=error '
+                'msg="response completed with error"'
+            ),
+        }
+        result = extract_log_level(log_data)
+        assert result == "error"
+
+    def test_extract_level_from_nested_json_log_field(self):
+        """兼容包裹 JSON 中 log 字段的级别前缀。"""
+        log_data = {
+            "level": "info",
+            "message": (
+                '{"log":"2026-03-05 02:21:46.577 WARNING [query-service] '
+                '[CH_QUERY_SLOW] Slow query detected"}'
+            ),
         }
         result = extract_log_level(log_data)
         assert result == "warn"

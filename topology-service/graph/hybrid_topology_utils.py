@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def parse_env_bool(name: str, default: bool) -> bool:
@@ -195,8 +198,8 @@ def time_window_seconds(time_window: str) -> int:
             return amount * 3600
         if "DAY" in unit:
             return amount * 86400
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to parse time_window %r, fallback to 3600s (%s)", time_window, exc)
     return 3600
 
 
@@ -295,6 +298,13 @@ def match_service_from_host(
         if alt in known_services:
             return known_services[alt]
     return ""
+
+
+def build_service_node_id(service_name: Any, namespace: Any) -> str:
+    """Build a stable internal node id before contract normalization."""
+    normalized_service = str(service_name or "").strip()
+    normalized_namespace = str(namespace or "").strip()
+    return f"{normalized_namespace}::{normalized_service}"
 
 
 def extract_message_target_services(
@@ -405,13 +415,21 @@ def merge_nodes(
     def _normalize_namespace(value: Any) -> str:
         return str(value or "").strip()
 
-    def _namespace_quality(value: Any) -> int:
+    def _normalize_service_name(value: Any) -> str:
+        return str(value or "").strip().lower().replace("_", "-")
+
+    def _namespace_quality(value: Any, service_name: str = "") -> int:
         token = _normalize_namespace(value)
         if not token:
             return 0
         lowered = token.lower()
         if lowered in {"unknown", "none", "null", "-", "n/a"}:
             return 0
+        normalized_service = _normalize_service_name(service_name)
+        normalized_token = lowered.replace("_", "-")
+        if normalized_service and normalized_token == normalized_service:
+            # 命名空间与服务名完全一致时可疑（常见于误用 attributes.namespace），降级质量。
+            return 1
         if lowered == "default":
             return 1
         return 2
@@ -419,6 +437,14 @@ def merge_nodes(
     def _resolve_namespace(node: Dict[str, Any]) -> Tuple[str, int]:
         metrics = node.get("metrics", {}) if isinstance(node.get("metrics"), dict) else {}
         service = node.get("service", {}) if isinstance(node.get("service"), dict) else {}
+        service_name = (
+            node.get("id")
+            or service.get("name")
+            or node.get("name")
+            or node.get("label")
+            or metrics.get("service_name")
+            or ""
+        )
         candidates = (
             node.get("namespace"),
             metrics.get("namespace"),
@@ -429,7 +455,7 @@ def merge_nodes(
         best_quality = -1
         for candidate in candidates:
             normalized = _normalize_namespace(candidate)
-            quality = _namespace_quality(normalized)
+            quality = _namespace_quality(normalized, service_name=service_name)
             if quality > best_quality and normalized:
                 best_value = normalized
                 best_quality = quality
@@ -609,17 +635,99 @@ def apply_contract_schema(
     """Apply topology contract schema to nodes and edges."""
     contract_nodes: List[Dict[str, Any]] = []
     node_map: Dict[str, Dict[str, Any]] = {}
+    node_map_by_service_namespace: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    node_map_by_service: Dict[str, List[Dict[str, Any]]] = {}
 
     for node in nodes:
+        original_id = node.get("id")
         converted = apply_node_contract_fn(node)
+        node_key = str(converted.get("node_key") or "").strip()
+        if node_key:
+            converted["legacy_id"] = original_id
+            converted["id"] = node_key
+            metrics = converted.setdefault("metrics", {})
+            metrics.setdefault("legacy_id", original_id)
         contract_nodes.append(converted)
+        if original_id is not None:
+            node_map[original_id] = converted
         node_map[converted.get("id")] = converted
+        node_key = converted.get("node_key")
+        if node_key:
+            node_map[node_key] = converted
+        service = converted.get("service") if isinstance(converted.get("service"), dict) else {}
+        service_name = str(service.get("name") or converted.get("name") or converted.get("label") or "").strip().lower()
+        service_namespace = str(service.get("namespace") or converted.get("namespace") or "").strip().lower()
+        if service_name:
+            bucket = node_map_by_service.setdefault(service_name, [])
+            bucket.append(converted)
+            if service_namespace:
+                node_map_by_service_namespace.setdefault((service_name, service_namespace), converted)
 
     contract_edges: List[Dict[str, Any]] = []
     for edge in edges:
         source_node = node_map.get(edge.get("source"))
         target_node = node_map.get(edge.get("target"))
-        converted = apply_edge_contract_fn(edge, source_node=source_node, target_node=target_node)
+        edge_metrics = edge.get("metrics") if isinstance(edge.get("metrics"), dict) else {}
+
+        if source_node is None:
+            source_service = str(edge.get("source_service") or edge_metrics.get("source_service") or "").strip().lower()
+            source_namespace = str(edge.get("source_namespace") or edge_metrics.get("source_namespace") or "").strip().lower()
+            if source_service:
+                source_node = node_map_by_service_namespace.get((source_service, source_namespace))
+                if source_node is None:
+                    source_candidates = node_map_by_service.get(source_service) or []
+                    if len(source_candidates) == 1:
+                        source_node = source_candidates[0]
+
+        if target_node is None:
+            target_service = str(edge.get("target_service") or edge_metrics.get("target_service") or "").strip().lower()
+            target_namespace = str(edge.get("target_namespace") or edge_metrics.get("target_namespace") or "").strip().lower()
+            if target_service:
+                target_node = node_map_by_service_namespace.get((target_service, target_namespace))
+                if target_node is None:
+                    target_candidates = node_map_by_service.get(target_service) or []
+                    if len(target_candidates) == 1:
+                        target_node = target_candidates[0]
+
+        source_node_for_hook = copy.deepcopy(source_node) if isinstance(source_node, dict) else source_node
+        if isinstance(source_node_for_hook, dict) and source_node_for_hook.get("legacy_id") is not None:
+            source_node_for_hook["id"] = source_node_for_hook.get("legacy_id")
+
+        target_node_for_hook = copy.deepcopy(target_node) if isinstance(target_node, dict) else target_node
+        if isinstance(target_node_for_hook, dict) and target_node_for_hook.get("legacy_id") is not None:
+            target_node_for_hook["id"] = target_node_for_hook.get("legacy_id")
+
+        converted = apply_edge_contract_fn(
+            edge,
+            source_node=source_node_for_hook,
+            target_node=target_node_for_hook,
+        )
+        metrics = converted.setdefault("metrics", {})
+        source_key = str(
+            (source_node or {}).get("id")
+            or converted.get("source_node_key")
+            or metrics.get("source_node_key")
+            or converted.get("source")
+            or ""
+        ).strip()
+        target_key = str(
+            (target_node or {}).get("id")
+            or converted.get("target_node_key")
+            or metrics.get("target_node_key")
+            or converted.get("target")
+            or ""
+        ).strip()
+        if source_key:
+            converted["source_node_key"] = source_key
+            metrics["source_node_key"] = source_key
+        if target_key:
+            converted["target_node_key"] = target_key
+            metrics["target_node_key"] = target_key
+        source_service = str(converted.get("source_service") or metrics.get("source_service") or "").strip()
+        target_service = str(converted.get("target_service") or metrics.get("target_service") or "").strip()
+        converted["source"] = source_service or source_key or str(converted.get("source") or "").strip()
+        converted["target"] = target_service or target_key or str(converted.get("target") or "").strip()
+        converted["id"] = str(converted.get("edge_key") or converted.get("id") or "").strip() or converted.get("id")
         contract_edges.append(converted)
 
     return contract_nodes, contract_edges
@@ -629,16 +737,19 @@ def dedup_edges_by_metric_score(edges: List[Dict[str, Any]]) -> List[Dict[str, A
     """
     Deduplicate edges by (source, target), preferring higher call_count+confidence score.
     """
-    dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    dedup: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
     for edge in edges:
-        key = (edge.get("source"), edge.get("target"))
+        metrics = edge.get("metrics", {}) if isinstance(edge.get("metrics"), dict) else {}
+        source_namespace = str(edge.get("source_namespace") or metrics.get("source_namespace") or "").strip()
+        target_namespace = str(edge.get("target_namespace") or metrics.get("target_namespace") or "").strip()
+        key = (edge.get("source"), edge.get("target"), source_namespace, target_namespace)
         if key not in dedup:
             dedup[key] = copy.deepcopy(edge)
             continue
 
         current = dedup[key].get("metrics", {})
-        candidate = edge.get("metrics", {})
+        candidate = metrics
         current_score = to_float(current.get("call_count"), 0.0) + to_float(current.get("confidence"), 0.0)
         candidate_score = to_float(candidate.get("call_count"), 0.0) + to_float(candidate.get("confidence"), 0.0)
         if candidate_score > current_score:
@@ -762,25 +873,48 @@ def partition_prepared_inference_records(
 
 
 def compute_dropped_bidirectional_edges(
-    edge_acc: Dict[Tuple[str, str], Dict[str, Any]],
+    edge_acc: Dict[Tuple[Any, ...], Dict[str, Any]],
     *,
     inference_mode: str,
     min_support_time_window: int,
 ) -> Set[Tuple[str, str]]:
     """Suppress noisy reverse edges for time_window / trace_id inferred relations."""
     dropped_bidirectional: Set[Tuple[str, str]] = set()
-    for (source, target), item in edge_acc.items():
-        reverse_key = (target, source)
-        if source == target or reverse_key not in edge_acc:
+    for key, item in edge_acc.items():
+        if not isinstance(key, tuple):
             continue
-        if (source, target) in dropped_bidirectional or reverse_key in dropped_bidirectional:
+        if len(key) == 4:
+            source, target, source_namespace, target_namespace = key
+            reverse_keys = [
+                (target, source, target_namespace, source_namespace),
+                (target, source),
+            ]
+        elif len(key) == 2:
+            source, target = key
+            reverse_keys = [
+                (target, source),
+                (target, source, "", ""),
+            ]
+        else:
             continue
 
-        reverse_item = edge_acc[reverse_key]
+        reverse_item = None
+        for reverse_key in reverse_keys:
+            if reverse_key in edge_acc:
+                reverse_item = edge_acc[reverse_key]
+                break
+
+        pair_key = (source, target)
+        reverse_pair_key = (target, source)
+        if source == target or reverse_item is None:
+            continue
+        if pair_key in dropped_bidirectional or reverse_pair_key in dropped_bidirectional:
+            continue
+
         method_counts = item.get("method_counts") or {}
         reverse_method_counts = reverse_item.get("method_counts") or {}
-        method = method_counts.most_common(1)[0][0] if method_counts else "time_window"
-        reverse_method = reverse_method_counts.most_common(1)[0][0] if reverse_method_counts else "time_window"
+        method = resolve_dominant_inference_method(method_counts, default="time_window")
+        reverse_method = resolve_dominant_inference_method(reverse_method_counts, default="time_window")
         if method not in {"time_window", "trace_id"} or reverse_method not in {"time_window", "trace_id"}:
             continue
 
@@ -800,16 +934,16 @@ def compute_dropped_bidirectional_edges(
         if bigger < int(min_support_time_window) and abs(count - reverse_count) <= (
             0.9 if inference_mode == "hybrid_score" else 1.0
         ):
-            dropped_bidirectional.add((source, target))
-            dropped_bidirectional.add(reverse_key)
+            dropped_bidirectional.add(pair_key)
+            dropped_bidirectional.add(reverse_pair_key)
             continue
 
         ratio_threshold = 1.35 if inference_mode == "hybrid_score" else 1.5
         if smaller > 0 and bigger / smaller >= ratio_threshold:
             if count > reverse_count:
-                dropped_bidirectional.add(reverse_key)
+                dropped_bidirectional.add(reverse_pair_key)
             else:
-                dropped_bidirectional.add((source, target))
+                dropped_bidirectional.add(pair_key)
     return dropped_bidirectional
 
 
@@ -894,7 +1028,7 @@ def build_inference_method_policies(
 
 
 def compute_directional_consistency(
-    edge_acc: Dict[Tuple[str, str], Dict[str, Any]],
+    edge_acc: Dict[Tuple[str, str, str, str], Dict[str, Any]],
     *,
     source: str,
     target: str,
@@ -1039,15 +1173,25 @@ def build_inferred_edge_payload(
     temporal_stability: float,
     directional_consistency: float,
     last_seen: Any,
+    source_namespace: str = "",
+    target_namespace: str = "",
 ) -> Dict[str, Any]:
     """Build inferred edge output payload with stable contract fields."""
     return {
         "id": f"{source}-{target}-inferred",
         "source": source,
         "target": target,
+        "source_service": source,
+        "target_service": target,
+        "source_namespace": str(source_namespace or "").strip(),
+        "target_namespace": str(target_namespace or "").strip(),
         "label": "inferred-calls",
         "type": "calls",
         "metrics": {
+            "source_service": source,
+            "target_service": target,
+            "source_namespace": str(source_namespace or "").strip(),
+            "target_namespace": str(target_namespace or "").strip(),
             "call_count": count,
             "confidence": round(confidence, 3),
             "data_source": "inferred",
@@ -1221,6 +1365,8 @@ def evaluate_inference_edge(
     payload = build_inferred_edge_payload(
         source=source,
         target=target,
+        source_namespace=str(item.get("source_namespace") or "").strip(),
+        target_namespace=str(item.get("target_namespace") or "").strip(),
         count=count,
         confidence=scoring["confidence"],
         reason=method_reason.get(dominant_method, "time_window_correlation"),
@@ -1278,6 +1424,8 @@ def accumulate_group_sequence_edges(
                 "target_log_id": nxt.get("id"),
                 "source_ts": current.get("ts").isoformat() if current.get("ts") else "",
                 "target_ts": nxt.get("ts").isoformat() if nxt.get("ts") else "",
+                "source_namespace": str(current.get("namespace") or "").strip(),
+                "target_namespace": str(nxt.get("namespace") or "").strip(),
             }
             delta_sec = 0.0
             if current.get("ts") and nxt.get("ts"):
@@ -1286,6 +1434,8 @@ def accumulate_group_sequence_edges(
             added = add_inferred_fn(
                 source=source,
                 target=target,
+                source_namespace=str(current.get("namespace") or "").strip(),
+                target_namespace=str(nxt.get("namespace") or "").strip(),
                 evidence=evidence,
                 method=method,
                 event_ts=nxt.get("ts"),
@@ -1328,11 +1478,15 @@ def accumulate_message_target_edges(
             added = add_inferred_fn(
                 source=source,
                 target=target,
+                source_namespace=str(item.get("namespace") or "").strip(),
+                target_namespace="",
                 evidence={
                     "source_log_id": item.get("id"),
                     "source_ts": item.get("ts").isoformat() if item.get("ts") else "",
                     "message_hint": message_hint,
                     "target_service": target,
+                    "source_namespace": str(item.get("namespace") or "").strip(),
+                    "target_namespace": "",
                 },
                 method="message_target",
                 event_ts=item.get("ts"),
@@ -1394,12 +1548,16 @@ def accumulate_time_window_fallback_edges(
                     added = add_inferred_fn(
                         source=current.get("service_name"),
                         target=nxt.get("service_name"),
+                        source_namespace=str(current.get("namespace") or "").strip(),
+                        target_namespace=str(nxt.get("namespace") or "").strip(),
                         evidence={
                             "time_window_sec": round(delta, 3),
                             "source_log_id": current.get("id"),
                             "target_log_id": nxt.get("id"),
                             "source_ts": current.get("ts").isoformat() if current.get("ts") else "",
                             "target_ts": nxt.get("ts").isoformat() if nxt.get("ts") else "",
+                            "source_namespace": str(current.get("namespace") or "").strip(),
+                            "target_namespace": str(nxt.get("namespace") or "").strip(),
                             "candidate_rank": rank,
                             "window_score": round(score, 3),
                         },
@@ -1428,12 +1586,16 @@ def accumulate_time_window_fallback_edges(
                 added = add_inferred_fn(
                     source=current.get("service_name"),
                     target=nxt.get("service_name"),
+                    source_namespace=str(current.get("namespace") or "").strip(),
+                    target_namespace=str(nxt.get("namespace") or "").strip(),
                     evidence={
                         "time_window_sec": round(delta, 3),
                         "source_log_id": current.get("id"),
                         "target_log_id": nxt.get("id"),
                         "source_ts": current.get("ts").isoformat() if current.get("ts") else "",
                         "target_ts": nxt.get("ts").isoformat() if nxt.get("ts") else "",
+                        "source_namespace": str(current.get("namespace") or "").strip(),
+                        "target_namespace": str(nxt.get("namespace") or "").strip(),
                     },
                     method="time_window",
                     event_ts=nxt.get("ts"),

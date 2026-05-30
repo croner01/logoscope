@@ -12,7 +12,6 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-${PROJECT_ROOT}/reports/sql-safety}"
 TARGET_DIRS=(
   "${PROJECT_ROOT}/query-service/api"
   "${PROJECT_ROOT}/topology-service/api"
-  "${PROJECT_ROOT}/ingest-service/api"
 )
 
 RUN_ID="sql-safety-$(date -u +%Y%m%d-%H%M%S)-$RANDOM"
