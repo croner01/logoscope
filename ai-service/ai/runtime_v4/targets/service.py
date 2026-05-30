@@ -1218,6 +1218,41 @@ def _target_specs_for_bootstrap() -> List[Dict[str, Any]]:
     return specs
 
 
+def _parse_json_target_specs(env_key: str) -> List[Dict[str, Any]]:
+    """Parse a JSON array of target specs from an environment variable."""
+    raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return []
+    try:
+        specs = json.loads(raw)
+    except (json.JSONDecodeError, Exception):
+        return []
+    if not isinstance(specs, list):
+        return []
+    return specs
+
+
+def _remote_target_specs_for_bootstrap() -> List[Dict[str, Any]]:
+    """Parse remote target specs from AI_RUNTIME_V4_REMOTE_TARGETS_JSON.
+
+    Each entry:
+    {
+      "target_kind": "k8s_cluster",
+      "target_identity": "namespace:remote-cluster-01",
+      "display_name": "Remote K8s Cluster 01",
+      "description": "OpenStack-provisioned K8s cluster",
+      "metadata": {
+        "cluster_id": "openstack-cluster-01",
+        "risk_tier": "high",
+        "preferred_executor_profiles": ["toolbox-k8s-readonly", "toolbox-k8s-mutating"]
+      },
+      "capabilities": ["read_logs", "restart_workload", "helm_read", "helm_mutation"],
+      "credential_scope": {"kubeconfig_name": "openstack-cluster-01"}
+    }
+    """
+    return _parse_json_target_specs("AI_RUNTIME_V4_REMOTE_TARGETS_JSON")
+
+
 def _merge_missing_metadata(existing: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(existing if isinstance(existing, dict) else {})
     for key, value in (defaults if isinstance(defaults, dict) else {}).items():
@@ -1259,6 +1294,71 @@ def ensure_runtime_v4_default_targets(
     skipped: List[str] = []
 
     for spec in _target_specs_for_bootstrap():
+        target_kind = _as_str(spec.get("target_kind"), "unknown")
+        target_identity = _as_str(spec.get("target_identity"))
+        if not target_identity:
+            continue
+        desired_capabilities = _normalize_capabilities(spec.get("capabilities"))
+        desired_metadata = _normalize_target_metadata(
+            spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {},
+            target_kind=target_kind,
+            target_identity=target_identity,
+        )
+
+        existing = safe_registry.find_target_by_identity(
+            target_kind=target_kind,
+            target_identity=target_identity,
+        )
+        if existing is None:
+            target_id = _stable_target_id(target_kind, target_identity)
+            safe_registry.upsert_target(
+                target_id=target_id,
+                target_kind=target_kind,
+                target_identity=target_identity,
+                display_name=_as_str(spec.get("display_name"), target_identity),
+                description=_as_str(spec.get("description")),
+                capabilities=desired_capabilities,
+                credential_scope=spec.get("credential_scope") if isinstance(spec.get("credential_scope"), dict) else {},
+                metadata=desired_metadata,
+                updated_by=updated_by,
+                reason=reason,
+            )
+            created.append(target_identity)
+            continue
+
+        existing_target_id = _as_str(existing.get("target_id"))
+        existing_caps = _normalize_capabilities(existing.get("capabilities"))
+        existing_cap_set = set(existing_caps)
+        missing_caps = [item for item in desired_capabilities if item not in existing_cap_set]
+        merged_caps = _normalize_capabilities(existing_caps + missing_caps)
+        existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        normalized_existing_metadata = _normalize_target_metadata(
+            existing_metadata,
+            target_kind=target_kind,
+            target_identity=target_identity,
+        )
+        merged_metadata = _merge_missing_metadata(existing_metadata, desired_metadata)
+        metadata_changed = merged_metadata != normalized_existing_metadata
+        if not missing_caps and not metadata_changed:
+            skipped.append(target_identity)
+            continue
+
+        safe_registry.upsert_target(
+            target_id=existing_target_id or _stable_target_id(target_kind, target_identity),
+            target_kind=target_kind,
+            target_identity=target_identity,
+            display_name=_as_str(existing.get("display_name"), _as_str(spec.get("display_name"), target_identity)),
+            description=_as_str(existing.get("description"), _as_str(spec.get("description"))),
+            capabilities=merged_caps,
+            credential_scope=existing.get("credential_scope") if isinstance(existing.get("credential_scope"), dict) else {},
+            metadata=merged_metadata,
+            updated_by=updated_by,
+            reason=reason,
+        )
+        updated.append(target_identity)
+
+    # Also seed remote targets from env config
+    for spec in _remote_target_specs_for_bootstrap():
         target_kind = _as_str(spec.get("target_kind"), "unknown")
         target_identity = _as_str(spec.get("target_identity"))
         if not target_identity:

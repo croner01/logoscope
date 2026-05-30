@@ -169,7 +169,7 @@ class PatternAggregator:
                 variables["hex"] = []
             variables["hex"].append(hex_match.group())
         pattern = self.HEX_PATTERN.sub("{hex}", pattern)
-        
+
         for num_match in self.NUMBER_PATTERN.finditer(pattern):
             val = num_match.group()
             if "duration" not in variables:

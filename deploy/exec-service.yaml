@@ -110,9 +110,9 @@ spec:
         - name: EXEC_EXECUTOR_TEMPLATE__BUSYBOX_MUTATING
           value: ""
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_K8S_READONLY
-          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
+          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted} --data-urlencode kubeconfig={target_cluster_id}"
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_K8S_MUTATING
-          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
+          value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted} --data-urlencode kubeconfig={target_cluster_id}"
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_CLICKHOUSE_READONLY
           value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_CLICKHOUSE_MUTATING

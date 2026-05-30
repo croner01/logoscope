@@ -1,4 +1,80 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-service-config
+  namespace: islap
+  labels:
+    app: ai-service
+data:
+  APP_NAME: "ai-service"
+  APP_VERSION: "1.0.0"
+  HOST: "0.0.0.0"
+  PORT: "8090"
+  DEBUG: "false"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONFAULTHANDLER: "1"
+  PYTHONPATH: "/app/shared_lib"
+  TZ: "UTC"
+  CLICKHOUSE_HOST: "clickhouse"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_DATABASE: "logs"
+  CLICKHOUSE_USER: "default"
+  CLICKHOUSE_PASSWORD: ""
+  NEO4J_HOST: "neo4j"
+  NEO4J_PORT: "7687"
+  NEO4J_USER: "neo4j"
+  NEO4J_PASSWORD: "password"
+  NEO4J_DATABASE: "neo4j"
+  LOG_LEVEL: "info"
+  OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED: "true"
+  OTEL_SERVICE_NAME: "ai-service"
+  OTEL_RESOURCE_ATTRIBUTES: "service.name=ai-service,deployment.environment=production"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.islap.svc.cluster.local:4318"
+  AI_AGENT_QUERY_API_BASE: "http://query-service:8002"
+  AI_AGENT_QUERY_API_TIMEOUT_SECONDS: "6"
+  EXEC_SERVICE_BASE_URL: "http://exec-service:8095"
+  LLM_PROVIDER: "deepseek"
+  LLM_API_BASE: ""
+  LOCAL_MODEL_API_BASE: ""
+  LOCAL_MODEL_PATH: ""
+  LLM_MODEL: "deepseek-chat"
+  AI_FOLLOWUP_ENGINE: "langchain"
+  AI_FOLLOWUP_LONG_TERM_MEMORY_ENABLED: "true"
+  AI_FOLLOWUP_LONG_TERM_MEMORY_SESSION_LIMIT: "6"
+  AI_FOLLOWUP_LONG_TERM_MEMORY_MAX_SNIPPETS: "6"
+  AI_FOLLOWUP_LONG_TERM_MEMORY_MESSAGE_LIMIT: "4"
+  AI_FOLLOWUP_WEB_SEARCH_ENABLED: "false"
+  AI_FOLLOWUP_WEB_SEARCH_ENDPOINT: ""
+  AI_FOLLOWUP_WEB_SEARCH_TIMEOUT_SECONDS: "6"
+  AI_FOLLOWUP_LLM_TOTAL_TIMEOUT_SECONDS: "160"
+  AI_FOLLOWUP_LLM_FIRST_TOKEN_TIMEOUT_SECONDS: "45"
+  AI_FOLLOWUP_COMMAND_EXEC_ENABLED: "true"
+  AI_FOLLOWUP_COMMAND_WRITE_ENABLED: "true"
+  AI_FOLLOWUP_COMMAND_TEST_PERMISSIVE: "false"
+  AI_RUNTIME_V1_API_ENABLED: "false"
+  AI_RUNTIME_V4_OUTER_ENGINE: "temporal_required"
+  AI_RUNTIME_V4_INNER_ENGINE: "langgraph_required"
+  AI_RUNTIME_V4_AGENT_BACKEND: "openhands"
+  AI_RUNTIME_V4_OPENHANDS_ENABLED: "true"
+  AI_RUNTIME_V4_OPENHANDS_HELPER_ENABLED: "true"
+  AI_RUNTIME_V4_OPENHANDS_HELPER_PYTHON: "/opt/openharness-venv/bin/python"
+  AI_RUNTIME_V4_OPENHANDS_HELPER_SCRIPT: "/app/ai/runtime_v4/backend/openhands_helper.py"
+  AI_RUNTIME_V4_OPENHANDS_HELPER_TIMEOUT_SECONDS: "90"
+  AI_RUNTIME_V4_OPENHANDS_MODEL: "deepseek-chat"
+  AI_RUNTIME_V4_OPENHANDS_BASE_URL: "https://api.deepseek.com/v1"
+  AI_RUNTIME_V4_TEMPORAL_ADDRESS: "temporal-frontend:7233"
+  AI_RUNTIME_V4_TEMPORAL_NAMESPACE: "default"
+  AI_RUNTIME_V4_TEMPORAL_TASK_QUEUE: "ai-runtime-v4"
+  AI_RUNTIME_V4_TEMPORAL_WORKER_ENABLED: "true"
+  AI_RUNTIME_V4_TEMPORAL_CONNECT_TIMEOUT_SECONDS: "5"
+  AI_RUNTIME_V4_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS: "3600"
+  AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS: "15"
+  AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS: "200"
+  AI_RUNTIME_V4_GRAPH_CHECKPOINT_TABLE: "logs.ai_runtime_v4_graph_checkpoints"
+  AI_RUNTIME_V4_REMOTE_TARGETS_JSON: '[{"target_kind":"k8s_cluster","target_identity":"namespace:openstack-cluster-01","display_name":"OpenStack K8s Cluster","description":"OpenStack-provisioned Kubernetes cluster","metadata":{"cluster_id":"openstack-cluster-01","risk_tier":"high","preferred_executor_profiles":["toolbox-k8s-readonly","toolbox-k8s-mutating"]},"capabilities":["read_logs","restart_workload","helm_read","helm_mutation"],"credential_scope":{"kubeconfig_name":"openstack-cluster-01"}}]'
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: ai-service
@@ -72,70 +148,6 @@ spec:
           name: http
           protocol: TCP
         env:
-        - name: APP_NAME
-          value: "ai-service"
-        - name: APP_VERSION
-          value: "1.0.0"
-        - name: HOST
-          value: "0.0.0.0"
-        - name: PORT
-          value: "8090"
-        - name: DEBUG
-          value: "false"
-        - name: PYTHONDONTWRITEBYTECODE
-          value: "1"
-        - name: PYTHONUNBUFFERED
-          value: "1"
-        - name: PYTHONFAULTHANDLER
-          value: "1"
-        - name: PYTHONPATH
-          value: "/app/shared_lib"
-        - name: TZ
-          value: "UTC"
-        - name: CLICKHOUSE_HOST
-          value: "clickhouse"
-        - name: CLICKHOUSE_PORT
-          value: "9000"
-        - name: CLICKHOUSE_DATABASE
-          value: "logs"
-        - name: CLICKHOUSE_USER
-          value: "default"
-        - name: CLICKHOUSE_PASSWORD
-          value: ""
-        - name: NEO4J_HOST
-          value: "neo4j"
-        - name: NEO4J_PORT
-          value: "7687"
-        - name: NEO4J_USER
-          value: "neo4j"
-        - name: NEO4J_PASSWORD
-          value: "password"
-        - name: NEO4J_DATABASE
-          value: "neo4j"
-        - name: LOG_LEVEL
-          value: "info"
-        - name: OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED
-          value: "true"
-        - name: OTEL_SERVICE_NAME
-          value: "ai-service"
-        - name: OTEL_RESOURCE_ATTRIBUTES
-          value: "service.name=ai-service,deployment.environment=production"
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://otel-collector.islap.svc.cluster.local:4318"
-        - name: AI_AGENT_QUERY_API_BASE
-          value: "http://query-service:8002"
-        - name: AI_AGENT_QUERY_API_TIMEOUT_SECONDS
-          value: "6"
-        - name: EXEC_SERVICE_BASE_URL
-          value: "http://exec-service:8095"
-        - name: LLM_PROVIDER
-          value: "deepseek"
-        - name: LLM_API_BASE
-          value: ""
-        - name: LOCAL_MODEL_API_BASE
-          value: ""
-        - name: LOCAL_MODEL_PATH
-          value: ""
         - name: LLM_API_KEY
           valueFrom:
             secretKeyRef:
@@ -166,74 +178,9 @@ spec:
               name: semantic-engine-llm
               key: LOCAL_MODEL_API_KEY
               optional: true
-        - name: LLM_MODEL
-          value: "deepseek-chat"
-        - name: AI_FOLLOWUP_ENGINE
-          value: "langchain"
-        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_ENABLED
-          value: "true"
-        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_SESSION_LIMIT
-          value: "6"
-        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_MAX_SNIPPETS
-          value: "6"
-        - name: AI_FOLLOWUP_LONG_TERM_MEMORY_MESSAGE_LIMIT
-          value: "4"
-        - name: AI_FOLLOWUP_WEB_SEARCH_ENABLED
-          value: "false"
-        - name: AI_FOLLOWUP_WEB_SEARCH_ENDPOINT
-          value: ""
-        - name: AI_FOLLOWUP_WEB_SEARCH_TIMEOUT_SECONDS
-          value: "6"
-        - name: AI_FOLLOWUP_LLM_TOTAL_TIMEOUT_SECONDS
-          value: "160"
-        - name: AI_FOLLOWUP_LLM_FIRST_TOKEN_TIMEOUT_SECONDS
-          value: "45"
-        - name: AI_FOLLOWUP_COMMAND_EXEC_ENABLED
-          value: "true"
-        - name: AI_FOLLOWUP_COMMAND_WRITE_ENABLED
-          value: "true"
-        - name: AI_FOLLOWUP_COMMAND_TEST_PERMISSIVE
-          value: "false"
-        - name: AI_RUNTIME_V1_API_ENABLED
-          value: "false"
-        - name: AI_RUNTIME_V4_OUTER_ENGINE
-          value: "temporal_required"
-        - name: AI_RUNTIME_V4_INNER_ENGINE
-          value: "langgraph_required"
-        - name: AI_RUNTIME_V4_AGENT_BACKEND
-          value: "openhands"
-        - name: AI_RUNTIME_V4_OPENHANDS_ENABLED
-          value: "true"
-        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_ENABLED
-          value: "true"
-        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_PYTHON
-          value: "/opt/openharness-venv/bin/python"
-        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_SCRIPT
-          value: "/app/ai/runtime_v4/backend/openhands_helper.py"
-        - name: AI_RUNTIME_V4_OPENHANDS_HELPER_TIMEOUT_SECONDS
-          value: "90"
-        - name: AI_RUNTIME_V4_OPENHANDS_MODEL
-          value: "deepseek-chat"
-        - name: AI_RUNTIME_V4_OPENHANDS_BASE_URL
-          value: "https://api.deepseek.com/v1"
-        - name: AI_RUNTIME_V4_TEMPORAL_ADDRESS
-          value: "temporal-frontend:7233"
-        - name: AI_RUNTIME_V4_TEMPORAL_NAMESPACE
-          value: "default"
-        - name: AI_RUNTIME_V4_TEMPORAL_TASK_QUEUE
-          value: "ai-runtime-v4"
-        - name: AI_RUNTIME_V4_TEMPORAL_WORKER_ENABLED
-          value: "true"
-        - name: AI_RUNTIME_V4_TEMPORAL_CONNECT_TIMEOUT_SECONDS
-          value: "5"
-        - name: AI_RUNTIME_V4_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS
-          value: "3600"
-        - name: AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS
-          value: "15"
-        - name: AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS
-          value: "200"
-        - name: AI_RUNTIME_V4_GRAPH_CHECKPOINT_TABLE
-          value: "logs.ai_runtime_v4_graph_checkpoints"
+        envFrom:
+        - configMapRef:
+            name: ai-service-config
         resources:
           limits:
             memory: 1Gi
