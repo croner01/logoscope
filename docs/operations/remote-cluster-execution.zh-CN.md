@@ -444,14 +444,25 @@ kubectl exec -n islap deploy/toolbox-gateway -- ls -la /etc/kubeconfigs/
 ```
   AI Service → exec-service → template expansion → curl POST /exec
                                                          │
-                                                         ▼
-                                                   SSH Gateway (:8096)
-                                                         │
-                                              ssh -i /etc/ssh-keys/node-3/id_rsa \
-                                                  root@node-3 "journalctl..."
-                                                         │
-                                                         ▼
-                                                 stdout/stderr → AI
+        ┌────────────────────────────────────────────────┼──────────────────┐
+        │ 前端管理 (在 Logoscope UI 中)                    │                  │
+        │ ┌─────────────────────┐                        │                  │
+        │ │ SSHHostsPage        │                        ▼                  │
+        │ │ 注册 / 列 表 / 删除  │                 SSH Gateway               │
+        │ │ 粘贴私钥注册新主机    │                    (:8096)                │
+        │ └─────────┬───────────┘                        │                  │
+        │           │ API (POST/GET/DELETE)              │                  │
+        │           ▼                                    ▼                  │
+        │  Vite Proxy → /ssh-gateway/           ssh -i <key_file> \         │
+        │  → localhost:8096                      root@node-3 "cmd"          │
+        │                                                    │              │
+        │  ClickHouse 动态注册表                               │              │
+        │  (ssh_host_registry)                               ▼              │
+        └─────────────────────────────────────────→ stdout/stderr → AI      │
+                                                                           │
+  主机注册方式:
+    ┌── 静态 YAML (deploy/ssh-hosts-config.yaml)     ← Secret 挂载密钥
+    └── 动态 API (ssh-gateway/hosts API)             ← 粘贴私钥注册（Base64 存储）
 ```
 
 ### 部署步骤
@@ -560,6 +571,10 @@ curl http://exec-service:8095/api/v1/exec/runs/<run-id>/replay
 
 ### 新增主机
 
+新增主机有两种方式：**静态 ConfigMap 方式**（传统）和 **动态 API 注册方式**（推荐，支持前端管理）。
+
+#### 方式 A：静态 ConfigMap（传统，适合固定节点）
+
 ```bash
 # 1. 生成密钥
 ssh-keygen -t ed25519 -f node-N-id_rsa -N "" -C "ssh-gateway-node-N@logoscope"
@@ -581,6 +596,113 @@ kubectl apply -f deploy/ssh-gateway.yaml
 kubectl apply -f deploy/ai-service.yaml
 kubectl rollout restart deploy/ai-service -n islap
 ```
+
+#### 方式 B：动态 API 注册（推荐，支持前端粘贴私钥）
+
+基于 ClickHouse 的动态主机注册表，可通过前端页面或 API 直接注册主机。
+
+**方式 B1 — 通过前端页面管理**
+
+在 Logoscope UI 中打开 **系统 → SSH 主机管理** (`/ssh-hosts`)：
+
+1. 点击「注册主机」按钮
+2. 填写主机信息：名称、IP/域名、SSH 端口、用户
+3. 在「SSH 私钥内容」文本框中粘贴私钥文件内容（`-----BEGIN OPENSSH PRIVATE KEY-----` ...）
+4. 可选添加标签（如 `env=prod`）
+5. 点击「注册」提交
+
+注册完成后主机出现在列表中，支持一键删除。
+
+**方式 B2 — 通过 API 注册**
+
+```bash
+# 注册主机（含私钥内容）
+curl -sS -X POST http://ssh-gateway:8096/hosts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "node-N",
+    "host": "<node-N-ip>",
+    "port": 22,
+    "user": "root",
+    "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
+    "labels": {"env": "prod"}
+  }'
+
+# 注册主机（使用已有的密钥文件路径）
+curl -sS -X POST http://ssh-gateway:8096/hosts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "node-N",
+    "host": "<node-N-ip>",
+    "port": 22,
+    "user": "root",
+    "key_file": "/etc/ssh-keys/node-N/id_rsa"
+  }'
+
+# 列出所有已注册主机
+curl -sS http://ssh-gateway:8096/hosts | python3 -m json.tool
+
+# 删除主机
+curl -sS -X DELETE http://ssh-gateway:8096/hosts/node-N
+```
+
+**私钥存储说明：** 通过 API/前端注册时填写的私钥内容会被 Base64 编码后存储在 ClickHouse `logs.ssh_host_registry.private_key` 列。执行 SSH 命令时，SSH Gateway 将私钥解码写入临时文件（`/tmp/ssh-key-*.tmp`），连接建立后自动清理。API 响应中**不会**返回私钥字段。
+
+#### 静态 vs 动态对比
+
+| 特性 | 静态 ConfigMap | 动态 API 注册 |
+|------|---------------|-------------|
+| 密钥存储 | K8s Secret 挂载 | ClickHouse（Base64 编码） |
+| 新增节点 | 需要修改 YAML + kubectl apply | API 调用即可 |
+| 即时生效 | 需要滚动重启 | 立即生效 |
+| 持久化 | 无 | ClickHouse 表 `ssh_host_registry` |
+| 前端管理 | 不支持 | SSH 主机管理页面 |
+| 密钥轮换 | 更新 Secret + rollout | 重新注册覆盖即可 |
+
+### Host Registry API 参考
+
+动态注册表通过 ClickHouse 实现，SSH Gateway 提供 RESTful API：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/hosts` | 列出所有已注册主机（未删除） |
+| `GET` | `/hosts/{name}` | 查询单个主机详情 |
+| `POST` | `/hosts` | 注册新主机或更新已有主机 |
+| `DELETE` | `/hosts/{name}` | 软删除主机 |
+
+**注册请求字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | — | 唯一主机名（必填） |
+| `host` | string | — | IP 地址或主机名（必填） |
+| `port` | int | 22 | SSH 端口（1-65535） |
+| `user` | string | `root` | SSH 登录用户 |
+| `key_file` | string | `/etc/ssh-keys/default/id_rsa` | 密钥文件路径（与 `private_key` 二选一） |
+| `private_key` | string | null | 粘贴私钥内容（API 不返回此字段） |
+| `labels` | object | null | 自定义标签（K/V） |
+
+**环境变量配置：**
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SSH_GATEWAY_HOST_REGISTRY_CH_URL` | `http://clickhouse:8123` | ClickHouse HTTP 地址 |
+| `SSH_GATEWAY_HOST_REGISTRY_CH_DATABASE` | `logs` | 数据库名 |
+| `SSH_GATEWAY_HOST_REGISTRY_CH_TABLE` | `ssh_host_registry` | 主机注册表名 |
+| `SSH_GATEWAY_HOST_REGISTRY_CH_USER` | `default` | ClickHouse 用户 |
+| `SSH_GATEWAY_HOST_REGISTRY_CH_PASSWORD` | `""` | ClickHouse 密码 |
+| `SSH_GATEWAY_HOST_REGISTRY_CH_FAIL_OPEN` | `true` | CH 不可用时是否降级 |
+
+### 前端管理页面
+
+SSH 主机管理页面已集成到 Logoscope 前端，路径为 `/ssh-hosts`（侧边栏 → 系统 → SSH 主机管理）：
+
+- **列表查看：** 展示所有已注册主机的名称、IP、端口、用户、标签、创建时间
+- **注册主机：** 弹窗表单，支持填写连接信息 + 粘贴 SSH 私钥内容
+- **删除主机：** 确认后软删除（ClickHouse `is_deleted = 1`）
+- **加载/空状态：** 优雅处理初始化加载和空列表场景
+
+开发环境通过 Vite 代理 `/ssh-gateway/*` → `http://localhost:8096`，生产环境通过 Nginx 反向代理。
 
 ### 回滚
 

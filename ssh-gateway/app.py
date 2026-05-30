@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -100,6 +101,7 @@ def _resolve_node_config(node_name: str) -> Dict[str, Any] | None:
                 "user": ch_host.get("user", "root"),
                 "port": int(ch_host.get("port", 22)),
                 "key_file": ch_host.get("key_file", "/etc/ssh-keys/default/id_rsa"),
+                "private_key_b64": ch_host.get("private_key_b64", ""),
             }
     except Exception as exc:
         logger.warning("ClickHouse host registry unavailable: %s", exc)
@@ -151,11 +153,36 @@ def _validate_command_safety(command: str) -> str | None:
 
 
 def _execute_ssh(command: str, node_cfg: Dict[str, Any], timeout: int) -> ExecResult:
-    """Execute a command on a remote host via SSH."""
+    """Execute a command on a remote host via SSH.
+
+    If ``private_key_b64`` is present in node_cfg, the key is decoded
+    and written to a temp file (cleaned up after execution).
+    """
+    private_key_b64 = node_cfg.get("private_key_b64", "")
     key_file = node_cfg.get(
         "key_file",
         f"/etc/ssh-keys/{node_cfg.get('name', 'unknown')}/id_rsa",
     )
+    temp_key: tempfile.NamedTemporaryFile | None = None
+
+    # If an inline private key is provided, write it to a temp file
+    if private_key_b64:
+        import base64
+
+        try:
+            key_data = base64.b64decode(private_key_b64).decode("utf-8")
+            temp_key = tempfile.NamedTemporaryFile(
+                mode="w", prefix="ssh-key-", suffix=".tmp", delete=False
+            )
+            temp_key.write(key_data)
+            temp_key.write("\n")
+            temp_key.close()
+            os.chmod(temp_key.name, 0o600)
+            key_file = temp_key.name
+            logger.debug("Using inline private key via temp file for %s", node_cfg.get("host"))
+        except Exception as exc:
+            logger.error("Failed to decode inline private key: %s", exc)
+
     user = node_cfg.get("user", "root")
     host = node_cfg["host"]
     port = _as_int(node_cfg.get("port"), 22)
@@ -197,6 +224,12 @@ def _execute_ssh(command: str, node_cfg: Dict[str, Any], timeout: int) -> ExecRe
             stderr=f"Command timed out after {timeout}s",
             timed_out=True,
         )
+    finally:
+        if temp_key is not None:
+            try:
+                os.unlink(temp_key.name)
+            except Exception as exc:
+                logger.warning("Failed to clean up temp SSH key: %s", exc)
 
 
 @app.get("/health")

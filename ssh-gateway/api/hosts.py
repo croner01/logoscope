@@ -24,6 +24,7 @@ class RegisterHostRequest(BaseModel):
     port: int = Field(22, ge=1, le=65535)
     user: str = Field("root", min_length=1)
     key_file: str = Field("/etc/ssh-keys/default/id_rsa", min_length=1)
+    private_key: Optional[str] = Field(None, description="SSH private key content (pasted). Stored base64-encoded in ClickHouse.")
     labels: Optional[Dict[str, str]] = None
 
 
@@ -76,6 +77,7 @@ async def register_new_host(req: RegisterHostRequest):
             user=req.user,
             key_file=req.key_file,
             labels=req.labels,
+            private_key=req.private_key,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))

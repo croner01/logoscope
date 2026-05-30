@@ -3776,6 +3776,35 @@ export class APIClient {
     const response = await this.client.post(`${API_PREFIX}/deduplication/clear-cache`);
     return response.data || { status: 'ok' };
   }
+
+  // ─── SSH Gateway Host Registry ─────────────────────────────────────────
+
+  async listHosts(): Promise<Record<string, unknown>[]> {
+    const response = await this.client.get('/ssh-gateway/hosts');
+    return response.data || [];
+  }
+
+  async getHost(name: string): Promise<Record<string, unknown>> {
+    const response = await this.client.get(`/ssh-gateway/hosts/${encodeURIComponent(name)}`);
+    return response.data;
+  }
+
+  async registerHost(params: {
+    name: string;
+    host: string;
+    port?: number;
+    user?: string;
+    key_file?: string;
+    private_key?: string;
+    labels?: Record<string, string>;
+  }): Promise<Record<string, unknown>> {
+    const response = await this.client.post('/ssh-gateway/hosts', params);
+    return response.data;
+  }
+
+  async deleteHost(name: string): Promise<void> {
+    await this.client.delete(`/ssh-gateway/hosts/${encodeURIComponent(name)}`);
+  }
 }
 
 /**
@@ -3899,6 +3928,20 @@ export const api = {
   getCacheStats: () => apiClient.getCacheStats(),
   getDeduplicationStats: () => apiClient.getDeduplicationStats(),
   clearDeduplicationCache: () => apiClient.clearDeduplicationCache(),
+
+  // SSH Gateway — Host Registry
+  listHosts: () => apiClient.listHosts(),
+  getHost: (name: string) => apiClient.getHost(name),
+  registerHost: (params: {
+    name: string;
+    host: string;
+    port?: number;
+    user?: string;
+    key_file?: string;
+    private_key?: string;
+    labels?: Record<string, string>;
+  }) => apiClient.registerHost(params),
+  deleteHost: (name: string) => apiClient.deleteHost(name),
 };
 
 export default api;

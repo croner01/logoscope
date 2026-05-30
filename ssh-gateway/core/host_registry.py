@@ -8,7 +8,9 @@ env var configuration, schema auto-creation.
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ from urllib.request import Request, urlopen
 
 _LOCK = threading.RLock()
 _CLICKHOUSE_SCHEMA_READY = False
+_logger = logging.getLogger("ssh-gateway.host_registry")
 
 
 def as_str(value: Any, default: str = "") -> str:
@@ -170,6 +173,7 @@ def ensure_schema() -> None:
             port UInt16 DEFAULT 22,
             user String DEFAULT 'root',
             key_file String DEFAULT '/etc/ssh-keys/default/id_rsa',
+            private_key String DEFAULT '',
             labels_json String DEFAULT '{{}}',
             created_at DateTime64(3, 'UTC'),
             updated_at DateTime64(3, 'UTC'),
@@ -178,14 +182,40 @@ def ensure_schema() -> None:
         ENGINE = ReplacingMergeTree(updated_at)
         ORDER BY (name)
     """
+    alter_add_private_key = f"""
+        ALTER TABLE {database}.{table}
+        ADD COLUMN IF NOT EXISTS private_key String DEFAULT ''
+    """
     try:
         _clickhouse_execute(create_db_sql)
         _clickhouse_execute(create_table_sql)
+        _clickhouse_execute(alter_add_private_key)
     except Exception as exc:
         _handle_clickhouse_error(exc)
         return
     with _LOCK:
         _CLICKHOUSE_SCHEMA_READY = True
+
+
+def _encode_private_key(raw: Optional[str]) -> str:
+    """Base64-encode a private key for storage. Returns empty string if no key."""
+    if not raw or not as_str(raw).strip():
+        return ""
+    try:
+        return base64.b64encode(as_str(raw).encode("utf-8")).decode("ascii")
+    except Exception as exc:
+        _logger.warning("Failed to encode private key: %s", exc)
+        return ""
+
+
+def _mask_key_preview(raw: str) -> str:
+    """Return a safe preview of a key for logging (shows first 20 chars)."""
+    if not raw:
+        return ""
+    cleaned = raw.strip().replace("\n", "\\n")
+    if len(cleaned) <= 30:
+        return cleaned
+    return cleaned[:20] + "..." + cleaned[-10:]
 
 
 def register_host(
@@ -195,15 +225,25 @@ def register_host(
     user: str = "root",
     key_file: str = "/etc/ssh-keys/default/id_rsa",
     labels: Optional[Dict[str, str]] = None,
+    private_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Register a new host or update an existing one."""
+    """Register a new host or update an existing one.
+
+    If ``private_key`` is provided, it is base64-encoded and stored
+    in ClickHouse.  At execution time the gateway writes it to a temp
+    file so it can be used with ``ssh -i``.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    encoded_key = _encode_private_key(private_key)
+    if encoded_key and _logger.isEnabledFor(logging.DEBUG):
+        _logger.debug("Storing private_key for host '%s' (%s)", name, _mask_key_preview(private_key or ""))
     record = {
         "name": name,
         "host": host,
         "port": max(1, min(65535, int(port))),
         "user": as_str(user) or "root",
         "key_file": as_str(key_file) or "/etc/ssh-keys/default/id_rsa",
+        "private_key": encoded_key,
         "labels_json": json.dumps(labels if isinstance(labels, dict) else {}, ensure_ascii=False),
         "created_at": now,
         "updated_at": now,
@@ -269,18 +309,25 @@ def list_hosts(include_deleted: bool = False) -> List[Dict[str, Any]]:
 
 
 def _normalize_host_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize a host row from ClickHouse JSONEachRow."""
+    """Normalize a host row from ClickHouse JSONEachRow.
+
+    Note: ``private_key`` is included for internal use (``_execute_ssh``
+    writes it to a temp file).  The API router strips it from responses.
+    """
     labels_raw = as_str(row.get("labels_json", "{}"))
     try:
         labels = json.loads(labels_raw)
     except Exception:
         labels = {}
+    pk_b64 = as_str(row.get("private_key", ""))
     return {
         "name": as_str(row.get("name")),
         "host": as_str(row.get("host")),
         "port": int(row.get("port", 22)),
         "user": as_str(row.get("user"), "root"),
         "key_file": as_str(row.get("key_file"), "/etc/ssh-keys/default/id_rsa"),
+        "private_key_b64": pk_b64,
+        "has_private_key": bool(pk_b64),
         "labels": labels if isinstance(labels, dict) else {},
         "created_at": as_str(row.get("created_at")),
         "updated_at": as_str(row.get("updated_at")),
