@@ -122,9 +122,9 @@ spec:
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_OPENSTACK_MUTATING
           value: ""
         - name: EXEC_EXECUTOR_TEMPLATE__HOST_SSH_READONLY
-          value: ""
+          value: "curl -sS --fail-with-body -X POST http://ssh-gateway.islap.svc.cluster.local:8096/exec --data-urlencode command={command_quoted} --data-urlencode node={target_node_name_quoted}"
         - name: EXEC_EXECUTOR_TEMPLATE__HOST_SSH_MUTATING
-          value: ""
+          value: "curl -sS --fail-with-body -X POST http://ssh-gateway.islap.svc.cluster.local:8096/exec --data-urlencode command={command_quoted} --data-urlencode node={target_node_name_quoted}"
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_READONLY
           value: "curl -sS --fail-with-body -X POST http://toolbox-gateway.islap.svc.cluster.local:8088/exec --data-urlencode command={command_quoted}"
         - name: EXEC_EXECUTOR_TEMPLATE__TOOLBOX_HTTP_MUTATING
