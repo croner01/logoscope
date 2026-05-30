@@ -11,6 +11,8 @@ COPY requirements-runtime.txt .
 RUN pip install --no-cache-dir -r requirements-runtime.txt
 
 COPY app.py .
+COPY core/ ./core/
+COPY api/ ./api/
 
 EXPOSE 8096
 

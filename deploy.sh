@@ -1540,6 +1540,15 @@ main() {
         init-db|initdb|init_database)
             init_database
             ;;
+        init-ssh-hosts)
+            print_info "初始化 ClickHouse SSH 主机注册表..."
+            kubectl exec deploy/ssh-gateway -n "$NAMESPACE" -- python3 -c "
+from core.host_registry import ensure_schema
+ensure_schema()
+print('SSH host registry schema ready')
+"
+            print_success "SSH 主机注册表初始化完成"
+            ;;
         clean)
             clean_component "$@"
             ;;

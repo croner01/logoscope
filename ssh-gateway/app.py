@@ -8,13 +8,21 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 app = FastAPI(title="ssh-gateway", version="1.0.0")
+
+# Optional: host registry management API (ClickHouse-backed)
+try:
+    from api.hosts import router as hosts_router
+
+    app.include_router(hosts_router)
+except Exception:
+    pass
 
 logger = logging.getLogger("ssh-gateway")
 
@@ -67,9 +75,36 @@ def _load_hosts_config() -> Dict[str, Any]:
 
 
 def _resolve_node_config(node_name: str) -> Dict[str, Any] | None:
-    """Resolve node connection info from hosts config."""
+    """Resolve node connection info from hosts config.
+
+    Priority:
+    1. Static YAML config file (fast, no network)
+    2. ClickHouse host registry (dynamic, runtime-registerable)
+    """
+    # 1. Check static YAML first
     hosts = _load_hosts_config()
-    return hosts.get(node_name)
+    cfg = hosts.get(node_name)
+    if cfg is not None:
+        return cfg
+
+    # 2. Fall back to ClickHouse dynamic registry
+    try:
+        from core.host_registry import ensure_schema, get_host
+
+        ensure_schema()
+        ch_host = get_host(node_name)
+        if ch_host is not None:
+            logger.info("Resolved host '%s' from ClickHouse registry", node_name)
+            return {
+                "host": ch_host.get("host"),
+                "user": ch_host.get("user", "root"),
+                "port": int(ch_host.get("port", 22)),
+                "key_file": ch_host.get("key_file", "/etc/ssh-keys/default/id_rsa"),
+            }
+    except Exception as exc:
+        logger.warning("ClickHouse host registry unavailable: %s", exc)
+
+    return None
 
 
 def _clip_output(output: str, max_bytes: int | None = None) -> str:
