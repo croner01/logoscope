@@ -288,9 +288,11 @@ data:
         parser        docker
         key_content   log
         flush_timeout 4000
-        # 任意时间戳+ERROR/CRITICAL 先独立成一条，避免被上一条 INFO 吞并；后续 traceback/缩进行继续聚合。
-        rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\d+\s+(?:ERROR|CRITICAL)\s+[A-Za-z0-9_\.\-]+(?:\s+\[[^\]]*\])?\s+.*)$/" "cont"
-        rule          "cont"        "/^(Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*)$/" "cont"
+        # OpenStack 日志会把完整前缀（时间戳+PID+级别+组件）写在 traceback 的每一行上。
+        # start_state 使用单空格分隔符，让 traceback 缩进保留在内容中，通过否定前瞻排除续行。
+        # cont 让前缀变成可选，使得带完整前缀的续行也能被匹配聚合。
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? (?!Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s{2,}|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):|urllib3\.exceptions\.[A-Za-z_]+:|requests\.exceptions\.[A-Za-z_]+:|socket\.gaierror:|$).*)$/" "cont"
+        rule          "cont"        "/^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? )?(?:Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*|)$/" "cont"
 
     [MULTILINE_PARSER]
         name          multiline_openstack_ts_boundary

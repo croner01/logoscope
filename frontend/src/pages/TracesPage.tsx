@@ -1,6 +1,6 @@
 /**
  * Trace 详情页面
- * 
+ *
  * 展示分布式追踪调用链：
  * - 调用链瀑布图
  * - 服务节点图
@@ -16,7 +16,7 @@ import ErrorState from '../components/common/ErrorState';
 import {
   ArrowLeft, AlertCircle, Zap, GitBranch,
   ChevronDown, ChevronRight, CheckCircle, XCircle,
-  Activity, BrainCircuit
+  Activity, BrainCircuit, Search
 } from 'lucide-react';
 
 interface Span {
@@ -85,15 +85,9 @@ interface TraceVisualization {
   };
 }
 
-const STATUS_COLORS = {
-  ok: { bg: 'bg-green-100', text: 'text-green-700', border: 'border-green-300' },
-  error: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300' },
-  warning: { bg: 'bg-yellow-100', text: 'text-yellow-700', border: 'border-yellow-300' },
-};
-
 const SERVICE_COLORS = [
-  'bg-blue-500', 'bg-purple-500', 'bg-green-500', 'bg-orange-500',
-  'bg-pink-500', 'bg-indigo-500', 'bg-teal-500', 'bg-amber-500',
+  '#3b82f6', '#8b5cf6', '#10b981', '#f97316',
+  '#ec4899', '#6366f1', '#14b8a6', '#f59e0b',
 ];
 
 const TracesPage: React.FC = () => {
@@ -125,7 +119,6 @@ const TracesPage: React.FC = () => {
       ]);
 
       setVisualization(vizData);
-      // 将 API 响应转换为 TraceAnalysis 格式
       const traceAnalysis: TraceAnalysis = {
         trace_id: id,
         total_duration_ms: vizData?.analysis?.total_duration_ms || 0,
@@ -190,87 +183,74 @@ const TracesPage: React.FC = () => {
   return (
     <div className="flex flex-col h-full">
       {/* 头部 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate(-1)}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              <ArrowLeft className="w-5 h-5 text-gray-600" />
-            </button>
-            <div>
-              <h1 className="text-xl font-semibold text-gray-900">Trace 详情</h1>
-              <p className="text-sm text-gray-500">Trace ID: {traceId}</p>
-            </div>
+      <div className="page-header mb-4" style={{ borderBottom: '1px solid var(--app-border)', paddingBottom: '1rem' }}>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate(-1)}
+            className="btn btn-ghost btn-icon"
+          >
+            <ArrowLeft size={16} />
+          </button>
+          <div>
+            <h1 className="page-title">Trace 详情</h1>
+            <p className="text-xs mt-0.5 font-mono" style={{ color: 'var(--app-text-subtle)' }}>
+              {traceId}
+            </p>
           </div>
+        </div>
 
-          <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5" style={{ color: 'var(--app-text-subtle)' }} />
             <input
               type="text"
               value={inputTraceId}
               onChange={(e) => setInputTraceId(e.target.value)}
               placeholder="输入 Trace ID"
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 w-64"
+              className="input input-sm pl-8 w-64"
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
             />
-            <button
-              onClick={handleSearch}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition-colors"
-            >
-              查询
-            </button>
           </div>
+          <button onClick={handleSearch} className="btn btn-primary">
+            查询
+          </button>
         </div>
       </div>
 
       {/* 主内容 */}
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto">
         {visualization && (
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
             {/* 左侧：瀑布图 */}
-            <div className="xl:col-span-2 space-y-6">
-              {/* 概览卡片 */}
-              <div className="bg-white rounded-lg shadow-md p-4">
-                <div className="grid grid-cols-4 gap-4">
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-gray-900">
-                      {formatDuration(visualization.analysis.total_duration_ms)}
-                    </div>
-                    <div className="text-sm text-gray-500">总耗时</div>
+            <div className="xl:col-span-2 space-y-4">
+              {/* 概览 KPI */}
+              <div className="grid grid-cols-4 gap-3">
+                {[
+                  { label: '总耗时', value: formatDuration(visualization.analysis.total_duration_ms), tone: 'blue' },
+                  { label: '服务数', value: String(visualization.analysis.service_count), tone: 'teal' },
+                  { label: 'Span 数', value: String(visualization.analysis.span_count), tone: 'purple' },
+                  {
+                    label: '错误数',
+                    value: String(visualization.analysis.error_count),
+                    tone: visualization.analysis.error_count > 0 ? 'red' : 'green',
+                  },
+                ].map(({ label, value, tone }) => (
+                  <div key={label} className={`kpi-card tone-${tone}`}>
+                    <div className="kpi-label">{label}</div>
+                    <div className="kpi-value text-xl">{value}</div>
                   </div>
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-gray-900">
-                      {visualization.analysis.service_count}
-                    </div>
-                    <div className="text-sm text-gray-500">服务数</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-gray-900">
-                      {visualization.analysis.span_count}
-                    </div>
-                    <div className="text-sm text-gray-500">Span 数</div>
-                  </div>
-                  <div className="text-center">
-                    <div className={`text-2xl font-bold ${
-                      visualization.analysis.error_count > 0 ? 'text-red-600' : 'text-green-600'
-                    }`}>
-                      {visualization.analysis.error_count}
-                    </div>
-                    <div className="text-sm text-gray-500">错误数</div>
-                  </div>
-                </div>
+                ))}
               </div>
 
               {/* 瀑布图 */}
-              <div className="bg-white rounded-lg shadow-md overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-200">
-                  <h3 className="font-medium text-gray-900">调用链瀑布图</h3>
+              <div className="card overflow-hidden">
+                <div className="card-header">
+                  <div className="card-title">调用链瀑布图</div>
                 </div>
-                <div className="p-4">
-                  <div className="space-y-1">
+                <div className="card-body">
+                  <div className="space-y-0.5">
                     {visualization.waterfall.map((span) => {
-                      const statusColors = STATUS_COLORS[span.status as keyof typeof STATUS_COLORS] || STATUS_COLORS.ok;
+                      const isError = span.status === 'error';
                       const serviceColor = getServiceColor(span.service);
                       const widthPercent = Math.max(
                         (span.duration_ms / visualization.analysis.total_duration_ms) * 100,
@@ -281,56 +261,62 @@ const TracesPage: React.FC = () => {
                       return (
                         <div
                           key={span.span_id}
-                          className="flex items-center gap-2 py-1 hover:bg-gray-50 rounded cursor-pointer"
+                          className="flex items-center gap-2 py-1.5 px-2 rounded-lg cursor-pointer transition-colors"
+                          style={{ '--hover-bg': 'var(--app-surface-muted)' } as React.CSSProperties}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--app-surface-muted)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = '')}
                           onClick={() => toggleSpan(span.span_id)}
                         >
                           {/* 深度缩进 */}
-                          <div style={{ width: `${span.depth * 20}px` }} className="shrink-0" />
+                          <div style={{ width: `${span.depth * 16}px` }} className="shrink-0" />
 
                           {/* 展开/收起图标 */}
-                          <div className="w-4 shrink-0">
+                          <div className="w-4 shrink-0" style={{ color: 'var(--app-text-subtle)' }}>
                             {expandedSpans.has(span.span_id) ? (
-                              <ChevronDown className="w-4 h-4 text-gray-400" />
+                              <ChevronDown size={14} />
                             ) : (
-                              <ChevronRight className="w-4 h-4 text-gray-400" />
+                              <ChevronRight size={14} />
                             )}
                           </div>
 
                           {/* 服务名 */}
-                          <div className="w-32 shrink-0 flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${serviceColor}`} />
-                            <span className="text-sm font-medium text-gray-800 truncate">
+                          <div className="w-28 shrink-0 flex items-center gap-1.5">
+                            <div className="w-2 h-2 rounded-full shrink-0" style={{ background: serviceColor }} />
+                            <span className="text-xs font-medium truncate" style={{ color: 'var(--app-text)' }}>
                               {span.service}
                             </span>
                           </div>
 
                           {/* 操作名 */}
-                          <div className="flex-1 text-sm text-gray-600 truncate">
+                          <div className="flex-1 text-xs truncate" style={{ color: 'var(--app-text-muted)' }}>
                             {span.operation}
                           </div>
 
                           {/* 时间条 */}
-                          <div className="w-48 shrink-0 relative h-6">
+                          <div className="w-48 shrink-0 relative h-5">
                             <div
-                              className={`absolute h-4 top-1 rounded ${statusColors.bg} ${statusColors.border} border`}
+                              className="absolute h-3 top-1 rounded"
                               style={{
                                 left: `${leftPercent}%`,
                                 width: `${widthPercent}%`,
+                                background: isError ? 'var(--color-error-soft)' : 'var(--brand-primary-soft)',
+                                border: `1px solid ${isError ? 'var(--color-error-border)' : 'var(--brand-primary)'}`,
+                                opacity: 0.85,
                               }}
                             />
                           </div>
 
                           {/* 耗时 */}
-                          <div className="w-20 text-right text-sm text-gray-600 shrink-0">
+                          <div className="w-16 text-right text-xs shrink-0" style={{ color: 'var(--app-text-muted)' }}>
                             {formatDuration(span.duration_ms)}
                           </div>
 
                           {/* 状态 */}
-                          <div className="w-6 shrink-0">
-                            {span.status === 'error' ? (
-                              <XCircle className="w-4 h-4 text-red-500" />
+                          <div className="w-5 shrink-0">
+                            {isError ? (
+                              <XCircle size={14} style={{ color: 'var(--color-error-dark)' }} />
                             ) : (
-                              <CheckCircle className="w-4 h-4 text-green-500" />
+                              <CheckCircle size={14} style={{ color: 'var(--color-success-dark)' }} />
                             )}
                           </div>
                         </div>
@@ -342,23 +328,23 @@ const TracesPage: React.FC = () => {
             </div>
 
             {/* 右侧：分析结果 */}
-            <div className="space-y-6">
+            <div className="space-y-4">
               {/* 错误节点 */}
               {analysis?.error_spans && analysis.error_spans.length > 0 && (
-                <div className="bg-white rounded-lg shadow-md overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-200 bg-red-50">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="w-5 h-5 text-red-500" />
-                      <h3 className="font-medium text-red-700">错误节点</h3>
+                <div className="card overflow-hidden">
+                  <div className="card-header" style={{ background: 'var(--color-error-soft)' }}>
+                    <div className="card-title" style={{ color: 'var(--color-error-dark)' }}>
+                      <AlertCircle size={14} />
+                      错误节点
                     </div>
                   </div>
-                  <div className="p-4 space-y-3">
+                  <div className="card-body space-y-2">
                     {analysis.error_spans.map((span, index) => (
-                      <div key={index} className="p-3 bg-red-50 rounded-lg">
-                        <div className="font-medium text-red-800">{span.service_name}</div>
-                        <div className="text-sm text-red-600">{span.operation_name}</div>
+                      <div key={index} className="p-3 rounded-xl" style={{ background: 'var(--color-error-soft)', border: '1px solid var(--color-error-border)' }}>
+                        <div className="text-sm font-semibold" style={{ color: 'var(--color-error-dark)' }}>{span.service_name}</div>
+                        <div className="text-xs mt-0.5" style={{ color: 'var(--color-error-dark)', opacity: 0.8 }}>{span.operation_name}</div>
                         {span.error && (
-                          <div className="text-xs text-red-500 mt-1">{span.error}</div>
+                          <div className="text-xs mt-1 font-mono" style={{ color: 'var(--color-error-dark)', opacity: 0.7 }}>{span.error}</div>
                         )}
                       </div>
                     ))}
@@ -368,21 +354,21 @@ const TracesPage: React.FC = () => {
 
               {/* 性能瓶颈 */}
               {analysis?.bottleneck_spans && analysis.bottleneck_spans.length > 0 && (
-                <div className="bg-white rounded-lg shadow-md overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-200 bg-amber-50">
-                    <div className="flex items-center gap-2">
-                      <Zap className="w-5 h-5 text-amber-500" />
-                      <h3 className="font-medium text-amber-700">性能瓶颈</h3>
+                <div className="card overflow-hidden">
+                  <div className="card-header" style={{ background: 'var(--color-warning-soft)' }}>
+                    <div className="card-title" style={{ color: 'var(--color-warning-dark)' }}>
+                      <Zap size={14} />
+                      性能瓶颈
                     </div>
                   </div>
-                  <div className="p-4 space-y-3">
+                  <div className="card-body space-y-2">
                     {analysis.bottleneck_spans.map((span, index) => (
-                      <div key={index} className="p-3 bg-amber-50 rounded-lg">
-                        <div className="flex justify-between">
-                          <span className="font-medium text-amber-800">{span.service_name}</span>
-                          <span className="text-amber-600">{formatDuration(span.duration_ms)}</span>
+                      <div key={index} className="p-3 rounded-xl" style={{ background: 'var(--color-warning-soft)', border: '1px solid #fde68a' }}>
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm font-semibold" style={{ color: 'var(--color-warning-dark)' }}>{span.service_name}</span>
+                          <span className="text-xs font-mono" style={{ color: 'var(--color-warning-dark)' }}>{formatDuration(span.duration_ms)}</span>
                         </div>
-                        <div className="text-sm text-amber-600">{span.operation_name}</div>
+                        <div className="text-xs mt-0.5" style={{ color: 'var(--color-warning-dark)', opacity: 0.8 }}>{span.operation_name}</div>
                       </div>
                     ))}
                   </div>
@@ -391,19 +377,19 @@ const TracesPage: React.FC = () => {
 
               {/* 优化建议 */}
               {analysis?.recommendations && analysis.recommendations.length > 0 && (
-                <div className="bg-white rounded-lg shadow-md overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-200">
-                    <div className="flex items-center gap-2">
-                      <Activity className="w-5 h-5 text-blue-500" />
-                      <h3 className="font-medium text-gray-900">优化建议</h3>
+                <div className="card overflow-hidden">
+                  <div className="card-header">
+                    <div className="card-title">
+                      <Activity size={14} style={{ color: 'var(--brand-primary)' }} />
+                      优化建议
                     </div>
                   </div>
-                  <div className="p-4">
+                  <div className="card-body">
                     <ul className="space-y-2">
                       {analysis.recommendations.map((rec, index) => (
-                        <li key={index} className="flex items-start gap-2 text-sm">
-                          <span className="text-blue-500 mt-0.5">•</span>
-                          <span className="text-gray-700">{rec}</span>
+                        <li key={index} className="flex items-start gap-2 text-xs">
+                          <span className="mt-0.5 shrink-0" style={{ color: 'var(--brand-primary)' }}>•</span>
+                          <span style={{ color: 'var(--app-text-muted)' }}>{rec}</span>
                         </li>
                       ))}
                     </ul>
@@ -413,22 +399,22 @@ const TracesPage: React.FC = () => {
 
               {/* 关键路径 */}
               {analysis?.critical_path && analysis.critical_path.length > 0 && (
-                <div className="bg-white rounded-lg shadow-md overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-200">
-                    <div className="flex items-center gap-2">
-                      <GitBranch className="w-5 h-5 text-purple-500" />
-                      <h3 className="font-medium text-gray-900">关键路径</h3>
+                <div className="card overflow-hidden">
+                  <div className="card-header">
+                    <div className="card-title">
+                      <GitBranch size={14} style={{ color: '#8b5cf6' }} />
+                      关键路径
                     </div>
                   </div>
-                  <div className="p-4">
+                  <div className="card-body">
                     <div className="flex flex-wrap items-center gap-2">
                       {analysis.critical_path.map((service, index) => (
                         <React.Fragment key={index}>
-                          <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-sm">
+                          <span className="px-2 py-1 rounded-lg text-xs font-medium" style={{ background: 'rgba(139,92,246,0.1)', color: '#7c3aed', border: '1px solid rgba(139,92,246,0.2)' }}>
                             {service}
                           </span>
                           {index < analysis.critical_path.length - 1 && (
-                            <span className="text-gray-400">→</span>
+                            <span style={{ color: 'var(--app-text-subtle)' }}>→</span>
                           )}
                         </React.Fragment>
                       ))}
@@ -438,22 +424,23 @@ const TracesPage: React.FC = () => {
               )}
 
               {/* 快速操作 */}
-              <div className="bg-white rounded-lg shadow-md overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-200">
-                  <h3 className="font-medium text-gray-900">快速操作</h3>
+              <div className="card overflow-hidden">
+                <div className="card-header">
+                  <div className="card-title">快速操作</div>
                 </div>
-                <div className="p-4 space-y-2">
+                <div className="card-body space-y-2">
                   <button
                     onClick={() => navigation.goToAIAnalysis({
                       traceId: traceId,
                       message: `分析 Trace ${traceId} 的调用链问题`
                     })}
-                    className="w-full flex items-center justify-between px-3 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg transition-colors"
+                    className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors"
+                    style={{ background: 'rgba(139,92,246,0.08)', color: '#7c3aed', border: '1px solid rgba(139,92,246,0.15)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(139,92,246,0.15)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'rgba(139,92,246,0.08)')}
                   >
-                    <span className="flex items-center gap-2">
-                      <BrainCircuit className="w-4 h-4" />
-                      <span className="text-sm font-medium">AI 分析调用链</span>
-                    </span>
+                    <BrainCircuit size={15} />
+                    AI 分析调用链
                   </button>
                   {analysis?.error_spans && analysis.error_spans.length > 0 && (
                     <button
@@ -461,12 +448,13 @@ const TracesPage: React.FC = () => {
                         serviceName: analysis.error_spans[0].service_name,
                         search: analysis.error_spans[0].error || 'error'
                       })}
-                      className="w-full flex items-center justify-between px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg transition-colors"
+                      className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors"
+                      style={{ background: 'var(--color-error-soft)', color: 'var(--color-error-dark)', border: '1px solid var(--color-error-border)' }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                     >
-                      <span className="flex items-center gap-2">
-                        <AlertCircle className="w-4 h-4" />
-                        <span className="text-sm font-medium">查看错误服务日志</span>
-                      </span>
+                      <AlertCircle size={15} />
+                      查看错误服务日志
                     </button>
                   )}
                 </div>

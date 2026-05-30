@@ -1875,6 +1875,47 @@ const AIAnalysis: React.FC = () => {
   // ── 布局 UI 状态 ──
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [activeRightTab, setActiveRightTab] = useState<'result' | 'kb' | 'actions'>('result');
+  // 拖拽调整尺寸：输入卡片高度 & 右侧面板宽度
+  const [inputPanelHeight, setInputPanelHeight] = useState<number>(320);
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(320);
+  const vDragStartY = useRef<number>(0);
+  const vDragStartH = useRef<number>(0);
+  const hDragStartX = useRef<number>(0);
+  const hDragStartW = useRef<number>(0);
+
+  // 垂直拖拽（调整输入卡片 vs 对话面板高度）
+  const handleVDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    vDragStartY.current = e.clientY;
+    vDragStartH.current = inputPanelHeight;
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = ev.clientY - vDragStartY.current;
+      setInputPanelHeight(Math.max(180, Math.min(600, vDragStartH.current + delta)));
+    };
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [inputPanelHeight]);
+
+  // 水平拖拽（调整中间列 vs 右侧面板宽度）
+  const handleHDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    hDragStartX.current = e.clientX;
+    hDragStartW.current = rightPanelWidth;
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = hDragStartX.current - ev.clientX;
+      setRightPanelWidth(Math.max(220, Math.min(560, hDragStartW.current + delta)));
+    };
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [rightPanelWidth]);
   const [kbRemoteEnabled, setKbRemoteEnabled] = useState(false);
   const [kbRetrievalMode, setKbRetrievalMode] = useState<'local' | 'hybrid' | 'remote_only'>('local');
   const [kbSaveMode, setKbSaveMode] = useState<'local_only' | 'local_and_remote'>('local_only');
@@ -5813,10 +5854,10 @@ const AIAnalysis: React.FC = () => {
         </div>
 
         {/* ── 中间工作区 ── */}
-        <div className="flex-1 min-w-0 flex flex-col gap-3 min-h-0 overflow-auto">
+        <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
 
-          {/* 输入卡片 */}
-          <div className="bg-white rounded-lg border border-gray-200 shadow-sm shrink-0">
+          {/* 输入卡片（高度可拖拽）*/}
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm shrink-0 overflow-auto" style={{ height: `${inputPanelHeight}px` }}>
             {/* 分析类型 tabs + LLM 开关 */}
             <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-slate-50">
               <div className="flex items-center gap-1">
@@ -6023,6 +6064,15 @@ const AIAnalysis: React.FC = () => {
               )}
             </div>
           </div>
+          </div>
+
+          {/* 垂直拖拽分割线 */}
+          <div
+            onMouseDown={handleVDragStart}
+            className="h-1.5 shrink-0 cursor-row-resize flex items-center justify-center group"
+            title="拖拽调整输入区高度"
+          >
+            <div className="w-16 h-1 rounded-full bg-gray-200 group-hover:bg-indigo-400 transition-colors" />
           </div>
 
           {/* ── AI 追问对话面板（独立主体，充分利用剩余高度） ── */}
@@ -6750,8 +6800,17 @@ const AIAnalysis: React.FC = () => {
           </div>
         </div>
 
+        {/* 水平拖拽分割线 */}
+        <div
+          onMouseDown={handleHDragStart}
+          className="w-1.5 shrink-0 cursor-col-resize flex items-center justify-center group self-stretch"
+          title="拖拽调整右侧面板宽度"
+        >
+          <div className="w-1 h-16 rounded-full bg-gray-200 group-hover:bg-indigo-400 transition-colors" />
+        </div>
+
         {/* ── 右侧功能面板：Tab 化 ── */}
-        <div className="w-80 shrink-0 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-h-0">
+        <div className="shrink-0 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-h-0" style={{ width: `${rightPanelWidth}px` }}>
           {/* Tab 导航 */}
           <div className="flex shrink-0 border-b border-gray-100 bg-slate-50">
             {(

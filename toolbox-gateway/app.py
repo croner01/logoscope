@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -112,6 +113,29 @@ def _shell_emergency_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+KUBECONFIG_BASE_DIR = "/etc/kubeconfigs"
+
+
+def _resolve_kubeconfig_path(kubeconfig_name: str) -> str | None:
+    """Resolve a kubeconfig name to an absolute file path.
+
+    Returns None when the name is empty or "default" (meaning use the
+    pod's own ServiceAccount), or when the named config does not exist.
+    """
+    safe_name = _as_str(kubeconfig_name).strip()
+    if not safe_name or safe_name.lower() == "default":
+        return None
+    candidate = os.path.join(KUBECONFIG_BASE_DIR, safe_name)
+    if os.path.isfile(candidate):
+        return candidate
+    _toolbox_logger().warning("kubeconfig not found: %s (using default)", candidate)
+    return None
+
+
+def _toolbox_logger() -> logging.Logger:
+    return logging.getLogger(__name__)
+
+
 @dataclass
 class ExecResult:
     exit_code: int
@@ -120,7 +144,13 @@ class ExecResult:
     timed_out: bool
 
 
-def _execute_command(command: str, *, timeout_seconds: int, max_output_bytes: int) -> ExecResult:
+def _execute_command(
+    command: str,
+    *,
+    timeout_seconds: int,
+    max_output_bytes: int,
+    kubeconfig_path: str | None = None,
+) -> ExecResult:
     safe_timeout = max(1, int(timeout_seconds))
     has_shell_features = False
     try:
@@ -143,6 +173,10 @@ def _execute_command(command: str, *, timeout_seconds: int, max_output_bytes: in
             timed_out=False,
         )
 
+    proc_env = os.environ.copy()
+    if kubeconfig_path:
+        proc_env["KUBECONFIG"] = kubeconfig_path
+
     try:
         if has_shell_features and _shell_emergency_enabled():
             completed = subprocess.run(  # noqa: S602
@@ -152,7 +186,7 @@ def _execute_command(command: str, *, timeout_seconds: int, max_output_bytes: in
                 capture_output=True,
                 text=True,
                 timeout=safe_timeout,
-                env=os.environ.copy(),
+                env=proc_env,
             )
         else:
             parts = shlex.split(command, posix=True)
@@ -162,7 +196,7 @@ def _execute_command(command: str, *, timeout_seconds: int, max_output_bytes: in
                 capture_output=True,
                 text=True,
                 timeout=safe_timeout,
-                env=os.environ.copy(),
+                env=proc_env,
             )
         return ExecResult(
             exit_code=int(completed.returncode),
@@ -258,6 +292,9 @@ async def execute_command(request: Request) -> Response:
     if target_kind == "host_node" and _is_unknown_token(target.get("node_name")):
         raise HTTPException(status_code=400, detail="host_node target requires resolved node_name")
 
+    kubeconfig_name = _as_str(payload.get("kubeconfig")).strip()
+    kubeconfig_path = _resolve_kubeconfig_path(kubeconfig_name)
+
     allowed_heads = _resolve_allowed_heads(executor_profile)
     head = _extract_primary_head(command)
     if allowed_heads and head and head not in allowed_heads:
@@ -273,6 +310,7 @@ async def execute_command(request: Request) -> Response:
         command,
         timeout_seconds=max(1, timeout_seconds),
         max_output_bytes=max_output_bytes,
+        kubeconfig_path=kubeconfig_path,
     )
     response_headers = {
         "X-Toolbox-Executor-Profile": executor_profile,

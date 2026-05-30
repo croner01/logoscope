@@ -874,113 +874,98 @@ const AICaseManagement: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">AI 知识库管理</h1>
-          <p className="text-gray-500 mt-1">管理 AI 分析沉淀知识库，支持内容编辑、修复闭环、版本沉淀、删除与历史回溯</p>
+      {/* 页头 */}
+      <div className="flex-shrink-0 px-6 py-4 border-b animate-fade-in" style={{ background: 'var(--app-surface)', borderColor: 'var(--app-border)', margin: '-0px' }}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'var(--brand-primary-soft)', color: 'var(--brand-primary)' }}>
+              <BookOpen size={18} />
+            </div>
+            <div>
+              <h1 className="text-base font-bold" style={{ color: 'var(--app-text)' }}>AI 知识库管理</h1>
+              <p className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>管理 AI 分析沉淀知识库，支持内容编辑、修复闭环与历史回溯</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (activeTab === 'history') { fetchHistory({ reset: true, offset: 0 }); fetchOutboxStatus(); return; }
+              fetchCases(); fetchOutboxStatus();
+            }}
+            disabled={loading || historyLoadingMore}
+            className="btn btn-secondary"
+          >
+            <RefreshCw size={13} className={(loading || historyLoadingMore) ? 'animate-spin' : ''} />
+            刷新
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            if (activeTab === 'history') {
-              fetchHistory({ reset: true, offset: 0 });
-              fetchOutboxStatus();
-              return;
-            }
-            fetchCases();
-            fetchOutboxStatus();
-          }}
-          disabled={loading || historyLoadingMore}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50"
-        >
-          <RefreshCw className={`w-4 h-4 ${(loading || historyLoadingMore) ? 'animate-spin' : ''}`} />
-          刷新
-        </button>
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab('cases')}
-          className={`px-3 py-1.5 rounded-lg text-sm ${
-            activeTab === 'cases' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-          }`}
-        >
-          知识库列表
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('history')}
-          className={`px-3 py-1.5 rounded-lg text-sm ${
-            activeTab === 'history' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-          }`}
-        >
-          AI 历史记录
-        </button>
-      </div>
+      {/* Tab 切换 */}
+      <div className="flex-shrink-0 px-6 py-3 flex items-center gap-3" style={{ background: 'var(--app-bg)', borderBottom: '1px solid var(--app-border)' }}>
+        <div className="flex rounded-xl p-0.5" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+          {(['cases', 'history'] as const).map(tab => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={activeTab === tab ? { background: 'var(--brand-primary)', color: '#fff' } : { color: 'var(--app-text-muted)' }}
+            >
+              {tab === 'cases' ? '知识库列表' : 'AI 历史记录'}
+            </button>
+          ))}
+        </div>
 
-      <div className="mb-4 bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {/* 过滤工具栏 */}
+        <div className="flex flex-1 items-center gap-2 flex-wrap">
           <input
             value={serviceFilter}
             onChange={(e) => setServiceFilter(e.target.value)}
-            placeholder="按服务过滤（service_name）"
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            placeholder="按服务过滤"
+            className="input input-sm"
+            style={{ width: 180 }}
           />
           <input
             value={activeTab === 'history' ? historyQuery : problemTypeFilter}
             onChange={(e) => (activeTab === 'history' ? setHistoryQuery(e.target.value) : setProblemTypeFilter(e.target.value))}
-            placeholder={activeTab === 'history' ? '搜索历史问答（标题/内容）' : '按问题类型过滤（problem_type）'}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            placeholder={activeTab === 'history' ? '搜索历史问答' : '按问题类型过滤'}
+            className="input input-sm"
+            style={{ width: 200 }}
           />
-          <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+          <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: 'var(--app-text-muted)' }}>
             <input
               type="checkbox"
               checked={activeTab === 'history' ? showArchivedHistory : showResolved}
-              onChange={(e) => {
-                if (activeTab === 'history') {
-                  setShowArchivedHistory(e.target.checked);
-                } else {
-                  setShowResolved(e.target.checked);
-                }
-              }}
-              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              onChange={(e) => activeTab === 'history' ? setShowArchivedHistory(e.target.checked) : setShowResolved(e.target.checked)}
+              style={{ accentColor: 'var(--brand-primary)' }}
             />
             {activeTab === 'history' ? '显示归档会话' : '显示已解决条目'}
           </label>
-        </div>
-        {activeTab === 'history' && (
-          <div className="mt-2">
-            <div className="flex flex-wrap items-center gap-4">
-              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+          {activeTab === 'history' && (
+            <>
+              <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: 'var(--app-text-muted)' }}>
                 <input
                   type="checkbox"
                   checked={historyPinnedFirst}
                   onChange={(e) => setHistoryPinnedFirst(e.target.checked)}
-                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  style={{ accentColor: 'var(--brand-primary)' }}
                 />
-                置顶会话优先
+                置顶优先
               </label>
-              <div className="text-xs text-slate-500">
+              <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>
                 已加载 {historySessions.length} / {historyTotalAll || historySessions.length}
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="mt-3">
+              </span>
+            </>
+          )}
           <button
             type="button"
             onClick={() => {
-              if (activeTab === 'history') {
-                fetchHistory({ reset: true, offset: 0 });
-                fetchOutboxStatus();
-                return;
-              }
-              fetchCases();
-              fetchOutboxStatus();
+              if (activeTab === 'history') { fetchHistory({ reset: true, offset: 0 }); fetchOutboxStatus(); return; }
+              fetchCases(); fetchOutboxStatus();
             }}
             disabled={loading || historyLoadingMore}
-            className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm hover:bg-blue-700 disabled:opacity-50"
+            className="btn btn-primary"
           >
             应用过滤
           </button>
