@@ -10,7 +10,7 @@ import LoadingState from '../components/common/LoadingState';
 import ErrorState from '../components/common/ErrorState';
 import EmptyState from '../components/common/EmptyState';
 import { formatTimeCST, formatTimeUTC, formatDuration } from '../utils/formatters';
-import { Search, RefreshCw, X, Clock, AlertCircle, FileText, Network, BrainCircuit } from 'lucide-react';
+import { Search, RefreshCw, X, Clock, AlertCircle, FileText, Network, BrainCircuit, Activity } from 'lucide-react';
 import TraceTimeline from '../components/traces/TraceTimeline';
 
 interface TraceItem {
@@ -175,7 +175,6 @@ const TracesExplorer: React.FC = () => {
 
     let traces = data.traces;
 
-    // 搜索过滤
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
       traces = traces.filter(trace =>
@@ -185,7 +184,6 @@ const TracesExplorer: React.FC = () => {
       );
     }
 
-    // 状态过滤
     if (statusFilter !== 'all') {
       traces = traces.filter(trace => {
         if (statusFilter === 'error') {
@@ -197,6 +195,7 @@ const TracesExplorer: React.FC = () => {
 
     return traces;
   }, [data?.traces, searchQuery, statusFilter]);
+
   const totalTraces = Number(data?.total || 0);
   const currentOffset = Number(data?.offset || Math.max((page - 1) * pageSize, 0));
   const pageCount = Math.max(1, Math.ceil(totalTraces / Math.max(pageSize, 1)));
@@ -211,71 +210,73 @@ const TracesExplorer: React.FC = () => {
   return (
     <div className="flex flex-col h-full">
       {/* 页面标题 */}
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">追踪浏览器</h1>
-          <p className="text-gray-500 mt-1">分析和调试分布式追踪</p>
+      <div className="page-header mb-4">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'rgba(139,92,246,0.1)', color: '#7c3aed' }}>
+            <Activity size={18} />
+          </div>
+          <div>
+            <h1 className="page-title">追踪浏览器</h1>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--app-text-subtle)' }}>分析和调试分布式追踪</p>
+          </div>
         </div>
-        <button
-          onClick={refetch}
-          className="flex items-center px-3 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-        >
-          <RefreshCw className="w-4 h-4 mr-2" />
+        <button onClick={refetch} className="btn btn-secondary">
+          <RefreshCw size={13} />
           刷新
         </button>
       </div>
 
       {/* 统计卡片 */}
       {statsData && (
-        <div className="grid grid-cols-4 gap-4 mb-4">
-          <div className="bg-white rounded-lg shadow-md p-4">
-            <div className="text-sm text-gray-500">总追踪数</div>
-            <div className="text-2xl font-bold text-gray-900">{totalTraces}</div>
+        <div className="grid grid-cols-4 gap-3 mb-4">
+          <div className="kpi-card tone-blue">
+            <div className="kpi-label">总追踪数</div>
+            <div className="kpi-value">{totalTraces.toLocaleString()}</div>
           </div>
-          <div className="bg-white rounded-lg shadow-md p-4">
-              <div className="text-sm text-gray-500">平均延迟</div>
-              <div className="text-2xl font-bold text-gray-900">
+          <div className="kpi-card tone-teal">
+            <div className="kpi-label">平均延迟</div>
+            <div className="kpi-value">
               {statsData.avg_duration || statsData.avg_latency
                 ? formatDuration(Number(statsData.avg_duration ?? statsData.avg_latency ?? 0))
                 : '-'}
-              </div>
             </div>
-            <div className="bg-white rounded-lg shadow-md p-4">
-              <div className="text-sm text-gray-500">P99 延迟</div>
-              <div className="text-2xl font-bold text-gray-900">
+          </div>
+          <div className="kpi-card tone-purple">
+            <div className="kpi-label">P99 延迟</div>
+            <div className="kpi-value">
               {statsData.p99_duration || statsData.p99_latency
                 ? formatDuration(Number(statsData.p99_duration ?? statsData.p99_latency ?? 0))
                 : '-'}
-              </div>
             </div>
-            <div className="bg-white rounded-lg shadow-md p-4">
-              <div className="text-sm text-gray-500">错误率</div>
-              <div className="text-2xl font-bold text-red-600">
+          </div>
+          <div className="kpi-card tone-red">
+            <div className="kpi-label">错误率</div>
+            <div className="kpi-value">
               {statsData.error_rate !== undefined && statsData.error_rate !== null
                 ? `${(Number(statsData.error_rate) * 100).toFixed(2)}%`
                 : '0%'}
-              </div>
             </div>
+          </div>
         </div>
       )}
 
-      {/* 搜索栏 */}
-      <div className="bg-white rounded-lg shadow-md p-4 mb-4">
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-8">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+      {/* 工具栏 */}
+      <div className="card p-3 mb-4">
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-8 items-center">
+          <div className="lg:col-span-2 relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5" style={{ color: 'var(--app-text-subtle)' }} />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索 Trace ID、服务名、操作名..."
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="搜索 Trace ID、服务名、操作名…"
+              className="input input-sm pl-8"
             />
           </div>
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="border border-gray-300 rounded-lg px-3 py-2"
+            className="input input-sm"
           >
             <option value="all">全部状态</option>
             <option value="success">成功</option>
@@ -284,7 +285,7 @@ const TracesExplorer: React.FC = () => {
           <select
             value={timeWindow}
             onChange={(e) => setTimeWindow(e.target.value)}
-            className="border border-gray-300 rounded-lg px-3 py-2"
+            className="input input-sm"
             disabled={Boolean(startTimeInput || endTimeInput)}
             title={startTimeInput || endTimeInput ? '已启用绝对时间范围，时间窗口暂不生效' : '时间窗口'}
           >
@@ -296,20 +297,20 @@ const TracesExplorer: React.FC = () => {
             type="datetime-local"
             value={startTimeInput}
             onChange={(e) => setStartTimeInput(e.target.value)}
-            className="border border-gray-300 rounded-lg px-3 py-2"
+            className="input input-sm"
             title="开始时间（可选）"
           />
           <input
             type="datetime-local"
             value={endTimeInput}
             onChange={(e) => setEndTimeInput(e.target.value)}
-            className="border border-gray-300 rounded-lg px-3 py-2"
+            className="input input-sm"
             title="结束时间（可选）"
           />
           <select
             value={pageSize}
             onChange={(e) => setPageSize(Number(e.target.value))}
-            className="border border-gray-300 rounded-lg px-3 py-2"
+            className="input input-sm"
           >
             <option value={100}>100 条</option>
             <option value={200}>200 条</option>
@@ -317,11 +318,8 @@ const TracesExplorer: React.FC = () => {
             <option value={1000}>1000 条</option>
           </select>
           <button
-            onClick={() => {
-              setStartTimeInput('');
-              setEndTimeInput('');
-            }}
-            className="px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg border border-gray-300"
+            onClick={() => { setStartTimeInput(''); setEndTimeInput(''); }}
+            className="btn btn-ghost text-xs"
             title="清空时间范围并回退到时间窗口"
           >
             清空时间
@@ -335,10 +333,10 @@ const TracesExplorer: React.FC = () => {
               const next = Number(e.target.value) || 1;
               setPage(Math.max(1, Math.min(next, Math.max(pageCount, 1))));
             }}
-            className="border border-gray-300 rounded-lg px-3 py-2"
+            className="input input-sm"
             title="页码"
           />
-          <div className="col-span-full text-xs text-gray-500">
+          <div className="lg:col-span-full text-xs" style={{ color: 'var(--app-text-subtle)' }}>
             当前范围: {startTimeInput || endTimeInput ? '绝对时间筛选' : `时间窗口 ${timeWindow}`}，返回 {data?.count || 0} 条，累计 {totalTraces} 条
           </div>
         </div>
@@ -347,7 +345,7 @@ const TracesExplorer: React.FC = () => {
       {/* 主内容区 */}
       <div className="flex-1 flex gap-4 overflow-hidden">
         {/* 追踪列表 */}
-        <div className={`bg-white rounded-lg shadow-md overflow-hidden ${selectedTrace ? 'w-2/3' : 'w-full'}`}>
+        <div className={`card overflow-hidden transition-all ${selectedTrace ? 'flex-1' : 'w-full'}`}>
           <div className="overflow-auto h-full">
             {filteredTraces.length > 0 ? (
               <table className="data-table">
@@ -362,54 +360,58 @@ const TracesExplorer: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredTraces.map((trace) => (
-                    <tr
-                      key={trace.trace_id}
-                      onClick={() => setSelectedTrace(trace)}
-                      className={`cursor-pointer ${
-                        selectedTrace?.trace_id === trace.trace_id ? 'bg-blue-50' : ''
-                      }`}
-                    >
-                      <td className="whitespace-nowrap text-xs text-gray-500" title={`UTC: ${formatTimeUTC(trace.start_time)}`}>
-                        {formatTimeCST(trace.start_time)}
-                      </td>
-                      <td className="font-mono text-xs">
-                        {trace.trace_id.substring(0, 16)}...
-                      </td>
-                      <td className="text-xs font-medium text-blue-600">
-                        {trace.service_name}
-                      </td>
-                      <td className="text-xs text-gray-700 max-w-xs truncate">
-                        {trace.operation_name}
-                      </td>
-                      <td className="whitespace-nowrap text-xs">
-                        <span
-                          className={`font-medium ${
-                            trace.duration_ms > 1000
-                              ? 'text-red-600'
-                              : trace.duration_ms > 500
-                              ? 'text-yellow-600'
-                              : 'text-green-600'
-                          }`}
-                        >
-                          {formatDuration(trace.duration_ms)}
-                        </span>
-                      </td>
-                      <td>
-                        {trace.status_code === 'STATUS_CODE_ERROR' ? (
-                          <span className="inline-flex items-center text-xs text-red-600">
-                            <AlertCircle className="w-3 h-3 mr-1" />
-                            错误
+                  {filteredTraces.map((trace) => {
+                    const isError = trace.status_code === 'STATUS_CODE_ERROR';
+                    const isSelected = selectedTrace?.trace_id === trace.trace_id;
+                    return (
+                      <tr
+                        key={trace.trace_id}
+                        onClick={() => setSelectedTrace(trace)}
+                        className="cursor-pointer"
+                        style={isSelected ? { background: 'var(--brand-primary-soft)' } : {}}
+                      >
+                        <td className="whitespace-nowrap text-xs" style={{ color: 'var(--app-text-subtle)' }} title={`UTC: ${formatTimeUTC(trace.start_time)}`}>
+                          {formatTimeCST(trace.start_time)}
+                        </td>
+                        <td className="font-mono text-xs" style={{ color: 'var(--app-text-muted)' }}>
+                          {trace.trace_id.substring(0, 16)}…
+                        </td>
+                        <td className="text-xs font-semibold" style={{ color: 'var(--brand-primary)' }}>
+                          {trace.service_name}
+                        </td>
+                        <td className="text-xs max-w-xs truncate" style={{ color: 'var(--app-text)' }}>
+                          {trace.operation_name}
+                        </td>
+                        <td className="whitespace-nowrap text-xs">
+                          <span
+                            className="font-semibold"
+                            style={{
+                              color: trace.duration_ms > 1000
+                                ? 'var(--color-error-dark)'
+                                : trace.duration_ms > 500
+                                ? 'var(--color-warning-dark)'
+                                : 'var(--color-success-dark)',
+                            }}
+                          >
+                            {formatDuration(trace.duration_ms)}
                           </span>
-                        ) : (
-                          <span className="inline-flex items-center text-xs text-green-600">
-                            <Clock className="w-3 h-3 mr-1" />
-                            正常
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                        <td>
+                          {isError ? (
+                            <span className="inline-flex items-center gap-1 text-xs" style={{ color: 'var(--color-error-dark)' }}>
+                              <AlertCircle size={11} />
+                              错误
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs" style={{ color: 'var(--color-success-dark)' }}>
+                              <Clock size={11} />
+                              正常
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             ) : (
@@ -420,173 +422,149 @@ const TracesExplorer: React.FC = () => {
 
         {/* 追踪详情面板 */}
         {selectedTrace && (
-          <div className="w-1/3 bg-white rounded-lg shadow-md overflow-hidden">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200">
-              <h3 className="font-semibold text-gray-900">追踪详情</h3>
+          <div className="w-80 card overflow-hidden flex flex-col" style={{ minWidth: '20rem' }}>
+            <div className="card-header">
+              <div className="card-title">追踪详情</div>
               <button
-                onClick={() => setSelectedTrace(null)}
-                className="text-gray-400 hover:text-gray-600"
+                onClick={() => { setSelectedTrace(null); setSelectedSpan(null); }}
+                className="btn btn-ghost btn-icon"
               >
-                <X className="w-5 h-5" />
+                <X size={14} />
               </button>
             </div>
-            <div className="p-4 overflow-auto h-full">
-              <div className="space-y-4">
+            <div className="card-body overflow-auto flex-1">
+              <div className="space-y-3">
+                {[
+                  { label: 'Trace ID', value: <span className="font-mono break-all text-xs">{selectedTrace.trace_id}</span> },
+                  { label: '开始时间', value: <span title={`UTC: ${formatTimeUTC(selectedTrace.start_time)}`}>{formatTimeCST(selectedTrace.start_time)}</span> },
+                  { label: '服务', value: <span className="font-semibold" style={{ color: 'var(--brand-primary)' }}>{selectedTrace.service_name}</span> },
+                  { label: '操作', value: selectedTrace.operation_name },
+                  { label: '持续时间', value: <span className="font-semibold">{formatDuration(selectedTrace.duration_ms)}</span> },
+                ].map(({ label, value }) => (
+                  <div key={label}>
+                    <div className="section-label mb-0.5">{label}</div>
+                    <div className="text-sm" style={{ color: 'var(--app-text)' }}>{value}</div>
+                  </div>
+                ))}
+
+                {/* 状态 */}
                 <div>
-                  <label className="text-xs text-gray-500">Trace ID</label>
-                  <p className="text-sm font-mono break-all">{selectedTrace.trace_id}</p>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">开始时间</label>
-                  <p className="text-sm" title={`UTC: ${formatTimeUTC(selectedTrace.start_time)}`}>{formatTimeCST(selectedTrace.start_time)}</p>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">服务</label>
-                  <p className="text-sm font-medium text-blue-600">{selectedTrace.service_name}</p>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">操作</label>
-                  <p className="text-sm">{selectedTrace.operation_name}</p>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">持续时间</label>
-                  <p className="text-sm font-medium">
-                    {formatDuration(selectedTrace.duration_ms)}
-                  </p>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">状态</label>
-                  <p>
-                    {(selectedTrace.status_code === 'STATUS_CODE_ERROR' || (!selectedTrace.status_code && selectedTrace.status === 'error')) ? (
-                      <span className="px-2 py-1 text-xs bg-red-100 text-red-700 rounded">
-                        错误
-                      </span>
-                    ) : (selectedTrace.status_code === 'STATUS_CODE_OK' || (!selectedTrace.status_code && selectedTrace.status === 'ok')) ? (
-                      <span className="px-2 py-1 text-xs bg-green-100 text-green-700 rounded">
-                        成功
-                      </span>
-                    ) : (
-                      <span className="px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded">
-                        {selectedTrace.status_code || selectedTrace.status || '未知'}
-                      </span>
-                    )}
-                  </p>
+                  <div className="section-label mb-1">状态</div>
+                  {(selectedTrace.status_code === 'STATUS_CODE_ERROR' || (!selectedTrace.status_code && selectedTrace.status === 'error')) ? (
+                    <span className="badge badge-critical">错误</span>
+                  ) : (selectedTrace.status_code === 'STATUS_CODE_OK' || (!selectedTrace.status_code && selectedTrace.status === 'ok')) ? (
+                    <span className="badge badge-low">成功</span>
+                  ) : (
+                    <span className="badge badge-neutral">{selectedTrace.status_code || selectedTrace.status || '未知'}</span>
+                  )}
                 </div>
 
-                <div className="pt-3 border-t border-gray-200">
-                  <label className="text-xs text-gray-500 block mb-2">快速操作</label>
-                  <div className="grid grid-cols-1 gap-2">
+                {/* 快速操作 */}
+                <div className="pt-2" style={{ borderTop: '1px solid var(--app-border)' }}>
+                  <div className="section-label mb-2">快速操作</div>
+                  <div className="space-y-1.5">
                     <button
-                      onClick={() => navigation.goToLogs({
-                        serviceName: selectedTrace.service_name,
-                        traceId: selectedTrace.trace_id,
-                      })}
-                      className="flex items-center justify-center gap-2 px-3 py-2 text-sm bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors"
+                      onClick={() => navigation.goToLogs({ serviceName: selectedTrace.service_name, traceId: selectedTrace.trace_id })}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors"
+                      style={{ background: 'var(--brand-primary-soft)', color: 'var(--brand-primary)', border: '1px solid rgba(59,130,246,0.2)' }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '0.8')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                     >
-                      <FileText className="w-4 h-4" />
+                      <FileText size={13} />
                       查看关联日志
                     </button>
                     <button
                       onClick={() => navigation.goToTopology({ serviceName: selectedTrace.service_name })}
-                      className="flex items-center justify-center gap-2 px-3 py-2 text-sm bg-green-50 hover:bg-green-100 text-green-700 rounded-lg transition-colors"
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors"
+                      style={{ background: 'var(--color-success-soft)', color: 'var(--color-success-dark)', border: '1px solid rgba(16,185,129,0.2)' }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '0.8')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                     >
-                      <Network className="w-4 h-4" />
+                      <Network size={13} />
                       查看服务拓扑
                     </button>
                     <button
-                      onClick={() => navigation.goToAIAnalysis({
-                        traceId: selectedTrace.trace_id,
-                        serviceName: selectedTrace.service_name,
-                      })}
-                      className="flex items-center justify-center gap-2 px-3 py-2 text-sm bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg transition-colors"
+                      onClick={() => navigation.goToAIAnalysis({ traceId: selectedTrace.trace_id, serviceName: selectedTrace.service_name })}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors"
+                      style={{ background: 'rgba(139,92,246,0.08)', color: '#7c3aed', border: '1px solid rgba(139,92,246,0.15)' }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '0.8')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                     >
-                      <BrainCircuit className="w-4 h-4" />
+                      <BrainCircuit size={13} />
                       AI 诊断链路
                     </button>
                   </div>
                 </div>
 
                 {/* Span 时间线 */}
-                <div className="mt-4">
+                <div className="pt-2" style={{ borderTop: '1px solid var(--app-border)' }}>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs text-gray-500">Span 时间线</label>
+                    <div className="section-label">Span 时间线</div>
                     {spansData && spansData.length > 0 && (
-                      <span className="text-xs text-gray-400">{spansData.length} 个 spans</span>
+                      <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>{spansData.length} 个 spans</span>
                     )}
                   </div>
                   {spansLoading ? (
-                    <div className="flex items-center justify-center h-48">
-                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 border-t-transparent"></div>
+                    <div className="flex items-center justify-center h-40">
+                      <div className="animate-spin rounded-full h-7 w-7 border-2" style={{ borderColor: 'var(--brand-primary)', borderTopColor: 'transparent' }} />
                     </div>
                   ) : spansData && spansData.length > 0 ? (
-      <TraceTimeline
-        spans={spansData}
-        selectedSpanId={selectedSpan?.span_id || null}
-        onSpanClick={(span) => setSelectedSpan(span)}
-      />
+                    <TraceTimeline
+                      spans={spansData}
+                      selectedSpanId={selectedSpan?.span_id || null}
+                      onSpanClick={(span) => setSelectedSpan(span)}
+                    />
                   ) : (
-                    <div className="bg-gray-50 rounded-lg p-8 h-48 flex items-center justify-center">
-                      <p className="text-sm text-gray-400">该追踪暂无 Span 数据</p>
+                    <div className="rounded-xl p-6 flex items-center justify-center" style={{ background: 'var(--app-surface-muted)', minHeight: '6rem' }}>
+                      <p className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>该追踪暂无 Span 数据</p>
                     </div>
                   )}
                 </div>
 
                 {/* Span 详情面板 */}
                 {selectedSpan && (
-                  <div className="mt-4 border-t border-gray-200 pt-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <h4 className="text-sm font-semibold text-gray-900">Span 详情</h4>
-                      <button
-                        onClick={() => setSelectedSpan(null)}
-                        className="text-gray-400 hover:text-gray-600"
-                      >
-                        <X className="w-4 h-4" />
+                  <div className="pt-2" style={{ borderTop: '1px solid var(--app-border)' }}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="section-label">Span 详情</div>
+                      <button onClick={() => setSelectedSpan(null)} className="btn btn-ghost btn-icon">
+                        <X size={12} />
                       </button>
                     </div>
                     <div className="space-y-2">
                       <div className="grid grid-cols-2 gap-2">
-                        <div className="bg-gray-50 rounded p-2">
-                          <div className="text-xs text-gray-500">Service</div>
-                          <div className="text-sm font-medium">{selectedSpan.service_name}</div>
-                        </div>
-                        <div className="bg-gray-50 rounded p-2">
-                          <div className="text-xs text-gray-500">Operation</div>
-                          <div className="text-sm">{selectedSpan.operation_name}</div>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="bg-gray-50 rounded p-2">
-                          <div className="text-xs text-gray-500">Duration</div>
-                          <div className="text-sm font-mono">{formatDuration(resolveSpanDurationMs(selectedSpan))}</div>
-                        </div>
-                        <div className="bg-gray-50 rounded p-2">
-                          <div className="text-xs text-gray-500">Start Time</div>
-                          <div className="text-sm" title={`UTC: ${formatTimeUTC(selectedSpan.start_time)}`}>{formatTimeCST(selectedSpan.start_time)}</div>
-                        </div>
+                        {[
+                          { label: 'Service', value: selectedSpan.service_name },
+                          { label: 'Operation', value: selectedSpan.operation_name },
+                          { label: 'Duration', value: <span className="font-mono">{formatDuration(resolveSpanDurationMs(selectedSpan))}</span> },
+                          { label: 'Start Time', value: <span title={`UTC: ${formatTimeUTC(selectedSpan.start_time)}`}>{formatTimeCST(selectedSpan.start_time)}</span> },
+                        ].map(({ label, value }) => (
+                          <div key={label} className="p-2 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                            <div className="section-label mb-0.5">{label}</div>
+                            <div className="text-xs" style={{ color: 'var(--app-text)' }}>{value}</div>
+                          </div>
+                        ))}
                       </div>
                       {selectedSpan.status && (
-                        <div className="bg-gray-50 rounded p-2">
-                          <div className="text-xs text-gray-500">Status</div>
-                          <div className="text-sm">
+                        <div className="p-2 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                          <div className="section-label mb-0.5">Status</div>
+                          <div className="text-xs">
                             {selectedSpan.status === 'STATUS_CODE_ERROR' ? (
-                              <span className="text-red-600">错误</span>
+                              <span style={{ color: 'var(--color-error-dark)' }}>错误</span>
                             ) : selectedSpan.status === 'STATUS_CODE_OK' ? (
-                              <span className="text-green-600">成功</span>
+                              <span style={{ color: 'var(--color-success-dark)' }}>成功</span>
                             ) : (
-                              <span className="text-gray-600">{selectedSpan.status}</span>
+                              <span style={{ color: 'var(--app-text-muted)' }}>{selectedSpan.status}</span>
                             )}
                           </div>
                         </div>
                       )}
                       {selectedSpan.tags && Object.keys(selectedSpan.tags).length > 0 && (
-                        <div className="bg-white rounded border border-gray-200 p-2">
-                          <div className="text-xs text-gray-500 mb-1">Tags</div>
+                        <div className="p-2 rounded-lg" style={{ border: '1px solid var(--app-border)' }}>
+                          <div className="section-label mb-1.5">Tags</div>
                           <div className="flex flex-wrap gap-1">
                             {Object.entries(selectedSpan.tags).map(([key, value]) => (
-                              <span key={key} className="inline-flex items-center px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs">
-                                <span className="font-mono">{key}</span>
-                                <span className="mx-1">:</span>
-                                <span>{String(value)}</span>
+                              <span key={key} className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono" style={{ background: 'var(--brand-primary-soft)', color: 'var(--brand-primary)', border: '1px solid rgba(59,130,246,0.15)' }}>
+                                {key}:<span className="ml-0.5 opacity-80">{String(value)}</span>
                               </span>
                             ))}
                           </div>
@@ -601,31 +579,24 @@ const TracesExplorer: React.FC = () => {
         )}
       </div>
 
-      {/* 统计信息 */}
-      <div className="mt-4 flex items-center justify-between text-sm text-gray-500">
+      {/* 分页 */}
+      <div className="mt-3 flex items-center justify-between text-xs" style={{ color: 'var(--app-text-subtle)' }}>
         <div>
-          显示 {filteredTraces.length} 条追踪（第 {pageStart}-{pageEnd} 条，共 {totalTraces} 条）
+          显示 {filteredTraces.length} 条追踪（第 {pageStart}–{pageEnd} 条，共 {totalTraces} 条）
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
             disabled={!hasPrevPage}
-            className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="btn btn-ghost text-xs disabled:opacity-40"
           >
             上一页
           </button>
-          <span className="text-xs text-gray-500">
-            第 {page} / {pageCount} 页
-          </span>
+          <span>第 {page} / {pageCount} 页</span>
           <button
-            onClick={() => {
-              if (!hasNextPage) {
-                return;
-              }
-              setPage((prev) => prev + 1);
-            }}
+            onClick={() => { if (!hasNextPage) return; setPage((prev) => prev + 1); }}
             disabled={!hasNextPage}
-            className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="btn btn-ghost text-xs disabled:opacity-40"
           >
             下一页
           </button>

@@ -773,41 +773,43 @@ function KpiCard(p: {
   error?: string;
   trend?: 'up'|'down';
 }): JSX.Element {
-  const cfg: Record<string, { icon: string; text: string; bg: string; border: string }> = {
-    blue:   { icon:'#3b82f6', text:'#1e40af', bg:'#eff6ff', border:'#bfdbfe' },
-    green:  { icon:'#10b981', text:'#065f46', bg:'#ecfdf5', border:'#a7f3d0' },
-    red:    { icon:'#ef4444', text:'#991b1b', bg:'#fef2f2', border:'#fecaca' },
-    amber:  { icon:'#f59e0b', text:'#92400e', bg:'#fffbeb', border:'#fde68a' },
-    purple: { icon:'#8b5cf6', text:'#4c1d95', bg:'#f5f3ff', border:'#ddd6fe' },
+  const cfg: Record<string, { iconBg: string; iconColor: string; valueColor: string }> = {
+    blue:   { iconBg:'#eff6ff', iconColor:'#3b82f6', valueColor:'#1e40af' },
+    green:  { iconBg:'#ecfdf5', iconColor:'#10b981', valueColor:'#065f46' },
+    red:    { iconBg:'#fef2f2', iconColor:'#ef4444', valueColor:'#991b1b' },
+    amber:  { iconBg:'#fffbeb', iconColor:'#f59e0b', valueColor:'#92400e' },
+    purple: { iconBg:'#f5f3ff', iconColor:'#8b5cf6', valueColor:'#4c1d95' },
   };
   const c = cfg[p.tone];
   return (
-    <div
-      className="rounded-2xl p-5 transition-all duration-200 hover:shadow-md"
-      style={{ background: c.bg, border:`1px solid ${c.border}` }}
-    >
-      <div className="flex items-start justify-between mb-3">
+    <div className={`kpi-card tone-${p.tone === 'blue' ? 'blue' : p.tone === 'green' ? 'green' : p.tone === 'red' ? 'red' : p.tone === 'amber' ? 'amber' : 'purple'}`}>
+      <div className="flex items-start justify-between mb-4">
         <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center"
-          style={{ background:'white', color: c.icon, boxShadow:`0 2px 8px ${c.icon}22` }}
+          className="w-10 h-10 rounded-xl flex items-center justify-center shadow-sm"
+          style={{ background: c.iconBg, color: c.iconColor }}
         >
           {p.icon}
         </div>
         {p.trend && (
-          <span style={{ color: p.trend==='up' ? '#ef4444' : '#10b981' }}>
-            {p.trend==='up' ? <TrendingUp size={14}/> : <TrendingDown size={14}/>}
-          </span>
+          <div className="flex items-center gap-1">
+            <span
+              className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[10px] font-semibold"
+              style={{
+                background: p.trend==='up' ? '#fef2f2' : '#ecfdf5',
+                color: p.trend==='up' ? '#dc2626' : '#059669',
+              }}
+            >
+              {p.trend==='up' ? <TrendingUp size={10}/> : <TrendingDown size={10}/>}
+              {p.trend==='up' ? '+' : '-'}
+            </span>
+          </div>
         )}
       </div>
-      <div className="text-2xl font-bold mb-1" style={{ color: c.text }}>
-        {p.loading ? <div className="skeleton h-8 w-24" /> : p.error ? '--' : p.value}
+      <div className="kpi-label">{p.title}</div>
+      <div className="kpi-value" style={{ color: c.valueColor }}>
+        {p.loading ? <div className="skeleton h-8 w-28 mt-1" /> : p.error ? '--' : p.value}
       </div>
-      <div className="text-xs font-medium" style={{ color: c.text, opacity: 0.7 }}>
-        {p.title}
-      </div>
-      <div className="text-[11px] mt-1 opacity-60" style={{ color: c.text }}>
-        {p.error ? p.error : p.sub}
-      </div>
+      <div className="kpi-sub">{p.error ? <span style={{color:'#dc2626'}}>{p.error}</span> : p.sub}</div>
     </div>
   );
 }

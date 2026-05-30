@@ -714,47 +714,55 @@ const AlertCenter: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full">
-      {/* 头部 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="flex items-center justify-between">
+      {/* 页面头部 */}
+      <div className="flex-shrink-0 px-6 py-4 border-b animate-fade-in" style={{ background: 'var(--app-surface)', borderColor: 'var(--app-border)' }}>
+        <div className="flex items-center justify-between gap-4">
+          {/* 左侧标题 */}
           <div className="flex items-center gap-3">
-            <Bell className="w-6 h-6 text-amber-500" />
-            <h1 className="text-xl font-semibold text-gray-900">告警中心</h1>
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: firingCount > 0 ? 'var(--color-error-soft)' : 'var(--color-success-soft)' }}>
+              <Bell size={18} style={{ color: firingCount > 0 ? 'var(--color-error)' : 'var(--color-success)' }} />
+            </div>
+            <div>
+              <h1 className="text-base font-bold" style={{ color: 'var(--app-text)' }}>告警中心</h1>
+              <p className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>实时告警事件监控与规则管理</p>
+            </div>
           </div>
 
+          {/* 右侧操作区 */}
           <div className="flex items-center gap-3">
-            {/* 统计信息 */}
+            {/* 统计信息徽章 */}
             {statsData && (
-              <div className="flex items-center gap-4 text-sm">
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 rounded-full bg-red-500" />
-                  <span className="text-gray-600">触发: {firingCount}</span>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg" style={{ background: firingCount > 0 ? 'var(--color-error-soft)' : 'var(--app-surface-muted)', border: `1px solid ${firingCount > 0 ? '#fca5a5' : 'var(--app-border)'}` }}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: 'var(--color-error)' }} />
+                  <span className="text-xs font-semibold" style={{ color: firingCount > 0 ? 'var(--color-error-dark)' : 'var(--app-text-muted)' }}>触发 {firingCount}</span>
                 </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 rounded-full bg-green-500" />
-                  <span className="text-gray-600">已解决: {resolvedCount}</span>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg" style={{ background: 'var(--color-success-soft)', border: '1px solid #a7f3d0' }}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: 'var(--color-success)' }} />
+                  <span className="text-xs font-semibold" style={{ color: 'var(--color-success-dark)' }}>解决 {resolvedCount}</span>
                 </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 rounded-full bg-blue-500" />
-                  <span className="text-gray-600">通知: {totalNotifications}</span>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg" style={{ background: 'var(--color-info-soft)', border: '1px solid #bfdbfe' }}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: 'var(--color-info)' }} />
+                  <span className="text-xs font-semibold" style={{ color: 'var(--color-info-dark)' }}>通知 {totalNotifications}</span>
                 </div>
               </div>
             )}
-
+            <div className="w-px h-5 mx-1" style={{ background: 'var(--app-border)' }} />
             <button
               onClick={handleEvaluateNow}
               disabled={evaluating}
-              className="px-3 py-2 text-xs bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 disabled:opacity-50 transition-colors"
+              className="btn btn-secondary"
               title="手动评估告警规则"
             >
-              {evaluating ? '评估中...' : '立即评估'}
+              <RefreshCw size={13} className={evaluating ? 'animate-spin' : ''} />
+              {evaluating ? '评估中…' : '立即评估'}
             </button>
             <button
               onClick={handleRefresh}
-              className="p-2 hover:bg-gray-100 text-gray-600 rounded-lg transition-colors"
+              className="btn btn-ghost btn-icon"
               title="刷新"
             >
-              <RefreshCw className="w-4 h-4" />
+              <RefreshCw size={15} />
             </button>
           </div>
         </div>
@@ -774,27 +782,23 @@ const AlertCenter: React.FC = () => {
               </div>
             )}
             {/* Tab 切换 */}
-            <div className="flex gap-4 mb-6">
-              <button
-                onClick={() => setActiveTab('events')}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                  activeTab === 'events'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                告警事件
-              </button>
-              <button
-                onClick={() => setActiveTab('rules')}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                  activeTab === 'rules'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                告警规则
-              </button>
+            <div className="flex items-center gap-1 mb-6 p-1 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)', width: 'fit-content' }}>
+              {[
+                { key: 'events', label: '告警事件', icon: <Bell size={13} /> },
+                { key: 'rules',  label: '告警规则', icon: <Network size={13} /> },
+              ].map(tab => (
+                <button
+                  key={tab.key}
+                  onClick={() => setActiveTab(tab.key as 'events' | 'rules')}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150"
+                  style={activeTab === tab.key
+                    ? { background: 'var(--app-surface)', color: 'var(--brand-primary)', boxShadow: 'var(--shadow-sm)', border: '1px solid var(--app-border)' }
+                    : { color: 'var(--app-text-muted)', background: 'transparent', border: '1px solid transparent' }
+                  }
+                >
+                  {tab.icon}{tab.label}
+                </button>
+              ))}
             </div>
 
             {activeTab === 'events' ? (
@@ -887,31 +891,34 @@ const AlertCenter: React.FC = () => {
 
                 <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
                   {eventSummaryCards.map((item) => (
-                    <div key={item.label} className="rounded-lg border border-gray-200 bg-white px-3 py-3 shadow-sm">
-                      <div className="text-[11px] uppercase tracking-wide text-gray-500">{item.label}</div>
-                      <div className={`mt-1 text-xl font-semibold ${item.tone}`}>{item.value}</div>
+                    <div key={item.label} className="card px-4 py-3 card-hover">
+                      <div className="section-label mb-2">{item.label}</div>
+                      <div className={`text-xl font-bold ${item.tone}`}>{item.value}</div>
                     </div>
                   ))}
                 </div>
 
-                <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50/60 p-3">
-                  <div className="flex items-center gap-2 text-sm font-medium text-blue-800">
-                    <Megaphone className="h-4 w-4" />
-                    最近通知
+                <div className="mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid var(--color-info-soft)', background: 'var(--color-info-soft)' }}>
+                  <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ borderColor: '#bfdbfe' }}>
+                    <Megaphone size={13} style={{ color: 'var(--color-info)' }} />
+                    <span className="text-xs font-semibold" style={{ color: 'var(--color-info-dark)' }}>最近通知</span>
+                    {notifications.length > 0 && <span className="badge badge-info ml-auto">{notifications.length}</span>}
                   </div>
                   {notifications.length > 0 ? (
-                    <div className="mt-2 space-y-1 text-xs text-blue-900">
+                    <div className="divide-y" style={{ borderColor: '#bfdbfe' }}>
                       {notifications.slice(0, 4).map((notice) => (
-                        <div key={notice.id} className="flex items-center justify-between rounded bg-white/80 px-2 py-1">
-                          <span className="truncate pr-3">
-                            [{notice.channel}] {notice.rule_name} · {notice.delivery_status}
-                          </span>
-                          <span className="text-[11px] text-blue-700">{formatTime(notice.created_at)}</span>
+                        <div key={notice.id} className="flex items-center justify-between px-4 py-2" style={{ background: 'rgba(255,255,255,0.6)' }}>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="badge badge-neutral flex-shrink-0">{notice.channel}</span>
+                            <span className="text-xs truncate" style={{ color: 'var(--color-info-dark)' }}>{notice.rule_name}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: notice.delivery_status === 'sent' ? '#ecfdf5' : '#fef2f2', color: notice.delivery_status === 'sent' ? '#065f46' : '#991b1b' }}>{notice.delivery_status}</span>
+                          </div>
+                          <span className="text-[11px] flex-shrink-0 ml-3" style={{ color: 'var(--app-text-subtle)' }}>{formatTime(notice.created_at)}</span>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <div className="mt-2 text-xs text-blue-700">暂无通知记录</div>
+                    <div className="px-4 py-3 text-xs" style={{ color: 'var(--color-info-dark)', opacity: 0.7 }}>暂无通知记录</div>
                   )}
                 </div>
 
@@ -929,7 +936,7 @@ const AlertCenter: React.FC = () => {
                       return (
                         <div
                           key={event.id}
-                          className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                          className="card card-hover overflow-hidden"
                         >
                           <div className="flex items-start justify-between">
                             <div className="flex-1">

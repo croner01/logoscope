@@ -137,14 +137,14 @@ const pickText = (...values: unknown[]): string => {
   return '-';
 };
 
-// 日志级别颜色配置
-const LEVEL_COLORS: Record<string, { bg: string; text: string; border: string; dot: string; solid: string }> = {
-  TRACE: { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-300', dot: 'bg-gray-400', solid: '#9ca3af' },
-  DEBUG: { bg: 'bg-indigo-100', text: 'text-indigo-700', border: 'border-indigo-300', dot: 'bg-indigo-500', solid: '#6366f1' },
-  INFO: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-300', dot: 'bg-blue-500', solid: '#3b82f6' },
-  WARN: { bg: 'bg-amber-100', text: 'text-amber-700', border: 'border-amber-300', dot: 'bg-amber-500', solid: '#f59e0b' },
-  ERROR: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300', dot: 'bg-red-500', solid: '#ef4444' },
-  FATAL: { bg: 'bg-red-200', text: 'text-red-800', border: 'border-red-400', dot: 'bg-red-600', solid: '#dc2626' },
+// 日志级别颜色配置 — uses design-system CSS vars for bg/text; solid stays as hex for canvas/SVG use
+const LEVEL_COLORS: Record<string, { bgStyle: React.CSSProperties; textStyle: React.CSSProperties; solid: string }> = {
+  TRACE:  { bgStyle: { background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }, textStyle: { color: 'var(--app-text-muted)' }, solid: '#9ca3af' },
+  DEBUG:  { bgStyle: { background: 'rgba(99,102,241,0.1)',  border: '1px solid rgba(99,102,241,0.25)' }, textStyle: { color: '#4f46e5' }, solid: '#6366f1' },
+  INFO:   { bgStyle: { background: 'var(--color-info-soft)', border: '1px solid var(--color-info-border)' }, textStyle: { color: 'var(--color-info-dark)' }, solid: '#3b82f6' },
+  WARN:   { bgStyle: { background: 'var(--color-warning-soft)', border: '1px solid var(--color-warning-border)' }, textStyle: { color: 'var(--color-warning-dark)' }, solid: '#f59e0b' },
+  ERROR:  { bgStyle: { background: 'var(--color-error-soft)', border: '1px solid var(--color-error-border)' }, textStyle: { color: 'var(--color-error-dark)' }, solid: '#ef4444' },
+  FATAL:  { bgStyle: { background: 'var(--sev-critical-bg)',  border: '1px solid var(--sev-critical-border)' }, textStyle: { color: 'var(--sev-critical-fg)' }, solid: '#dc2626' },
 };
 
 function normalizeDisplayLevel(value: unknown): LogLevel {
@@ -156,20 +156,20 @@ function normalizeDisplayLevel(value: unknown): LogLevel {
   return isLogLevel(normalized) ? normalized : 'INFO';
 }
 
-// 标签颜色配置
-const TAG_COLORS = [
-  { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-700', keyColor: 'text-blue-500' },
-  { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-700', keyColor: 'text-green-500' },
-  { bg: 'bg-purple-50', border: 'border-purple-200', text: 'text-purple-700', keyColor: 'text-purple-500' },
-  { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', keyColor: 'text-amber-500' },
-  { bg: 'bg-pink-50', border: 'border-pink-200', text: 'text-pink-700', keyColor: 'text-pink-500' },
-  { bg: 'bg-cyan-50', border: 'border-cyan-200', text: 'text-cyan-700', keyColor: 'text-cyan-500' },
-  { bg: 'bg-indigo-50', border: 'border-indigo-200', text: 'text-indigo-700', keyColor: 'text-indigo-500' },
-  { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-700', keyColor: 'text-rose-500' },
+// 标签颜色配置 — inline style objects so they respond to CSS-var theme changes
+const TAG_COLORS: Array<{ containerStyle: React.CSSProperties; textStyle: React.CSSProperties; keyStyle: React.CSSProperties }> = [
+  { containerStyle: { background: 'var(--color-info-soft)',    border: '1px solid var(--color-info-border)'    }, textStyle: { color: 'var(--color-info-dark)'    }, keyStyle: { color: 'var(--brand-primary)'  } },
+  { containerStyle: { background: 'var(--color-success-soft)', border: '1px solid var(--color-success-border)' }, textStyle: { color: 'var(--color-success-dark)' }, keyStyle: { color: 'var(--color-success-dark)' } },
+  { containerStyle: { background: 'rgba(139,92,246,0.08)',    border: '1px solid rgba(139,92,246,0.2)'        }, textStyle: { color: '#6d28d9'                   }, keyStyle: { color: '#7c3aed'               } },
+  { containerStyle: { background: 'var(--color-warning-soft)', border: '1px solid var(--color-warning-border)' }, textStyle: { color: 'var(--color-warning-dark)' }, keyStyle: { color: 'var(--color-warning-dark)' } },
+  { containerStyle: { background: 'rgba(236,72,153,0.08)',    border: '1px solid rgba(236,72,153,0.2)'        }, textStyle: { color: '#be185d'                   }, keyStyle: { color: '#db2777'               } },
+  { containerStyle: { background: 'rgba(6,182,212,0.08)',     border: '1px solid rgba(6,182,212,0.2)'         }, textStyle: { color: '#0e7490'                   }, keyStyle: { color: '#0891b2'               } },
+  { containerStyle: { background: 'rgba(99,102,241,0.08)',    border: '1px solid rgba(99,102,241,0.2)'        }, textStyle: { color: '#4338ca'                   }, keyStyle: { color: '#4f46e5'               } },
+  { containerStyle: { background: 'rgba(244,63,94,0.08)',     border: '1px solid rgba(244,63,94,0.2)'         }, textStyle: { color: '#be123c'                   }, keyStyle: { color: '#e11d48'               } },
 ];
 
 // 获取标签颜色
-function getTagColor(key: string) {
+function getTagColor(key: string): typeof TAG_COLORS[0] {
   let hash = 0;
   for (let i = 0; i < key.length; i++) {
     hash = ((hash << 5) - hash) + key.charCodeAt(i);
@@ -624,22 +624,7 @@ function buildLogEventIdentity(event: LogEvent): string {
   return `${stableId}|${timestamp}|${serviceName}|${podName}|${namespace}|${level}|${traceId}|${hashEventText(message)}`;
 }
 
-function getLevelTokenClass(levelToken: string): string {
-  const normalized = levelToken.toUpperCase();
-  if (normalized === 'ERROR' || normalized === 'FATAL') {
-    return 'text-red-700 font-semibold';
-  }
-  if (normalized === 'WARN' || normalized === 'WARNING') {
-    return 'text-amber-700 font-semibold';
-  }
-  if (normalized === 'DEBUG') {
-    return 'text-indigo-700 font-semibold';
-  }
-  if (normalized === 'INFO') {
-    return 'text-blue-700 font-semibold';
-  }
-  return 'text-slate-700 font-semibold';
-}
+
 
 function renderHighlightedToken(
   token: string,
@@ -689,9 +674,14 @@ function renderHighlightedLine(line: string, lineIndex: number, options: Highlig
     }
 
     if (LEVEL_TOKEN_REGEX.test(part)) {
+      const lvl = part.toUpperCase();
+      const isError = lvl === 'ERROR' || lvl === 'FATAL';
+      const isWarn = lvl === 'WARN' || lvl === 'WARNING';
+      const isDebug = lvl === 'DEBUG';
+      const base = isError ? 'text-red-700' : isWarn ? 'text-amber-700' : isDebug ? 'text-indigo-700' : 'text-blue-700';
       const levelClass = options.mode === 'enhanced'
-        ? `${getLevelTokenClass(part)} bg-slate-200/70`
-        : getLevelTokenClass(part);
+        ? `${base} font-bold bg-slate-200/70`
+        : `${base} font-semibold`;
       return renderHighlightedToken(part, 'level', levelClass, key, options);
     }
 
@@ -1928,16 +1918,18 @@ const LogsExplorer: React.FC = () => {
     const isCollapsed = collapsedFilters[key];
     
     return (
-      <div className="border-b border-gray-100 last:border-0">
+      <div className="last:border-0" style={{ borderBottom: '1px solid var(--app-border)' }}>
         <button
           onClick={() => toggleFilterCollapse(key)}
-          className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+          className="w-full flex items-center justify-between px-4 py-3 transition-colors"
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--app-surface-muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = '')}
         >
           <div className="flex items-center gap-2">
-            <span className="text-gray-400">{icon}</span>
-            <span className="text-sm font-semibold text-gray-800">{title}</span>
+            <span style={{ color: 'var(--app-text-subtle)' }}>{icon}</span>
+            <span className="text-sm font-semibold" style={{ color: 'var(--app-text)' }}>{title}</span>
             {selectedCount > 0 && (
-              <span className="bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium">
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: 'var(--brand-primary-soft)', color: 'var(--brand-primary)' }}>
                 {selectedCount}
               </span>
             )}
@@ -1949,15 +1941,15 @@ const LogsExplorer: React.FC = () => {
                   e.stopPropagation();
                   onClear();
                 }}
-                className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                className="text-xs font-medium" style={{ color: 'var(--brand-primary)' }}
               >
                 清除
               </button>
             )}
             {isCollapsed ? (
-              <ChevronRight className="w-4 h-4 text-gray-400" />
+              <ChevronRight className="w-4 h-4" style={{ color: 'var(--app-text-subtle)' }} />
             ) : (
-              <ChevronDown className="w-4 h-4 text-gray-400" />
+              <ChevronDown className="w-4 h-4" style={{ color: 'var(--app-text-subtle)' }} />
             )}
           </div>
         </button>
@@ -2007,23 +1999,23 @@ const LogsExplorer: React.FC = () => {
 
     return (
       <div 
-        className="bg-white border-l border-gray-200 flex flex-col shrink-0"
-        style={{ width: sidebarWidth }}
+        className="flex flex-col shrink-0"
+        style={{ width: sidebarWidth, background: 'var(--app-surface)', borderLeft: '1px solid var(--app-border)' }}
       >
         {/* 侧边栏头部 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
+        <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--app-border)', background: 'var(--app-surface-muted)' }}>
           <div className="flex items-center gap-3">
             <span
               className="w-2 h-2 rounded-full"
               style={{ backgroundColor: (sidebarTab === 'context' ? contextLevelColors : levelColors).solid }}
             />
-            <h3 className="text-sm font-semibold text-gray-900">日志详情</h3>
+            <h3 className="text-sm font-semibold" style={{ color: 'var(--app-text)' }}>日志详情</h3>
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setSidebarTab('context')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                sidebarTab === 'context' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+                sidebarTab === 'context' ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
               }`}
             >
               上下文
@@ -2031,7 +2023,7 @@ const LogsExplorer: React.FC = () => {
             <button
               onClick={() => setSidebarTab('detail')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                sidebarTab === 'detail' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+                sidebarTab === 'detail' ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
               }`}
             >
               详情
@@ -2039,7 +2031,7 @@ const LogsExplorer: React.FC = () => {
             <button
               onClick={() => setSidebarTab('json')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                sidebarTab === 'json' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+                sidebarTab === 'json' ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
               }`}
             >
               JSON
@@ -2047,7 +2039,7 @@ const LogsExplorer: React.FC = () => {
             <button
               onClick={() => setSidebarTab('ai')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                sidebarTab === 'ai' ? 'bg-purple-100 text-purple-700' : 'text-gray-600 hover:bg-gray-100'
+                sidebarTab === 'ai' ? 'bg-purple-100 text-purple-700' : 'btn-ghost'
               }`}
             >
               <Sparkles className="w-3.5 h-3.5 inline mr-1" />
@@ -2055,7 +2047,7 @@ const LogsExplorer: React.FC = () => {
             </button>
             <button
               onClick={closeSidebar}
-              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded ml-2"
+              className="btn btn-ghost btn-icon p-1.5 rounded ml-2"
             >
               <X className="w-4 h-4" />
             </button>
@@ -2067,13 +2059,13 @@ const LogsExplorer: React.FC = () => {
           {sidebarTab === 'context' && (
             <div className="p-4 space-y-4">
               {/* 上下文条数选择 */}
-              <div className="flex items-center gap-4 pb-4 border-b border-gray-100">
+              <div className="flex items-center gap-4 pb-4" style={{ borderBottom: '1px solid var(--app-border)' }}>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">前文</span>
+                  <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>前文</span>
                   <select
                     value={contextBeforeCount}
                     onChange={(e) => setContextBeforeCount(Number(e.target.value))}
-                    className="text-xs border border-gray-300 rounded px-2 py-1"
+                    className="input input-sm w-auto"
                   >
                     <option value={3}>3</option>
                     <option value={5}>5</option>
@@ -2081,14 +2073,14 @@ const LogsExplorer: React.FC = () => {
                     <option value={20}>20</option>
                     <option value={50}>50</option>
                   </select>
-                  <span className="text-xs text-gray-500">条</span>
+                  <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>条</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">后文</span>
+                  <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>后文</span>
                   <select
                     value={contextAfterCount}
                     onChange={(e) => setContextAfterCount(Number(e.target.value))}
-                    className="text-xs border border-gray-300 rounded px-2 py-1"
+                    className="input input-sm w-auto"
                   >
                     <option value={3}>3</option>
                     <option value={5}>5</option>
@@ -2096,7 +2088,7 @@ const LogsExplorer: React.FC = () => {
                     <option value={20}>20</option>
                     <option value={50}>50</option>
                   </select>
-                  <span className="text-xs text-gray-500">条</span>
+                  <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>条</span>
                 </div>
                 {logContextLoading && (
                   <span className="text-xs text-blue-600">加载中...</span>
@@ -2107,34 +2099,37 @@ const LogsExplorer: React.FC = () => {
               <div className="space-y-1">
                 {/* 前文日志 */}
                 {logContextData?.before?.map((ctxLog, idx: number) => (
-                  <div 
-                    key={`before-${idx}`} 
-                    className="p-3 rounded-lg bg-gray-50 border border-gray-100 hover:bg-gray-100 transition-colors"
+                  <div
+                    key={`before-${idx}`}
+                    className="p-3 rounded-xl transition-colors"
+                    style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--app-border)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'var(--app-surface-muted)')}
                   >
                     {(() => {
                       const level = normalizeDisplayLevel(ctxLog.level);
                       const colors = LEVEL_COLORS[level] || LEVEL_COLORS.INFO;
                       return (
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs text-gray-400 font-mono">{formatTime(String(ctxLog.timestamp || ''))}</span>
+                          <span className="text-xs font-mono" style={{ color: 'var(--app-text-subtle)' }}>{formatTime(String(ctxLog.timestamp || ''))}</span>
                           <span 
                             className="w-2 h-2 rounded-full" 
                             style={{ backgroundColor: colors.solid }}
                           />
-                          <span className="text-xs font-medium text-gray-600">{level}</span>
+                          <span className="text-xs font-medium" style={{ color: 'var(--app-text-muted)' }}>{level}</span>
                         </div>
                       );
                     })()}
-                    <div className="text-sm text-gray-700 font-mono whitespace-pre-wrap break-words leading-5">
+                    <div className="text-sm font-mono whitespace-pre-wrap break-words leading-5" style={{ color: 'var(--app-text-muted)' }}>
                       {ctxLog.message}
                     </div>
                   </div>
                 ))}
-                
+
                 {/* 当前日志 */}
-                <div 
-                  className="p-3 rounded-lg border-l-4 bg-blue-50/50"
-                  style={{ borderLeftColor: contextLevelColors.solid }}
+                <div
+                  className="p-3 rounded-xl border-l-4"
+                  style={{ background: 'var(--brand-primary-soft)', borderLeftColor: contextLevelColors.solid }}
                 >
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-xs font-semibold font-mono" style={{ color: contextLevelColors.solid }}>
@@ -2145,14 +2140,14 @@ const LogsExplorer: React.FC = () => {
                       style={{ backgroundColor: contextLevelColors.solid }}
                     />
                     <span className="text-xs font-bold" style={{ color: contextLevelColors.solid }}>{contextLevel}</span>
-                    <span className="text-xs text-gray-500">当前</span>
+                    <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>当前</span>
                     {contextLogMeta.stream && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono" style={{ background: 'var(--app-surface-muted)', color: 'var(--app-text-muted)' }}>
                         {String(contextLogMeta.stream).toUpperCase()}
                       </span>
                     )}
                     {typeof contextLogMeta.line_count === 'number' && contextLogMeta.line_count > 1 && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--brand-primary-soft)', color: 'var(--brand-primary)' }}>
                         {contextLogMeta.line_count} lines
                       </span>
                     )}
@@ -2162,7 +2157,7 @@ const LogsExplorer: React.FC = () => {
                       </span>
                     )}
                   </div>
-                  <div className="text-sm text-gray-900 font-mono whitespace-pre-wrap break-words leading-5">
+                  <div className="text-sm font-mono whitespace-pre-wrap break-words leading-5" style={{ color: 'var(--app-text)' }}>
                     {contextLog.message}
                   </div>
                 </div>
@@ -2190,33 +2185,36 @@ const LogsExplorer: React.FC = () => {
                 
                 {/* 后文日志 */}
                 {logContextData?.after?.map((ctxLog, idx: number) => (
-                  <div 
-                    key={`after-${idx}`} 
-                    className="p-3 rounded-lg bg-gray-50 border border-gray-100 hover:bg-gray-100 transition-colors"
+                  <div
+                    key={`after-${idx}`}
+                    className="p-3 rounded-xl transition-colors"
+                    style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--app-border)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'var(--app-surface-muted)')}
                   >
                     {(() => {
                       const level = normalizeDisplayLevel(ctxLog.level);
                       const colors = LEVEL_COLORS[level] || LEVEL_COLORS.INFO;
                       return (
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs text-gray-400 font-mono">{formatTime(String(ctxLog.timestamp || ''))}</span>
+                          <span className="text-xs font-mono" style={{ color: 'var(--app-text-subtle)' }}>{formatTime(String(ctxLog.timestamp || ''))}</span>
                           <span 
                             className="w-2 h-2 rounded-full" 
                             style={{ backgroundColor: colors.solid }}
                           />
-                          <span className="text-xs font-medium text-gray-600">{level}</span>
+                          <span className="text-xs font-medium" style={{ color: 'var(--app-text-muted)' }}>{level}</span>
                         </div>
                       );
                     })()}
-                    <div className="text-sm text-gray-700 font-mono whitespace-pre-wrap break-words leading-5">
+                    <div className="text-sm font-mono whitespace-pre-wrap break-words leading-5" style={{ color: 'var(--app-text-muted)' }}>
                       {ctxLog.message}
                     </div>
                   </div>
                 ))}
-                
+
                 {/* 空状态显示 */}
                 {!logContextLoading && !logContextData?.before?.length && !logContextData?.after?.length && !contextCurrentMatches.slice(1).length && (
-                  <div className="text-center text-sm text-gray-400 py-8">
+                  <div className="text-center text-sm py-8" style={{ color: 'var(--app-text-subtle)' }}>
                     暂无上下文日志
                   </div>
                 )}
@@ -2228,12 +2226,12 @@ const LogsExplorer: React.FC = () => {
             <div className="p-4 space-y-4">
               {/* 基本信息 */}
               <div className="grid grid-cols-2 gap-3">
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                  <div className="text-[11px] text-gray-400 uppercase mb-1">时间戳</div>
-                  <div className="text-xs font-mono text-gray-800 break-all">{log.timestamp}</div>
+                <div className="rounded-xl p-3" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-[11px] uppercase mb-1" style={{ color: 'var(--app-text-subtle)' }}>时间戳</div>
+                  <div className="text-xs font-mono break-all" style={{ color: 'var(--app-text)' }}>{log.timestamp}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                  <div className="text-[11px] text-gray-400 uppercase mb-1">级别</div>
+                <div className="rounded-xl p-3" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-[11px] uppercase mb-1" style={{ color: 'var(--app-text-subtle)' }}>级别</div>
                   <span 
                     className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold rounded text-white"
                     style={{ backgroundColor: levelColors.solid }}
@@ -2241,13 +2239,13 @@ const LogsExplorer: React.FC = () => {
                     {log.level}
                   </span>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                  <div className="text-[11px] text-gray-400 uppercase mb-1">服务</div>
-                  <div className="text-sm text-blue-600 font-semibold">{resolvedServiceName}</div>
+                <div className="rounded-xl p-3" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-[11px] uppercase mb-1" style={{ color: 'var(--app-text-subtle)' }}>服务</div>
+                  <div className="text-sm font-semibold" style={{ color: 'var(--brand-primary)' }}>{resolvedServiceName}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                  <div className="text-[11px] text-gray-400 uppercase mb-1">Pod</div>
-                  <div className="text-xs font-mono text-gray-700">{log.pod_name}</div>
+                <div className="rounded-xl p-3" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-[11px] uppercase mb-1" style={{ color: 'var(--app-text-subtle)' }}>Pod</div>
+                  <div className="text-xs font-mono" style={{ color: 'var(--app-text-muted)' }}>{log.pod_name}</div>
                 </div>
               </div>
 
@@ -2288,17 +2286,17 @@ const LogsExplorer: React.FC = () => {
               )}
 
               {/* 日志消息 */}
-              <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
+              <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--app-border)' }}>
+                <div className="flex items-center justify-between px-3 py-2" style={{ background: 'var(--app-surface-muted)', borderBottom: '1px solid var(--app-border)' }}>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-gray-600 uppercase">日志消息</span>
+                    <span className="text-xs font-semibold uppercase" style={{ color: 'var(--app-text-muted)' }}>日志消息</span>
                     {logMeta.stream && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono" style={{ background: 'var(--app-surface)', color: 'var(--app-text-muted)' }}>
                         {String(logMeta.stream).toUpperCase()}
                       </span>
                     )}
                     {typeof logMeta.line_count === 'number' && logMeta.line_count > 1 && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--brand-primary-soft)', color: 'var(--brand-primary)' }}>
                         {logMeta.line_count} lines
                       </span>
                     )}
@@ -2309,14 +2307,14 @@ const LogsExplorer: React.FC = () => {
                       className={`text-xs px-2 py-1 rounded ${
                         highlightMode === 'enhanced'
                           ? 'bg-violet-100 text-violet-700'
-                          : 'text-gray-500 hover:bg-gray-100'
+                          : 'btn-ghost'
                       }`}
                     >
                       高亮: {highlightMode === 'enhanced' ? '增强' : '普通'}
                     </button>
                     <button
                       onClick={() => setWordWrap(!wordWrap)}
-                      className={`text-xs px-2 py-1 rounded ${wordWrap ? 'bg-blue-100 text-blue-600' : 'text-gray-500 hover:bg-gray-100'}`}
+                      className={`text-xs px-2 py-1 rounded ${wordWrap ? 'bg-blue-100 text-blue-600' : 'btn-ghost'}`}
                     >
                       换行
                     </button>
@@ -2324,7 +2322,7 @@ const LogsExplorer: React.FC = () => {
                       onClick={() => {
                         void copyToClipboard(log.message, '日志内容已复制');
                       }}
-                      className="text-xs text-gray-500 hover:text-blue-600"
+                      className="btn btn-ghost btn-icon text-xs"
                     >
                       <Copy className="w-3.5 h-3.5" />
                     </button>
@@ -2341,8 +2339,9 @@ const LogsExplorer: React.FC = () => {
                   </div>
                 )}
                 <div className="p-3">
-                  <pre 
-                    className={`text-sm text-gray-800 font-mono bg-slate-50 p-3 rounded border border-slate-200 ${
+                  <pre
+                    className={`text-sm font-mono p-3 rounded-xl ${
+                      true ? '' : ''} ${
                       wordWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-auto'
                     }`}
                   >
@@ -2355,24 +2354,22 @@ const LogsExplorer: React.FC = () => {
               </div>
 
               {/* Kubernetes 信息 */}
-              <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
-                  <span className="text-xs font-semibold text-gray-600 uppercase">Kubernetes 信息</span>
-                  <span className="text-[11px] text-gray-400">点击可添加筛选</span>
+              <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--app-border)' }}>
+                <div className="px-3 py-2 flex items-center justify-between" style={{ background: 'var(--app-surface-muted)', borderBottom: '1px solid var(--app-border)' }}>
+                  <span className="text-xs font-semibold uppercase" style={{ color: 'var(--app-text-muted)' }}>Kubernetes 信息</span>
+                  <span className="text-[11px]" style={{ color: 'var(--app-text-subtle)' }}>点击可添加筛选</span>
                 </div>
                 <div className="p-3 grid grid-cols-2 gap-3">
                   <div>
-                    <span className="text-[11px] text-gray-400 uppercase">节点</span>
+                    <span className="text-[11px] uppercase" style={{ color: 'var(--app-text-subtle)' }}>节点</span>
                     <div className="mt-1 flex items-center gap-2">
-                      <div className="text-xs font-mono text-gray-700 break-all">{host}</div>
+                      <div className="text-xs font-mono break-all" style={{ color: 'var(--app-text-muted)' }}>{host}</div>
                       <button
                         type="button"
                         disabled={!normalizedHost}
                         onClick={() => applyKubernetesQuickFilter('host', host)}
                         className={`inline-flex items-center rounded px-2 py-0.5 text-[11px] transition-colors ${
-                          hostSelected
-                            ? 'bg-blue-100 text-blue-700'
-                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          hostSelected ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
                         } disabled:cursor-not-allowed disabled:opacity-40`}
                       >
                         {hostSelected ? '取消筛选' : '添加筛选'}
@@ -2380,17 +2377,15 @@ const LogsExplorer: React.FC = () => {
                     </div>
                   </div>
                   <div>
-                    <span className="text-[11px] text-gray-400 uppercase">容器</span>
+                    <span className="text-[11px] uppercase" style={{ color: 'var(--app-text-subtle)' }}>容器</span>
                     <div className="mt-1 flex items-center gap-2">
-                      <div className="text-xs font-mono text-gray-700 break-all">{container}</div>
+                      <div className="text-xs font-mono break-all" style={{ color: 'var(--app-text-muted)' }}>{container}</div>
                       <button
                         type="button"
                         disabled={!normalizedContainer}
                         onClick={() => applyKubernetesQuickFilter('container', container)}
                         className={`inline-flex items-center rounded px-2 py-0.5 text-[11px] transition-colors ${
-                          containerSelected
-                            ? 'bg-blue-100 text-blue-700'
-                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          containerSelected ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
                         } disabled:cursor-not-allowed disabled:opacity-40`}
                       >
                         {containerSelected ? '取消筛选' : '添加筛选'}
@@ -2398,17 +2393,15 @@ const LogsExplorer: React.FC = () => {
                     </div>
                   </div>
                   <div>
-                    <span className="text-[11px] text-gray-400 uppercase">命名空间</span>
+                    <span className="text-[11px] uppercase" style={{ color: 'var(--app-text-subtle)' }}>命名空间</span>
                     <div className="mt-1 flex items-center gap-2">
-                      <div className="text-xs font-mono text-gray-700 break-all">{namespace}</div>
+                      <div className="text-xs font-mono break-all" style={{ color: 'var(--app-text-muted)' }}>{namespace}</div>
                       <button
                         type="button"
                         disabled={!normalizedNamespace}
                         onClick={() => applyKubernetesQuickFilter('namespace', namespace)}
                         className={`inline-flex items-center rounded px-2 py-0.5 text-[11px] transition-colors ${
-                          namespaceSelected
-                            ? 'bg-blue-100 text-blue-700'
-                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          namespaceSelected ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
                         } disabled:cursor-not-allowed disabled:opacity-40`}
                       >
                         {namespaceSelected ? '取消筛选' : '添加筛选'}
@@ -2420,10 +2413,10 @@ const LogsExplorer: React.FC = () => {
 
               {/* Pod 标签 */}
               {Object.keys(labels).length > 0 && (
-                <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                  <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
-                    <span className="text-xs font-semibold text-gray-600 uppercase">Pod 标签</span>
-                    <span className="text-xs text-gray-400">点击筛选</span>
+                <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--app-border)' }}>
+                  <div className="px-3 py-2 flex items-center justify-between" style={{ background: 'var(--app-surface-muted)', borderBottom: '1px solid var(--app-border)' }}>
+                    <span className="text-xs font-semibold uppercase" style={{ color: 'var(--app-text-muted)' }}>Pod 标签</span>
+                    <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>点击筛选</span>
                   </div>
                   <div className="p-3">
                     <div className="flex flex-wrap gap-2">
@@ -2435,14 +2428,13 @@ const LogsExplorer: React.FC = () => {
                           <button
                             key={key}
                             onClick={() => toggleLabel(key, value as string)}
-                            className={`inline-flex items-center px-2 py-1 text-xs rounded-md border transition-all ${
-                              isSelected 
-                                ? 'bg-blue-100 border-blue-300 text-blue-700 ring-1 ring-blue-300' 
-                                : `${colors.bg} ${colors.border} ${colors.text} hover:shadow-sm`
-                            }`}
+                            className="inline-flex items-center px-2 py-1 text-xs rounded-md border transition-all hover:shadow-sm"
+                            style={isSelected
+                              ? { background: 'var(--color-info-soft)', borderColor: 'var(--color-info-border)', color: 'var(--color-info-dark)', outline: '1px solid var(--color-info-border)' }
+                              : { ...colors.containerStyle, ...colors.textStyle }}
                           >
-                            <span className={`${colors.keyColor} font-medium`}>{key}</span>
-                            <span className="mx-1 text-gray-300">|</span>
+                            <span className="font-medium" style={isSelected ? { color: 'var(--color-info-dark)' } : colors.keyStyle}>{key}</span>
+                            <span className="mx-1" style={{ color: 'var(--app-text-subtle)' }}>|</span>
                             <span className="font-semibold">{String(value)}</span>
                             {isSelected && <Check className="w-3 h-3 ml-1" />}
                           </button>
@@ -2478,13 +2470,13 @@ const LogsExplorer: React.FC = () => {
 
           {sidebarTab === 'ai' && (
             <div className="h-full flex flex-col">
-              <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 space-y-3">
+              <div className="px-4 py-3 space-y-3" style={{ borderBottom: '1px solid var(--app-border)', background: 'var(--app-surface-muted)' }}>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setAiMode('log')}
                     className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                      aiMode === 'log' ? 'bg-purple-100 text-purple-700' : 'bg-white text-gray-600 hover:bg-gray-100'
+                      aiMode === 'log' ? 'bg-purple-100 text-purple-700' : 'btn-ghost'
                     }`}
                   >
                     日志分析
@@ -2496,7 +2488,7 @@ const LogsExplorer: React.FC = () => {
                     className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
                       aiMode === 'trace'
                         ? 'bg-emerald-100 text-emerald-700'
-                        : 'bg-white text-gray-600 hover:bg-gray-100'
+                        : 'btn-ghost'
                     } disabled:opacity-50 disabled:cursor-not-allowed`}
                     title={selectedTraceId ? '使用 trace_id 执行追踪分析' : '当前日志无 trace_id'}
                   >
@@ -2506,13 +2498,12 @@ const LogsExplorer: React.FC = () => {
 
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">LLM 大模型</span>
+                    <span className="text-xs" style={{ color: 'var(--app-text-muted)' }}>LLM 大模型</span>
                     <button
                       type="button"
                       onClick={() => setAiUseLLM((prev) => !prev)}
-                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                        aiUseLLM ? 'bg-purple-600' : 'bg-gray-300'
-                      }`}
+                      className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+                      style={{ background: aiUseLLM ? 'rgba(139,92,246,0.8)' : 'var(--app-border)' }}
                     >
                       <span
                         className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
@@ -2534,7 +2525,8 @@ const LogsExplorer: React.FC = () => {
                       }
                       navigation.goToAIAnalysis({ logData: log, autoAnalyze: false });
                     }}
-                    className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                    className="btn btn-ghost text-xs font-medium"
+                    style={{ color: 'var(--brand-primary)' }}
                   >
                     打开完整分析页
                   </button>
@@ -2570,7 +2562,7 @@ const LogsExplorer: React.FC = () => {
                     type="button"
                     onClick={() => saveCurrentAICase(log)}
                     disabled={!aiAnalysis.data || savingAiCase}
-                    className="w-full px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="btn btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {savingAiCase ? '保存中...' : '一键保存当前分析到知识库'}
                   </button>
@@ -2598,57 +2590,51 @@ const LogsExplorer: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#f8fafc] overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden" style={{ background: 'var(--app-bg)' }}>
       {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-4 py-3 shrink-0">
+      <div className="shrink-0 px-4 py-3" style={{ background: 'var(--app-surface)', borderBottom: '1px solid var(--app-border)' }}>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-3 shrink-0">
-            <h1 className="text-base font-semibold text-gray-900">日志浏览器</h1>
-            <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
+            <h1 className="text-sm font-bold" style={{ color: 'var(--app-text)' }}>日志浏览器</h1>
+            <span className="badge badge-neutral">
               {isPatternMode ? (
-                `Pattern ${aggregatedPatterns.length.toLocaleString()} / 原始日志 ${(aggregatedData?.total_logs || 0).toLocaleString()}`
+                `Pattern ${aggregatedPatterns.length.toLocaleString()} / 原始 ${(aggregatedData?.total_logs || 0).toLocaleString()}`
               ) : realtimeMode ? (
-                <>
-                  <span className="inline-flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span>
-                    实时 {filteredEvents.length.toLocaleString()} 条
-                  </span>
-                </>
+                <span className="inline-flex items-center gap-1">
+                  <span className="live-dot"></span>
+                  实时 {filteredEvents.length.toLocaleString()} 条
+                </span>
               ) : (
                 `筛选后 ${filteredEvents.length.toLocaleString()} / 已加载 ${allEvents.length.toLocaleString()}${hasMorePages ? '+' : ''}`
               )}
             </span>
             {isStreamMode && !realtimeMode && selectedSingleLevel && selectedSingleLevelServerCount > 0 && (
-              <span className={`text-[11px] px-2 py-1 rounded-full ${
-                shouldBackfillSelectedLevel ? 'text-amber-700 bg-amber-50' : 'text-gray-600 bg-gray-100'
-              }`}>
-                {selectedSingleLevel} 已加载 {selectedSingleLevelLoadedCount.toLocaleString()} / 统计 {selectedSingleLevelServerCount.toLocaleString()}
+              <span className={`badge ${shouldBackfillSelectedLevel ? 'badge-medium' : 'badge-neutral'}`}>
+                {selectedSingleLevel} {selectedSingleLevelLoadedCount.toLocaleString()} / {selectedSingleLevelServerCount.toLocaleString()}
               </span>
             )}
             {(isStreamMode ? loading : aggregatedLoading) && (
-              <span className="text-[11px] text-blue-600">刷新中...</span>
+              <span className="text-[11px]" style={{ color: 'var(--brand-primary)' }}>刷新中...</span>
             )}
             {!hasExplicitServerFilters && autoExpandedWindow && (
-              <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-1 rounded-full">
-                近 1 小时无数据，已自动扩展到近 6 小时
-              </span>
+              <span className="badge badge-medium">近 1h 无数据，已自动扩展到 6h</span>
             )}
           </div>
 
           <div className="flex-1 max-w-xl">
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: 'var(--app-text-subtle)' }} />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索日志内容、服务名、Pod名..."
-                className="w-full pl-9 pr-9 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="搜索日志内容、服务名、Pod名…"
+                className="input pl-9 pr-9 text-sm"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 btn btn-ghost btn-icon p-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2666,9 +2652,8 @@ const LogsExplorer: React.FC = () => {
                   clearRealtimeLogs();
                 }
               }}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
-                isPatternMode ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-gray-100 text-gray-600'
-              }`}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors btn btn-ghost text-sm"
+              style={isPatternMode ? { background: 'rgba(99,102,241,0.12)', color: '#4f46e5' } : {}}
               title={isPatternMode ? '切换到事件流视图' : '切换到 Pattern 聚合视图'}
             >
               <LayoutGrid className="w-4 h-4" />
@@ -2684,11 +2669,8 @@ const LogsExplorer: React.FC = () => {
                 }
               }}
               disabled={isPatternMode}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
-                realtimeMode 
-                  ? 'bg-green-100 text-green-700 ring-2 ring-green-300' 
-                  : 'hover:bg-gray-100 text-gray-600'
-              } ${isPatternMode ? 'opacity-50 cursor-not-allowed' : ''}`}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors btn btn-ghost text-sm${isPatternMode ? ' opacity-50 cursor-not-allowed' : ''}`}
+              style={realtimeMode ? { background: 'var(--color-success-soft)', color: 'var(--color-success-dark)', outline: '2px solid var(--color-success-border)', outlineOffset: '1px' } : {}}
               title={realtimeMode ? '暂停实时日志' : '开启实时日志'}
             >
               {realtimeMode ? (
@@ -2711,29 +2693,28 @@ const LogsExplorer: React.FC = () => {
             <div className="relative" ref={timeFilterRef}>
               <button
                 onClick={() => setShowTimeFilter(!showTimeFilter)}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
-                  showTimeFilter || startTime || endTime ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-100 text-gray-600'
-                }`}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors btn btn-ghost text-sm"
+                style={showTimeFilter || startTime || endTime ? { background: 'var(--color-info-soft)', color: 'var(--color-info-dark)' } : {}}
               >
                 <Clock className="w-4 h-4" />
                 <span className="text-sm">时间</span>
                 {(startTime || endTime) && (
-                  <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                  <span className="w-2 h-2 rounded-full" style={{ background: 'var(--brand-primary)' }}></span>
                 )}
               </button>
 
               {/* 时间筛选下拉面板 */}
               {showTimeFilter && (
-                <div className="absolute top-full right-0 mt-2 w-80 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-4">
+                <div className="absolute top-full right-0 mt-2 w-80 rounded-lg shadow-lg z-50 p-4" style={{ background: 'var(--app-surface)', border: '1px solid var(--app-border)' }}>
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-medium text-gray-900">时间范围</h3>
+                      <h3 className="text-sm font-medium" style={{ color: 'var(--app-text)' }}>时间范围</h3>
                       <button
                         onClick={() => {
                           setStartTime('');
                           setEndTime('');
                         }}
-                        className="text-xs text-blue-600 hover:text-blue-700"
+                        className="text-xs" style={{ color: 'var(--brand-primary)' }}
                       >
                         清除
                       </button>
@@ -2764,17 +2745,17 @@ const LogsExplorer: React.FC = () => {
                             }
                             applyTimeRange(start.toISOString(), end.toISOString());
                           }}
-                          className="px-2 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition-colors"
+                          className="btn btn-ghost text-xs px-2 py-1.5"
                         >
                           {preset.label}
                         </button>
                       ))}
                     </div>
 
-                    <div className="border-t border-gray-200 pt-3">
+                    <div className="pt-3" style={{ borderTop: '1px solid var(--app-border)' }}>
                       <div className="space-y-2">
                         <div>
-                          <label className="block text-xs text-gray-500 mb-1">开始时间</label>
+                          <label className="block text-xs mb-1" style={{ color: 'var(--app-text-subtle)' }}>开始时间</label>
                           <input
                             type="datetime-local"
                             value={toLocalDatetimeInputValue(startTime)}
@@ -2782,11 +2763,11 @@ const LogsExplorer: React.FC = () => {
                               const nextStart = fromLocalDatetimeInputValue(e.target.value);
                               applyTimeRange(nextStart, endTime);
                             }}
-                            className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            className="input input-sm w-full"
                           />
                         </div>
                         <div>
-                          <label className="block text-xs text-gray-500 mb-1">结束时间</label>
+                          <label className="block text-xs mb-1" style={{ color: 'var(--app-text-subtle)' }}>结束时间</label>
                           <input
                             type="datetime-local"
                             value={toLocalDatetimeInputValue(endTime)}
@@ -2794,7 +2775,7 @@ const LogsExplorer: React.FC = () => {
                               const nextEnd = fromLocalDatetimeInputValue(e.target.value);
                               applyTimeRange(startTime, nextEnd);
                             }}
-                            className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            className="input input-sm w-full"
                           />
                         </div>
                       </div>
@@ -2802,7 +2783,7 @@ const LogsExplorer: React.FC = () => {
 
                     <button
                       onClick={() => setShowTimeFilter(false)}
-                      className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors"
+                      className="btn btn-primary w-full py-2 text-sm"
                     >
                       应用
                     </button>
@@ -2814,9 +2795,8 @@ const LogsExplorer: React.FC = () => {
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setExcludeHealthCheck(!excludeHealthCheck)}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-2 transition-colors ${
-                  excludeHealthCheck ? 'bg-green-100 text-green-700' : 'text-gray-600 hover:bg-gray-100'
-                }`}
+                className="flex items-center gap-1.5 rounded-lg px-3 py-2 transition-colors btn btn-ghost text-sm"
+              style={excludeHealthCheck ? { background: 'var(--color-success-soft)', color: 'var(--color-success-dark)' } : {}}
               >
                 <Activity className="w-4 h-4" />
                 <span className="text-sm">健康检查</span>
@@ -2843,9 +2823,8 @@ const LogsExplorer: React.FC = () => {
                   setShowFilterPanel(false);
                 }
               }}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
-                showFilterPanel ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-100 text-gray-600'
-              }`}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors btn btn-ghost text-sm"
+              style={showFilterPanel ? { background: 'var(--color-info-soft)', color: 'var(--color-info-dark)' } : {}}
               title={showFilterPanel ? (filterPanelCollapsed ? '展开筛选面板' : '隐藏筛选面板') : '显示筛选面板'}
             >
               <PanelLeft className="w-4 h-4" />
@@ -2859,7 +2838,7 @@ const LogsExplorer: React.FC = () => {
             
             <button
               onClick={isPatternMode ? refetchAggregated : refetch}
-              className="p-2 hover:bg-gray-100 text-gray-600 rounded-lg transition-colors"
+              className="btn btn-ghost btn-icon"
               title="刷新"
             >
               <RefreshCw className="w-4 h-4" />
@@ -2870,7 +2849,7 @@ const LogsExplorer: React.FC = () => {
               <button
                 onClick={() => setShowExportMenu(!showExportMenu)}
                 disabled={exporting}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg hover:bg-gray-100 text-gray-600 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                className="btn btn-ghost flex items-center gap-1.5 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                 title="按当前筛选导出"
               >
                 <Download className="w-4 h-4" />
@@ -2879,12 +2858,12 @@ const LogsExplorer: React.FC = () => {
               </button>
               
               {showExportMenu && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 z-50 min-w-[140px]">
+                <div className="absolute right-0 top-full mt-1 rounded-lg shadow-lg py-1 z-50 min-w-[140px]" style={{ background: 'var(--app-surface)', border: '1px solid var(--app-border)' }}>
                   <button
                     onClick={() => {
                       void exportLogs('csv');
                     }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                    className="btn btn-ghost w-full flex items-center gap-2 px-3 py-2 text-sm"
                   >
                     <FileSpreadsheet className="w-4 h-4" />
                     导出 CSV（筛选）
@@ -2893,7 +2872,7 @@ const LogsExplorer: React.FC = () => {
                     onClick={() => {
                       void exportLogs('json');
                     }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                    className="btn btn-ghost w-full flex items-center gap-2 px-3 py-2 text-sm"
                   >
                     <FileJson className="w-4 h-4" />
                     导出 JSON（筛选）
@@ -2908,41 +2887,41 @@ const LogsExplorer: React.FC = () => {
         {hasActiveFilters && (
           <div className="flex items-center gap-2 mt-3 flex-wrap">
             {selectedLevels.map(level => (
-              <span key={level} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-blue-100 text-blue-700 rounded-md font-medium">
+              <span key={level} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium" style={{ background: 'var(--color-info-soft)', color: 'var(--color-info-dark)', border: '1px solid var(--color-info-border)' }}>
                 {level}
-                <button onClick={() => toggleLevel(level)} className="hover:text-blue-900">
+                <button onClick={() => toggleLevel(level)} style={{ color: 'inherit' }}>
                   <X className="w-3 h-3" />
                 </button>
               </span>
             ))}
             {selectedServices.map(service => (
-              <span key={service} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-green-100 text-green-700 rounded-md font-medium">
+              <span key={service} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium" style={{ background: 'var(--color-success-soft)', color: 'var(--color-success-dark)', border: '1px solid var(--color-success-border)' }}>
                 {service}
-                <button onClick={() => toggleService(service)} className="hover:text-green-900">
+                <button onClick={() => toggleService(service)} style={{ color: 'inherit' }}>
                   <X className="w-3 h-3" />
                 </button>
               </span>
             ))}
             {selectedNamespaces.map((namespace) => (
-              <span key={namespace} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-cyan-100 text-cyan-700 rounded-md font-medium">
+              <span key={namespace} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium" style={{ background: 'rgba(6,182,212,0.1)', color: '#0e7490', border: '1px solid rgba(6,182,212,0.25)' }}>
                 ns: {namespace}
-                <button onClick={() => toggleNamespace(namespace)} className="hover:text-cyan-900">
+                <button onClick={() => toggleNamespace(namespace)} style={{ color: 'inherit' }}>
                   <X className="w-3 h-3" />
                 </button>
               </span>
             ))}
             {selectedContainers.map((container) => (
-              <span key={container} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-amber-100 text-amber-700 rounded-md font-medium">
+              <span key={container} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium" style={{ background: 'var(--color-warning-soft)', color: 'var(--color-warning-dark)', border: '1px solid var(--color-warning-border)' }}>
                 container: {container}
-                <button onClick={() => toggleContainer(container)} className="hover:text-amber-900">
+                <button onClick={() => toggleContainer(container)} style={{ color: 'inherit' }}>
                   <X className="w-3 h-3" />
                 </button>
               </span>
             ))}
             {selectedHosts.map((host) => (
-              <span key={host} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-sky-100 text-sky-700 rounded-md font-medium">
+              <span key={host} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium" style={{ background: 'rgba(14,165,233,0.1)', color: '#0369a1', border: '1px solid rgba(14,165,233,0.25)' }}>
                 node: {host}
-                <button onClick={() => toggleHost(host)} className="hover:text-sky-900">
+                <button onClick={() => toggleHost(host)} style={{ color: 'inherit' }}>
                   <X className="w-3 h-3" />
                 </button>
               </span>
@@ -2953,15 +2932,16 @@ const LogsExplorer: React.FC = () => {
                 return (
                   <span
                     key={`${key}:${value}`}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium border ${colors.bg} ${colors.border} ${colors.text}`}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium"
+                    style={{ ...colors.containerStyle, ...colors.textStyle }}
                   >
                     <Tag className="w-3 h-3" />
-                    <span className={colors.keyColor}>{key}</span>
-                    <span className="text-gray-400">:</span>
+                    <span style={colors.keyStyle}>{key}</span>
+                    <span style={{ color: 'var(--app-text-subtle)' }}>:</span>
                     {value}
                     <button
                       onClick={() => clearLabelFilter(key, value)}
-                      className="hover:text-gray-900"
+                      style={{ color: 'inherit' }}
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -2970,7 +2950,7 @@ const LogsExplorer: React.FC = () => {
               })
             )}
             {(startTime || endTime) && (
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-purple-100 text-purple-700 rounded-md font-medium">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md font-medium" style={{ background: 'rgba(139,92,246,0.1)', color: '#6d28d9', border: '1px solid rgba(139,92,246,0.2)' }}>
                 <Clock className="w-3 h-3" />
                 {startTime && endTime
                   ? `${formatTime(startTime)} - ${formatTime(endTime)}`
@@ -2990,7 +2970,8 @@ const LogsExplorer: React.FC = () => {
             )}
             <button
               onClick={clearAllFilters}
-              className="text-xs text-red-600 hover:text-red-700 flex items-center gap-1 font-medium"
+              className="text-xs flex items-center gap-1 font-medium"
+              style={{ color: 'var(--color-error-dark)' }}
             >
               <FilterX className="w-3 h-3" />
               清除全部
@@ -2998,9 +2979,9 @@ const LogsExplorer: React.FC = () => {
           </div>
         )}
         {topologyJumpContext && (
-          <div className="mt-3 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2">
+          <div className="mt-3 rounded-lg px-3 py-2" style={{ background: 'rgba(6,182,212,0.08)', border: '1px solid rgba(6,182,212,0.25)' }}>
             <div className="flex items-center justify-between gap-2">
-              <div className="text-xs text-cyan-800">
+              <div className="text-xs" style={{ color: '#0e7490' }}>
                 来自拓扑跳转：
                 {topologyJumpContext.sourceService || topologyJumpContext.targetService ? (
                   <>
@@ -3030,7 +3011,7 @@ const LogsExplorer: React.FC = () => {
                   setCorrelationRequestIds([]);
                   setAnchorTime(null);
                 }}
-                className="text-cyan-700 hover:text-cyan-900"
+                style={{ color: '#0891b2' }}
                 title="隐藏拓扑上下文"
               >
                 <X className="w-3.5 h-3.5" />
@@ -3039,7 +3020,7 @@ const LogsExplorer: React.FC = () => {
           </div>
         )}
         {copyNotice && (
-          <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+          <div className="mt-3 rounded-lg px-3 py-2 text-xs" style={{ background: 'var(--color-success-soft)', border: '1px solid var(--color-success-border)', color: 'var(--color-success-dark)' }}>
             {copyNotice}
           </div>
         )}
@@ -3051,7 +3032,7 @@ const LogsExplorer: React.FC = () => {
         {showFilterPanel && (
           <>
             {filterPanelCollapsed ? (
-              <div className="w-12 bg-white border-r border-gray-200 shrink-0 flex flex-col py-2">
+              <div className="w-12 shrink-0 flex flex-col py-2" style={{ background: 'var(--app-surface)', borderRight: '1px solid var(--app-border)' }}>
                 <div className="flex flex-col items-center gap-3">
                   <button
                     type="button"
@@ -3059,21 +3040,21 @@ const LogsExplorer: React.FC = () => {
                       setFilterPanelCollapsed(false);
                       setShowTimeFilter(true);
                     }}
-                    className="relative p-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                    className="btn btn-ghost btn-icon relative p-1.5"
                     title="快速打开时间筛选"
                   >
                     <Clock className="w-4 h-4" />
-                    {(startTime || endTime) && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-blue-500" />}
+                    {(startTime || endTime) && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full" style={{ background: 'var(--brand-primary)' }} />}
                   </button>
-                  <div className="text-[10px] text-gray-500 [writing-mode:vertical-rl] tracking-wide">
+                  <div className="text-[10px] [writing-mode:vertical-rl] tracking-wide" style={{ color: 'var(--app-text-subtle)' }}>
                     筛选 {activeFilterCount > 0 ? `(${activeFilterCount})` : ''}
                   </div>
                 </div>
-                <div className="mt-auto border-t border-gray-200 pt-2 px-1">
+                <div className="mt-auto pt-2 px-1" style={{ borderTop: '1px solid var(--app-border)' }}>
                   <button
                     type="button"
                     onClick={() => setFilterPanelCollapsed(false)}
-                    className="w-full flex items-center justify-center py-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                    className="btn btn-ghost w-full flex items-center justify-center py-1.5"
                     title="展开筛选面板"
                   >
                     <ChevronRight className="w-4 h-4" />
@@ -3083,11 +3064,11 @@ const LogsExplorer: React.FC = () => {
             ) : (
               <>
                 <div
-                  className="bg-white border-r border-gray-200 overflow-y-auto shrink-0 flex flex-col"
-                  style={{ width: filterPanelWidth }}
+                  className="overflow-y-auto shrink-0 flex flex-col"
+                  style={{ width: filterPanelWidth, background: 'var(--app-surface)', borderRight: '1px solid var(--app-border)' }}
                 >
-                  <div className="flex items-center border-b border-gray-100 px-3 py-2">
-                    <div className="flex items-center gap-2 text-xs font-semibold text-gray-700">
+                  <div className="flex items-center px-3 py-2" style={{ borderBottom: '1px solid var(--app-border)' }}>
+                    <div className="flex items-center gap-2 text-xs font-semibold" style={{ color: 'var(--app-text)' }}>
                       <PanelLeft className="w-3.5 h-3.5" />
                       筛选条件
                     </div>
@@ -3110,11 +3091,8 @@ const LogsExplorer: React.FC = () => {
                             <button
                               key={level}
                               onClick={() => toggleLevel(level)}
-                              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all ${
-                                isSelected
-                                  ? `${colors.bg} ${colors.text} font-medium`
-                                  : 'hover:bg-gray-100 text-gray-600'
-                              }`}
+                              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all btn btn-ghost"
+                              style={isSelected ? { ...colors.bgStyle, ...colors.textStyle, fontWeight: 500 } : {}}
                             >
                               <span
                                 className="w-2 h-2 rounded-full"
@@ -3307,11 +3285,11 @@ const LogsExplorer: React.FC = () => {
                     )}
                   </div>
 
-                  <div className="border-t border-gray-200 p-2">
+                  <div className="p-2" style={{ borderTop: '1px solid var(--app-border)' }}>
                     <button
                       type="button"
                       onClick={() => setFilterPanelCollapsed(true)}
-                      className="w-full flex items-center rounded-lg px-2 py-1.5 text-xs text-gray-600 hover:bg-gray-100 hover:text-gray-800 transition-colors"
+                      className="btn btn-ghost w-full flex items-center rounded-lg px-2 py-1.5 text-xs"
                       title="收起筛选面板"
                     >
                       <ChevronLeft className="w-4 h-4" />
@@ -3321,7 +3299,7 @@ const LogsExplorer: React.FC = () => {
                 </div>
 
                 <div
-                  className="w-1 cursor-col-resize hover:bg-blue-400 transition-colors shrink-0"
+                  className="resize-handle-v shrink-0"
                   onMouseDown={(e) => handleResizeStart(e, false)}
                 />
               </>
@@ -3333,63 +3311,78 @@ const LogsExplorer: React.FC = () => {
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {isStreamMode ? (
             <>
-              <div className="bg-gray-50 border-b border-gray-200 shrink-0 overflow-x-auto">
-                <div className="px-4 py-1.5 text-[11px] text-gray-500 border-b border-gray-200">
+              <div className="shrink-0 overflow-x-auto" style={{ background: 'var(--app-surface-muted)', borderBottom: '1px solid var(--app-border)' }}>
+                <div className="px-4 py-1.5 text-[11px]" style={{ color: 'var(--app-text-subtle)', borderBottom: '1px solid var(--app-border)' }}>
                   提示: 拖拽列标题右侧 <GripVertical className="inline h-3 w-3 -mt-0.5" /> 可手动调整列宽
                 </div>
                 <div className="grid gap-2 px-4 py-2.5 min-w-max" style={{ gridTemplateColumns: columnTemplate }}>
-                  <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <div className="relative pr-2 text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--app-text-subtle)' }}>
                     时间
                     <button
                       type="button"
                       onMouseDown={(e) => handleColumnResizeStart(e, 'time')}
-                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent"
+                      style={{ color: 'transparent' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--brand-primary)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'transparent')}
                       title="拖拽调整时间列宽"
                     >
                       |
                     </button>
                   </div>
-                  <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <div className="relative pr-2 text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--app-text-subtle)' }}>
                     服务
                     <button
                       type="button"
                       onMouseDown={(e) => handleColumnResizeStart(e, 'service')}
-                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+                      style={{ color: 'transparent' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--brand-primary)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'transparent')}
                       title="拖拽调整服务列宽"
                     >
                       |
                     </button>
                   </div>
-                  <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <div className="relative pr-2 text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--app-text-subtle)' }}>
                     Pod
                     <button
                       type="button"
                       onMouseDown={(e) => handleColumnResizeStart(e, 'pod')}
-                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+                      style={{ color: 'transparent' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--brand-primary)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'transparent')}
                       title="拖拽调整 Pod 列宽"
                     >
                       |
                     </button>
                   </div>
-                  <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <div className="relative pr-2 text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--app-text-subtle)' }}>
                     级别
                     <button
                       type="button"
                       onMouseDown={(e) => handleColumnResizeStart(e, 'level')}
-                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+                      style={{ color: 'transparent' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--brand-primary)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'transparent')}
                       title="拖拽调整级别列宽"
                     >
                       |
                     </button>
                   </div>
 
-                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider">消息</div>
-                  <div className="relative pr-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center">
+                  <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--app-text-subtle)' }}>消息</div>
+                  <div className="relative pr-2 text-xs font-semibold uppercase tracking-wider text-center" style={{ color: 'var(--app-text-subtle)' }}>
                     操作
                     <button
                       type="button"
                       onMouseDown={(e) => handleColumnResizeStart(e, 'action')}
-                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize text-transparent hover:text-blue-500"
+                      className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+                      style={{ color: 'transparent' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--brand-primary)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'transparent')}
                       title="拖拽调整操作列宽"
                     >
                       |
@@ -3434,8 +3427,8 @@ const LogsExplorer: React.FC = () => {
               </div>
 
               {!realtimeMode && (
-                <div className="shrink-0 border-t border-gray-200 bg-white px-4 py-2.5 flex items-center justify-between">
-                  <span className="text-xs text-gray-500">
+                <div className="shrink-0 px-4 py-2.5 flex items-center justify-between" style={{ borderTop: '1px solid var(--app-border)', background: 'var(--app-surface)' }}>
+                  <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>
                     已加载 {allEvents.length.toLocaleString()} 条（{loadedPageCount} 页）
                     {hasMorePages ? '，滚动到底会自动加载' : '，已到当前查询末尾'}
                     {anchorTime ? `，锚点 ${formatTime(anchorTime)}` : ''}
@@ -3444,7 +3437,7 @@ const LogsExplorer: React.FC = () => {
                     type="button"
                     onClick={() => void loadMoreLogs()}
                     disabled={!hasMorePages || loadingMore}
-                    className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="btn btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {loadingMore ? '加载中...' : hasMorePages ? '加载更多' : '无更多数据'}
                   </button>
@@ -3453,10 +3446,10 @@ const LogsExplorer: React.FC = () => {
             </>
           ) : (
             <>
-              <div className="bg-gray-50 border-b border-gray-200 shrink-0 px-4 py-2 text-xs text-gray-600">
+              <div className="shrink-0 px-4 py-2 text-xs" style={{ background: 'var(--app-surface-muted)', borderBottom: '1px solid var(--app-border)', color: 'var(--app-text-muted)' }}>
                 Pattern 聚合视图：用于快速定位重复错误、噪声模式与高频异常。
               </div>
-              <div className="flex-1 overflow-y-auto bg-white">
+              <div className="flex-1 overflow-y-auto" style={{ background: 'var(--app-bg)' }}>
                 {aggregatedPatterns.length > 0 ? (
                   <div>
                     {aggregatedPatterns.map((pattern, index: number) => (
@@ -3478,7 +3471,7 @@ const LogsExplorer: React.FC = () => {
                   </div>
                 )}
               </div>
-              <div className="shrink-0 border-t border-gray-200 bg-white px-4 py-2.5 text-xs text-gray-500">
+              <div className="shrink-0 px-4 py-2.5 text-xs" style={{ borderTop: '1px solid var(--app-border)', background: 'var(--app-surface)', color: 'var(--app-text-subtle)' }}>
                 统计：pattern {aggregatedPatterns.length.toLocaleString()}，聚合覆盖 {(Number(aggregatedData?.aggregation_ratio || 0) * 100).toFixed(1)}%
               </div>
             </>
@@ -3489,7 +3482,7 @@ const LogsExplorer: React.FC = () => {
         {showSidebar && (
           <>
             <div
-              className="w-1 cursor-col-resize hover:bg-blue-400 transition-colors shrink-0"
+              className="resize-handle-v shrink-0"
               onMouseDown={(e) => handleResizeStart(e, true)}
             />
             {renderSidebar()}

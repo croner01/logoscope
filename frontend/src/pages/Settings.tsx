@@ -931,161 +931,162 @@ const Settings: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">系统设置</h1>
-          <p className="text-gray-500 mt-1">管理系统配置、缓存、LLM 与远端知识库运行时</p>
+      {/* 页头 */}
+      <div className="flex-shrink-0 px-6 py-4 border-b animate-fade-in" style={{ background: 'var(--app-surface)', borderColor: 'var(--app-border)' }}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'var(--brand-secondary-soft)', color: 'var(--brand-secondary)' }}>
+              <SettingsIcon size={18} />
+            </div>
+            <div>
+              <h1 className="text-base font-bold" style={{ color: 'var(--app-text)' }}>系统设置</h1>
+              <p className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>管理系统配置、缓存、LLM 与远端知识库运行时</p>
+            </div>
+          </div>
+          <button
+            onClick={handleRefreshAll}
+            disabled={refreshing}
+            className="btn btn-secondary"
+          >
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            刷新全部
+          </button>
         </div>
-        <button
-          onClick={handleRefreshAll}
-          disabled={refreshing}
-          className="flex items-center px-3 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-60"
-        >
-          <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
-          刷新全部
-        </button>
       </div>
+
+      <div className="flex-1 overflow-auto p-6">
 
       {banner && (
         <div
-          className={`mb-4 px-4 py-2 rounded-lg text-sm border ${
-            banner.type === 'success'
-              ? 'bg-green-50 text-green-700 border-green-200'
-              : banner.type === 'error'
-                ? 'bg-red-50 text-red-700 border-red-200'
-                : 'bg-blue-50 text-blue-700 border-blue-200'
-          }`}
+          className="mb-5 px-4 py-3 rounded-xl text-sm flex items-center gap-2"
+          style={{
+            background: banner.type === 'success' ? 'var(--color-success-soft)' : banner.type === 'error' ? 'var(--color-error-soft)' : 'var(--color-info-soft)',
+            border: `1px solid ${banner.type === 'success' ? '#a7f3d0' : banner.type === 'error' ? '#fca5a5' : '#bfdbfe'}`,
+            color: banner.type === 'success' ? 'var(--color-success-dark)' : banner.type === 'error' ? 'var(--color-error-dark)' : 'var(--color-info-dark)',
+          }}
         >
+          <CheckCircle2 size={14} />
           {banner.text}
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white rounded-lg shadow-md overflow-hidden">
-          <div className="p-4 border-b border-gray-200 flex items-center">
-            <Database className="w-5 h-5 text-blue-600 mr-2" />
-            <h3 className="font-semibold text-gray-900">缓存管理</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="card overflow-hidden">
+          <div className="card-header">
+            <div className="card-title">
+              <Database size={14} style={{ color: 'var(--color-info)' }} />
+              缓存管理
+            </div>
+            <button
+              onClick={handleClearCache}
+              disabled={clearingCache}
+              className="btn btn-danger"
+            >
+              {clearingCache ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
+              清空缓存
+            </button>
           </div>
-          <div className="p-4">
+          <div className="card-body">
             <div className="space-y-4">
-              <div className="grid grid-cols-3 gap-4">
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-gray-900">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="text-center p-3 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-2xl font-bold" style={{ color: 'var(--app-text)' }}>
                     {cacheStats.total_keys.toLocaleString()}
                   </div>
-                  <div className="text-xs text-gray-500">缓存键数</div>
+                  <div className="text-[11px] mt-1" style={{ color: 'var(--app-text-subtle)' }}>缓存键数</div>
                 </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-gray-900">{cacheStats.memory_usage}</div>
-                  <div className="text-xs text-gray-500">内存使用</div>
+                <div className="text-center p-3 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-2xl font-bold" style={{ color: 'var(--app-text)' }}>{cacheStats.memory_usage}</div>
+                  <div className="text-[11px] mt-1" style={{ color: 'var(--app-text-subtle)' }}>内存使用</div>
                 </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-green-600">{cacheStats.hit_rate}%</div>
-                  <div className="text-xs text-gray-500">活跃率</div>
+                <div className="text-center p-3 rounded-xl" style={{ background: 'var(--color-success-soft)', border: '1px solid #a7f3d0' }}>
+                  <div className="text-2xl font-bold" style={{ color: 'var(--color-success-dark)' }}>{cacheStats.hit_rate}%</div>
+                  <div className="text-[11px] mt-1" style={{ color: 'var(--color-success-dark)', opacity: 0.7 }}>活跃率</div>
                 </div>
               </div>
 
               <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-2">按模式分布</h4>
-                <div className="space-y-2">
+                <div className="section-label mb-2">按模式分布</div>
+                <div className="space-y-1.5">
                   {cacheHasData && Object.entries(cacheStats.keys_by_pattern).length > 0 ? (
                     Object.entries(cacheStats.keys_by_pattern).map(([pattern, count]) => (
-                      <div key={pattern} className="flex items-center justify-between text-sm">
-                        <span className="font-mono text-gray-600">{pattern}</span>
-                        <span className="text-gray-900">{count.toLocaleString()}</span>
+                      <div key={pattern} className="flex items-center justify-between py-1.5 px-2.5 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                        <code className="text-xs" style={{ color: 'var(--app-text-muted)' }}>{pattern}</code>
+                        <span className="text-xs font-semibold" style={{ color: 'var(--app-text)' }}>{count.toLocaleString()}</span>
                       </div>
                     ))
                   ) : (
-                    <div className="text-sm text-gray-500">
-                      {cacheHasData ? '暂无可用分布数据' : '当前缓存暂无数据（通常表示缓存尚未命中或已过期）。'}
+                    <div className="text-xs py-2" style={{ color: 'var(--app-text-subtle)' }}>
+                      {cacheHasData ? '暂无可用分布数据' : '当前缓存暂无数据（缓存尚未命中或已过期）'}
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-gray-200">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-gray-500">
-                    已移除“清除特定模式”操作，仅保留清空全部缓存，避免误导性配置。
-                  </p>
-                  <button
-                    onClick={handleClearCache}
-                    disabled={clearingCache}
-                    className="flex items-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:bg-gray-400"
-                  >
-                    {clearingCache ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Trash2 className="w-4 h-4" />
-                    )}
-                    <span className="ml-2">清空缓存</span>
-                  </button>
-                </div>
-              </div>
+              <p className="text-[11px] pt-2" style={{ color: 'var(--app-text-subtle)', borderTop: '1px solid var(--app-border-subtle)', paddingTop: '10px' }}>
+                仅保留清空全部缓存，避免误导性配置。
+              </p>
             </div>
           </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-md overflow-hidden">
-          <div className="p-4 border-b border-gray-200 flex items-center">
-            <div className="flex items-center flex-1">
-              <Server className="w-5 h-5 text-green-600 mr-2" />
-              <h3 className="font-semibold text-gray-900">去重统计</h3>
+        <div className="card overflow-hidden">
+          <div className="card-header">
+            <div className="card-title">
+              <Server size={14} style={{ color: 'var(--color-success)' }} />
+              去重统计
             </div>
             <button
               onClick={handleClearDedupCache}
               disabled={clearingDedupCache}
-              className="flex items-center px-3 py-1.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors disabled:bg-gray-400 text-sm"
+              className="btn btn-secondary"
             >
-              {clearingDedupCache ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <Trash2 className="w-4 h-4" />
-              )}
-              <span className="ml-2">清除去重缓存</span>
+              {clearingDedupCache ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
+              清除去重缓存
             </button>
           </div>
-          <div className="p-4">
+          <div className="card-body">
             <div className="space-y-4">
-              <div className="grid grid-cols-3 gap-4">
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-gray-900">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="text-center p-3 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="text-2xl font-bold" style={{ color: 'var(--app-text)' }}>
                     {dedupStats.total_events.toLocaleString()}
                   </div>
-                  <div className="text-xs text-gray-500">总事件数</div>
+                  <div className="text-[11px] mt-1" style={{ color: 'var(--app-text-subtle)' }}>总事件数</div>
                 </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-yellow-600">
+                <div className="text-center p-3 rounded-xl" style={{ background: 'var(--color-warning-soft)', border: '1px solid #fde68a' }}>
+                  <div className="text-2xl font-bold" style={{ color: 'var(--color-warning-dark)' }}>
                     {dedupStats.duplicate_count.toLocaleString()}
                   </div>
-                  <div className="text-xs text-gray-500">重复数</div>
+                  <div className="text-[11px] mt-1" style={{ color: 'var(--color-warning-dark)', opacity: 0.7 }}>重复数</div>
                 </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-blue-600">
+                <div className="text-center p-3 rounded-xl" style={{ background: 'var(--color-info-soft)', border: '1px solid #bfdbfe' }}>
+                  <div className="text-2xl font-bold" style={{ color: 'var(--color-info-dark)' }}>
                     {dedupStats.deduplication_rate}%
                   </div>
-                  <div className="text-xs text-gray-500">去重率</div>
+                  <div className="text-[11px] mt-1" style={{ color: 'var(--color-info-dark)', opacity: 0.7 }}>去重率</div>
                 </div>
               </div>
 
               <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-2">常见重复模式</h4>
-                <div className="space-y-2">
+                <div className="section-label mb-2">常见重复模式</div>
+                <div className="space-y-1.5">
                   {dedupStats.top_duplicates.length > 0 ? (
                     dedupStats.top_duplicates.map((item, index) => (
                       <div
                         key={`${item.pattern}-${index}`}
-                        className="flex items-center justify-between p-2 bg-gray-50 rounded"
+                        className="flex items-center justify-between py-1.5 px-2.5 rounded-lg"
+                        style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}
                       >
-                        <span className="text-sm text-gray-700">{item.pattern}</span>
-                        <span className="text-sm font-medium text-gray-900">
+                        <span className="text-xs truncate" style={{ color: 'var(--app-text-muted)' }}>{item.pattern}</span>
+                        <span className="text-xs font-bold ml-3 flex-shrink-0" style={{ color: 'var(--app-text)' }}>
                           {item.count.toLocaleString()} 次
                         </span>
                       </div>
                     ))
                   ) : (
-                    <div className="text-sm text-gray-500">
-                      {dedupHasData ? '暂无重复模式样本' : '去重统计暂无数据（可能尚未写入样本或去重器未启用）。'}
+                    <div className="text-xs py-2" style={{ color: 'var(--app-text-subtle)' }}>
+                      {dedupHasData ? '暂无重复模式样本' : '去重统计暂无数据（尚未写入样本或去重器未启用）'}
                     </div>
                   )}
                 </div>
@@ -1094,84 +1095,69 @@ const Settings: React.FC = () => {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-md overflow-hidden lg:col-span-2">
-          <div className="p-4 border-b border-gray-200 flex items-center justify-between gap-2">
-            <div className="flex items-center">
-              <BookOpen className="w-5 h-5 text-teal-600 mr-2" />
-              <h3 className="font-semibold text-gray-900">远端知识库运行时（默认 RAGFlow）</h3>
+        <div className="card overflow-hidden lg:col-span-2">
+          <div className="card-header">
+            <div className="card-title">
+              <BookOpen size={14} style={{ color: 'var(--brand-primary)' }} />
+              远端知识库运行时
+              <span className="badge badge-neutral ml-1">RAGFlow</span>
             </div>
             <button
               onClick={() => fetchKBRuntimeStatus(true)}
               disabled={refreshingKBRuntime}
-              className="flex items-center px-3 py-1.5 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-60"
+              className="btn btn-secondary"
             >
-              <RefreshCw className={`w-4 h-4 mr-2 ${refreshingKBRuntime ? 'animate-spin' : ''}`} />
+              <RefreshCw size={12} className={refreshingKBRuntime ? 'animate-spin' : ''} />
               刷新状态
             </button>
           </div>
 
-          <div className="p-4 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">Provider</div>
-                <div className="text-sm font-medium text-gray-900 mt-1">{kbRuntime.configured_provider || 'LooseAny'}</div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">远端可用性</div>
-                <div className={`text-sm font-medium mt-1 ${kbRuntime.provider_status.remote_available ? 'text-green-700' : 'text-gray-600'}`}>
-                  {kbRuntime.provider_status.remote_available ? '可用' : '不可用'}
+          <div className="card-body space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              {[
+                { label: 'Provider', value: kbRuntime.configured_provider || 'LooseAny', status: 'neutral' as const },
+                { label: '远端可用性', value: kbRuntime.provider_status.remote_available ? '可用' : '不可用', status: (kbRuntime.provider_status.remote_available ? 'ok' : 'warn') as 'ok'|'warn'|'neutral' },
+                { label: 'API Key', value: kbRuntime.api_key_configured ? '已配置' : '未配置', status: (kbRuntime.api_key_configured ? 'ok' : 'warn') as 'ok'|'warn'|'neutral' },
+                { label: 'Outbox 积压', value: String(asNumber(kbRuntime.provider_status.outbox_queue_total, 0)), status: 'neutral' as const },
+                { label: 'Outbox 失败', value: String(asNumber(kbRuntime.provider_status.outbox_failed, 0)), status: (asNumber(kbRuntime.provider_status.outbox_failed, 0) > 0 ? 'warn' : 'ok') as 'ok'|'warn'|'neutral' },
+              ].map(item => (
+                <div key={item.label} className="p-3 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="section-label mb-1.5">{item.label}</div>
+                  <div className="text-sm font-semibold" style={{ color: item.status === 'ok' ? 'var(--color-success-dark)' : item.status === 'warn' ? 'var(--color-error-dark)' : 'var(--app-text)' }}>{item.value}</div>
                 </div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">API Key 状态</div>
-                <div className={`text-sm font-medium mt-1 ${kbRuntime.api_key_configured ? 'text-green-700' : 'text-gray-600'}`}>
-                  {kbRuntime.api_key_configured ? '已配置' : '未配置'}
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">Outbox 积压</div>
-                <div className="text-sm font-medium text-gray-900 mt-1">
-                  {asNumber(kbRuntime.provider_status.outbox_queue_total, 0)}
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">Outbox 失败</div>
-                <div className={`text-sm font-medium mt-1 ${asNumber(kbRuntime.provider_status.outbox_failed, 0) > 0 ? 'text-red-700' : 'text-gray-700'}`}>
-                  {asNumber(kbRuntime.provider_status.outbox_failed, 0)}
-                </div>
-              </div>
+              ))}
             </div>
 
-            <div className="text-sm text-gray-600 space-y-1">
-              <div>
-                <span className="font-medium text-gray-700">Base URL:</span>{' '}
-                <span className="font-mono">{kbRuntime.configured_base_url || '未配置'}</span>
+            <div className="space-y-2 text-xs">
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>Base URL</span>
+                <code className="flex-1 truncate" style={{ color: 'var(--brand-primary)' }}>{kbRuntime.configured_base_url || '未配置'}</code>
               </div>
-              <div>
-                <span className="font-medium text-gray-700">Provider 状态:</span>{' '}
-                <span>{asString(kbRuntime.provider_status.message, '未知')}</span>
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>Provider 状态</span>
+                <span style={{ color: 'var(--app-text)' }}>{asString(kbRuntime.provider_status.message, '未知')}</span>
               </div>
-              <div>
-                <span className="font-medium text-gray-700">支持 Provider:</span>{' '}
-                {kbRuntime.supported_providers.join(', ') || '-'}
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>支持 Provider</span>
+                <span style={{ color: 'var(--app-text)' }}>{kbRuntime.supported_providers.join(', ') || '-'}</span>
               </div>
-              <div>
-                <span className="font-medium text-gray-700">部署文件:</span>{' '}
-                <span className="font-mono">{kbRuntime.deployment_persistence.deployment_file || '未配置'}</span>
-                <span className="ml-2 text-xs text-gray-500">
-                  {kbRuntime.deployment_persistence.deployment_file_exists
-                    ? (kbRuntime.deployment_persistence.deployment_file_writable ? '可写' : '只读')
-                    : '不存在'}
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>部署文件</span>
+                <code className="flex-1 truncate" style={{ color: 'var(--app-text)' }}>{kbRuntime.deployment_persistence.deployment_file || '未配置'}</code>
+                <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: kbRuntime.deployment_persistence.deployment_file_exists ? (kbRuntime.deployment_persistence.deployment_file_writable ? 'var(--color-success-soft)' : 'var(--color-warning-soft)') : 'var(--app-surface-muted)', color: kbRuntime.deployment_persistence.deployment_file_exists ? (kbRuntime.deployment_persistence.deployment_file_writable ? 'var(--color-success-dark)' : 'var(--color-warning-dark)') : 'var(--app-text-subtle)' }}>
+                  {kbRuntime.deployment_persistence.deployment_file_exists ? (kbRuntime.deployment_persistence.deployment_file_writable ? '可写' : '只读') : '不存在'}
                 </span>
               </div>
-              {kbRuntime.note && <div className="text-xs text-gray-500">{kbRuntime.note}</div>}
+              {kbRuntime.note && (
+                <div className="py-2 px-3 rounded-lg text-xs" style={{ background: 'var(--color-warning-soft)', color: 'var(--color-warning-dark)', border: '1px solid #fde68a' }}>{kbRuntime.note}</div>
+              )}
             </div>
 
-            <div className="pt-4 border-t border-gray-200">
-              <h4 className="text-sm font-semibold text-gray-800 mb-3">远端知识库参数校验</h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="pt-4" style={{ borderTop: '1px solid var(--app-border)' }}>
+              <div className="section-label mb-3">配置参数</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Provider</label>
                   <select
                     value={kbForm.provider}
                     onChange={(e) => {
@@ -1185,153 +1171,134 @@ const Settings: React.FC = () => {
                         upsert_path: preset.upsert_path,
                       }));
                     }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   >
                     {(kbRuntime.supported_providers.length > 0
                       ? kbRuntime.supported_providers
                       : DEFAULT_KB_RUNTIME.supported_providers).map((provider) => (
-                      <option key={provider} value={provider}>
-                        {provider}
-                      </option>
+                      <option key={provider} value={provider}>{provider}</option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Base URL</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Base URL</label>
                   <input
                     type="text"
                     value={kbForm.base_url}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, base_url: e.target.value }))}
                     placeholder="例如: http://ragflow:9380"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                     disabled={kbForm.provider === 'disabled'}
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">API Key（支持更新）</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>API Key（留空不更新）</label>
                   <input
                     type="password"
                     value={kbForm.api_key}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, api_key: e.target.value }))}
-                    placeholder="输入新的 API Key（留空不更新）"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    placeholder="输入新的 API Key"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">超时秒数</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>超时秒数</label>
                   <input
                     type="number"
                     min={1}
                     value={kbForm.timeout_seconds}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, timeout_seconds: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Health Path</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Health Path</label>
                   <input
                     type="text"
                     value={kbForm.health_path}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, health_path: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Search Path</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Search Path</label>
                   <input
                     type="text"
                     value={kbForm.search_path}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, search_path: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Upsert Path</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Upsert Path</label>
                   <input
                     type="text"
                     value={kbForm.upsert_path}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, upsert_path: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Outbox 轮询秒数</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Outbox 轮询秒数</label>
                   <input
                     type="number"
                     min={1}
                     value={kbForm.outbox_poll_seconds}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, outbox_poll_seconds: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Outbox 最大重试</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Outbox 最大重试</label>
                   <input
                     type="number"
                     min={1}
                     value={kbForm.outbox_max_attempts}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, outbox_max_attempts: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input"
                   />
                 </div>
 
-                <div className="md:col-span-2 flex items-center">
-                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      checked={kbForm.outbox_enabled}
-                      onChange={(e) => setKbForm((prev) => ({ ...prev, outbox_enabled: e.target.checked }))}
-                      className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
-                    />
-                    启用 Outbox 异步重试同步
-                  </label>
-                </div>
-
-                <div className="md:col-span-2 flex items-center">
-                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      checked={kbForm.clear_api_key}
-                      onChange={(e) => setKbForm((prev) => ({ ...prev, clear_api_key: e.target.checked }))}
-                      className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
-                    />
-                    清空现有 KB API Key（与上方输入二选一）
-                  </label>
-                </div>
-
-                <div className="md:col-span-2 flex items-center">
-                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      checked={kbForm.persist_to_deployment}
-                      onChange={(e) => setKbForm((prev) => ({ ...prev, persist_to_deployment: e.target.checked }))}
-                      className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
-                    />
-                    同步写入部署文件（`deploy/ai-service.yaml`）
-                  </label>
+                <div className="md:col-span-2 flex flex-wrap gap-4">
+                  {[
+                    { key: 'outbox_enabled' as const, label: '启用 Outbox 异步重试同步', checked: kbForm.outbox_enabled, onChange: (v: boolean) => setKbForm((p) => ({ ...p, outbox_enabled: v })) },
+                    { key: 'clear_api_key' as const, label: '清空现有 KB API Key（与上方输入二选一）', checked: kbForm.clear_api_key, onChange: (v: boolean) => setKbForm((p) => ({ ...p, clear_api_key: v })) },
+                    { key: 'persist_to_deployment' as const, label: '同步写入部署文件 (deploy/ai-service.yaml)', checked: kbForm.persist_to_deployment, onChange: (v: boolean) => setKbForm((p) => ({ ...p, persist_to_deployment: v })) },
+                  ].map(item => (
+                    <label key={item.key} className="inline-flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--app-text-muted)' }}>
+                      <input
+                        type="checkbox"
+                        checked={item.checked}
+                        onChange={(e) => item.onChange(e.target.checked)}
+                        className="rounded"
+                        style={{ accentColor: 'var(--brand-primary)' }}
+                      />
+                      {item.label}
+                    </label>
+                  ))}
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Extra (JSON object)</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Extra (JSON object)</label>
                   <textarea
                     value={kbForm.extra}
                     onChange={(e) => setKbForm((prev) => ({ ...prev, extra: e.target.value }))}
                     rows={4}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    className="input font-mono text-xs"
                   />
                 </div>
               </div>
 
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <div className="text-xs text-gray-500">
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <div className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>
                   契约: provider({kbRuntime.runtime_config_contract.provider}),
                   base_url({kbRuntime.runtime_config_contract.base_url}),
                   api_key({kbRuntime.runtime_config_contract.api_key || 'string(optional)'})
@@ -1340,40 +1307,34 @@ const Settings: React.FC = () => {
                   <button
                     onClick={handleValidateKBRuntime}
                     disabled={validatingKBRuntime || updatingKBRuntime}
-                    className="flex items-center px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors disabled:bg-gray-400"
+                    className="btn btn-secondary"
                   >
-                    {validatingKBRuntime ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="w-4 h-4" />
-                    )}
-                    <span className="ml-2">校验参数</span>
+                    {validatingKBRuntime ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                    校验参数
                   </button>
                   <button
                     onClick={handleUpdateKBRuntime}
                     disabled={updatingKBRuntime || validatingKBRuntime}
-                    className="flex items-center px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:bg-gray-400"
+                    className="btn btn-primary"
                   >
-                    <RefreshCw className={`w-4 h-4 ${updatingKBRuntime ? 'animate-spin' : ''}`} />
-                    <span className="ml-2">更新 KB 运行时</span>
+                    <RefreshCw size={12} className={updatingKBRuntime ? 'animate-spin' : ''} />
+                    更新 KB 运行时
                   </button>
                 </div>
               </div>
-              <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-                默认 provider 为 RAGFlow。若你们部署了 RAGFlow 兼容网关，可直接使用默认 path；
-                若接口路径不同，请按网关契约改写 Health/Search/Upsert Path。
-              </p>
+              <div className="mt-3 px-3 py-2 rounded-lg text-xs" style={{ background: 'var(--color-warning-soft)', color: 'var(--color-warning-dark)', border: '1px solid #fde68a' }}>
+                默认 provider 为 RAGFlow。若部署了 RAGFlow 兼容网关，可直接使用默认 path；
+                若接口路径不同，请按网关契约改写 Health / Search / Upsert Path。
+              </div>
 
               {kbValidateResult && (
-                <div className="mt-4 rounded-lg border border-teal-200 bg-teal-50 p-3">
-                  <div className="text-sm font-medium text-teal-800">
-                    校验结果: {kbValidateResult.validated ? '通过' : '未通过'}
+                <div className="mt-4 p-3 rounded-xl text-xs" style={{ background: 'var(--color-success-soft)', border: '1px solid #a7f3d0' }}>
+                  <div className="font-semibold mb-1" style={{ color: 'var(--color-success-dark)' }}>
+                    校验结果: {kbValidateResult.validated ? '✓ 通过' : '✗ 未通过'}
+                    <span className="ml-2 font-normal" style={{ color: 'var(--color-success-dark)', opacity: 0.7 }}>status: {kbValidateResult.status}</span>
                   </div>
-                  <div className="text-xs text-teal-700 mt-1">status: {kbValidateResult.status}</div>
-                  {kbValidateResult.note && (
-                    <div className="text-xs text-teal-700 mt-1">{kbValidateResult.note}</div>
-                  )}
-                  <pre className="mt-2 text-xs text-teal-900 bg-white border border-teal-200 rounded p-2 overflow-auto max-h-44">
+                  {kbValidateResult.note && <div style={{ color: 'var(--color-success-dark)' }}>{kbValidateResult.note}</div>}
+                  <pre className="mt-2 rounded-lg p-2 overflow-auto max-h-44 font-mono" style={{ background: 'var(--app-surface)', border: '1px solid var(--app-border)', color: 'var(--app-text)' }}>
                     {JSON.stringify(kbValidateResult.runtime, null, 2)}
                   </pre>
                 </div>
@@ -1382,217 +1343,189 @@ const Settings: React.FC = () => {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-md overflow-hidden lg:col-span-2">
-          <div className="p-4 border-b border-gray-200 flex items-center justify-between gap-2">
-            <div className="flex items-center">
-              <Cpu className="w-5 h-5 text-indigo-600 mr-2" />
-              <h3 className="font-semibold text-gray-900">LLM 运行时</h3>
+        <div className="card overflow-hidden lg:col-span-2">
+          <div className="card-header">
+            <div className="card-title">
+              <Cpu size={14} style={{ color: 'var(--brand-secondary)' }} />
+              LLM 运行时
+              <span className="badge badge-neutral ml-1">{llmRuntime.configured_provider || 'openai'}</span>
             </div>
             <button
               onClick={() => fetchRuntimeStatus(true)}
               disabled={refreshingLLMRuntime}
-              className="flex items-center px-3 py-1.5 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-60"
+              className="btn btn-secondary"
             >
-              <RefreshCw className={`w-4 h-4 mr-2 ${refreshingLLMRuntime ? 'animate-spin' : ''}`} />
+              <RefreshCw size={12} className={refreshingLLMRuntime ? 'animate-spin' : ''} />
               刷新状态
             </button>
           </div>
 
-          <div className="p-4 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">Provider</div>
-                <div className="text-sm font-medium text-gray-900 mt-1">{llmRuntime.configured_provider || 'LooseAny'}</div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">Model</div>
-                <div className="text-sm font-medium text-gray-900 mt-1">{llmRuntime.configured_model || '未配置'}</div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">LLM 启用状态</div>
-                <div className={`text-sm font-medium mt-1 ${llmRuntime.llm_enabled ? 'text-green-700' : 'text-gray-600'}`}>
-                  {llmRuntime.llm_enabled ? '已启用' : '未启用'}
+          <div className="card-body space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              {[
+                { label: 'Provider', value: llmRuntime.configured_provider || '未配置', status: 'neutral' as const },
+                { label: 'Model', value: llmRuntime.configured_model || '未配置', status: 'neutral' as const },
+                { label: 'LLM 状态', value: llmRuntime.llm_enabled ? '已启用' : '未启用', status: (llmRuntime.llm_enabled ? 'ok' : 'warn') as 'ok'|'warn'|'neutral' },
+                { label: 'API Key', value: llmRuntime.api_key_configured ? '已配置' : '未配置', status: (llmRuntime.api_key_configured ? 'ok' : 'warn') as 'ok'|'warn'|'neutral' },
+                { label: '本地 LLM', value: llmRuntime.local_llm_ready ? '就绪' : '未就绪', status: (llmRuntime.local_llm_ready ? 'ok' : 'neutral') as 'ok'|'warn'|'neutral' },
+              ].map(item => (
+                <div key={item.label} className="p-3 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="section-label mb-1.5">{item.label}</div>
+                  <div className="text-sm font-semibold truncate" style={{ color: item.status === 'ok' ? 'var(--color-success-dark)' : item.status === 'warn' ? 'var(--color-error-dark)' : 'var(--app-text)' }}>{item.value}</div>
                 </div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">API Key 状态</div>
-                <div className={`text-sm font-medium mt-1 ${llmRuntime.api_key_configured ? 'text-green-700' : 'text-gray-600'}`}>
-                  {llmRuntime.api_key_configured ? '已配置' : '未配置'}
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-gray-50">
-                <div className="text-xs text-gray-500">本地 LLM</div>
-                <div className={`text-sm font-medium mt-1 ${llmRuntime.local_llm_ready ? 'text-green-700' : 'text-gray-600'}`}>
-                  {llmRuntime.local_llm_ready ? '就绪' : '未就绪'}
-                </div>
-              </div>
+              ))}
             </div>
 
-            <div className="text-sm text-gray-600 space-y-1">
-              <div>
-                <span className="font-medium text-gray-700">本地 API Base:</span>{' '}
-                <span className="font-mono">{llmRuntime.local_llm_api_base || '未配置'}</span>
+            <div className="space-y-2 text-xs">
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>本地 API Base</span>
+                <code className="flex-1 truncate" style={{ color: 'var(--brand-primary)' }}>{llmRuntime.local_llm_api_base || '未配置'}</code>
               </div>
-              <div>
-                <span className="font-medium text-gray-700">支持 Provider:</span>{' '}
-                {llmRuntime.supported_providers.join(', ') || '-'}
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>支持 Provider</span>
+                <span style={{ color: 'var(--app-text)' }}>{llmRuntime.supported_providers.join(', ') || '-'}</span>
               </div>
-              <div>
-                <span className="font-medium text-gray-700">部署文件:</span>{' '}
-                <span className="font-mono">{llmRuntime.deployment_persistence.deployment_file || '未配置'}</span>
-                <span className="ml-2 text-xs text-gray-500">
-                  {llmRuntime.deployment_persistence.deployment_file_exists
-                    ? (llmRuntime.deployment_persistence.deployment_file_writable ? '可写' : '只读')
-                    : '不存在'}
+              <div className="flex items-start gap-2 py-2 px-3 rounded-lg" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                <span className="font-semibold flex-shrink-0" style={{ color: 'var(--app-text-muted)' }}>部署文件</span>
+                <code className="flex-1 truncate" style={{ color: 'var(--app-text)' }}>{llmRuntime.deployment_persistence.deployment_file || '未配置'}</code>
+                <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: llmRuntime.deployment_persistence.deployment_file_exists ? (llmRuntime.deployment_persistence.deployment_file_writable ? 'var(--color-success-soft)' : 'var(--color-warning-soft)') : 'var(--app-surface-muted)', color: llmRuntime.deployment_persistence.deployment_file_exists ? (llmRuntime.deployment_persistence.deployment_file_writable ? 'var(--color-success-dark)' : 'var(--color-warning-dark)') : 'var(--app-text-subtle)' }}>
+                  {llmRuntime.deployment_persistence.deployment_file_exists ? (llmRuntime.deployment_persistence.deployment_file_writable ? '可写' : '只读') : '不存在'}
                 </span>
               </div>
-              {llmRuntime.note && <div className="text-xs text-gray-500">{llmRuntime.note}</div>}
+              {llmRuntime.note && (
+                <div className="py-2 px-3 rounded-lg" style={{ background: 'var(--color-warning-soft)', color: 'var(--color-warning-dark)', border: '1px solid #fde68a' }}>{llmRuntime.note}</div>
+              )}
             </div>
 
-            <div className="pt-4 border-t border-gray-200">
-              <h4 className="text-sm font-semibold text-gray-800 mb-3">运行时参数校验</h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="pt-4" style={{ borderTop: '1px solid var(--app-border)' }}>
+              <div className="section-label mb-3">配置参数</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Provider</label>
                   <select
                     value={llmForm.provider}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, provider: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="input"
                   >
                     {(llmRuntime.supported_providers.length > 0
                       ? llmRuntime.supported_providers
                       : DEFAULT_LLM_RUNTIME.supported_providers).map((provider) => (
-                      <option key={provider} value={provider}>
-                        {provider}
-                      </option>
+                      <option key={provider} value={provider}>{provider}</option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Model</label>
                   <input
                     type="text"
                     value={llmForm.model}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, model: e.target.value }))}
                     placeholder="例如: gpt-4o-mini / claude-3-5-sonnet"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">API Base</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>API Base</label>
                   <input
                     type="text"
                     value={llmForm.api_base}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, api_base: e.target.value }))}
                     placeholder="例如: http://127.0.0.1:11434/v1"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">API Key（支持更新）</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>API Key（留空不更新）</label>
                   <input
                     type="password"
                     value={llmForm.api_key}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, api_key: e.target.value }))}
-                    placeholder="输入新的 API Key（留空不更新）"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    placeholder="输入新的 API Key"
+                    className="input"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Local Model Path</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Local Model Path</label>
                   <input
                     type="text"
                     value={llmForm.local_model_path}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, local_model_path: e.target.value }))}
                     placeholder="例如: /models/qwen2.5"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="input"
                   />
                 </div>
 
-                <div className="md:col-span-2 flex items-center">
-                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      checked={llmForm.clear_api_key}
-                      onChange={(e) => setLlmForm((prev) => ({ ...prev, clear_api_key: e.target.checked }))}
-                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    清空现有 API Key（与上方输入二选一）
-                  </label>
-                </div>
-
-                <div className="md:col-span-2 flex items-center">
-                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      checked={llmForm.persist_to_deployment}
-                      onChange={(e) => setLlmForm((prev) => ({ ...prev, persist_to_deployment: e.target.checked }))}
-                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    同步写入部署文件（`deploy/semantic-engine.yaml`）
-                  </label>
+                <div className="md:col-span-2 flex flex-wrap gap-4">
+                  {[
+                    { key: 'clear_api_key' as const, label: '清空现有 API Key（与上方输入二选一）', checked: llmForm.clear_api_key, onChange: (v: boolean) => setLlmForm((p) => ({ ...p, clear_api_key: v })) },
+                    { key: 'persist_to_deployment' as const, label: '同步写入部署文件 (deploy/semantic-engine.yaml)', checked: llmForm.persist_to_deployment, onChange: (v: boolean) => setLlmForm((p) => ({ ...p, persist_to_deployment: v })) },
+                  ].map(item => (
+                    <label key={item.key} className="inline-flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--app-text-muted)' }}>
+                      <input
+                        type="checkbox"
+                        checked={item.checked}
+                        onChange={(e) => item.onChange(e.target.checked)}
+                        className="rounded"
+                        style={{ accentColor: 'var(--brand-primary)' }}
+                      />
+                      {item.label}
+                    </label>
+                  ))}
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Extra (JSON object)</label>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Extra (JSON object)</label>
                   <textarea
                     value={llmForm.extra}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, extra: e.target.value }))}
                     rows={5}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="input font-mono text-xs"
                   />
                 </div>
               </div>
 
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <div className="text-xs text-gray-500">
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <div className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>
                   契约: provider({llmRuntime.runtime_config_contract.provider}),
                   model({llmRuntime.runtime_config_contract.model}),
-                  api_base({llmRuntime.runtime_config_contract.api_base}),
                   api_key({llmRuntime.runtime_config_contract.api_key || 'string(optional)'})
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleValidateLLMRuntime}
                     disabled={validatingLLMRuntime || updatingLLMRuntime}
-                    className="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:bg-gray-400"
+                    className="btn btn-secondary"
                   >
-                    {validatingLLMRuntime ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="w-4 h-4" />
-                    )}
-                    <span className="ml-2">校验参数</span>
+                    {validatingLLMRuntime ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                    校验参数
                   </button>
                   <button
                     onClick={handleUpdateLLMRuntime}
                     disabled={updatingLLMRuntime || validatingLLMRuntime}
-                    className="flex items-center px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:bg-gray-400"
+                    className="btn btn-primary"
                   >
-                    <RefreshCw className={`w-4 h-4 ${updatingLLMRuntime ? 'animate-spin' : ''}`} />
-                    <span className="ml-2">更新 API Key/运行时</span>
+                    <RefreshCw size={12} className={updatingLLMRuntime ? 'animate-spin' : ''} />
+                    更新 API Key / 运行时
                   </button>
                 </div>
               </div>
-              <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-                默认会尝试将非敏感 LLM 配置（Provider/Model/API Base/Local Path）同步写入部署文件；
+              <div className="mt-3 px-3 py-2 rounded-lg text-xs" style={{ background: 'var(--color-warning-soft)', color: 'var(--color-warning-dark)', border: '1px solid #fde68a' }}>
+                默认会尝试将非敏感 LLM 配置（Provider / Model / API Base / Local Path）同步写入部署文件；
                 若部署文件不可访问则自动回退为仅当前进程生效。API Key 仍建议通过 Secret 管理。
-              </p>
+              </div>
 
               {llmValidateResult && (
-                <div className="mt-4 rounded-lg border border-green-200 bg-green-50 p-3">
-                  <div className="text-sm font-medium text-green-800">
-                    校验结果: {llmValidateResult.validated ? '通过' : '未通过'}
+                <div className="mt-4 p-3 rounded-xl text-xs" style={{ background: 'var(--color-success-soft)', border: '1px solid #a7f3d0' }}>
+                  <div className="font-semibold mb-1" style={{ color: 'var(--color-success-dark)' }}>
+                    校验结果: {llmValidateResult.validated ? '✓ 通过' : '✗ 未通过'}
+                    <span className="ml-2 font-normal" style={{ color: 'var(--color-success-dark)', opacity: 0.7 }}>status: {llmValidateResult.status}</span>
                   </div>
-                  <div className="text-xs text-green-700 mt-1">status: {llmValidateResult.status}</div>
-                  {llmValidateResult.note && (
-                    <div className="text-xs text-green-700 mt-1">{llmValidateResult.note}</div>
-                  )}
-                  <pre className="mt-2 text-xs text-green-900 bg-white border border-green-200 rounded p-2 overflow-auto max-h-44">
+                  {llmValidateResult.note && <div style={{ color: 'var(--color-success-dark)' }}>{llmValidateResult.note}</div>}
+                  <pre className="mt-2 rounded-lg p-2 overflow-auto max-h-44 font-mono" style={{ background: 'var(--app-surface)', border: '1px solid var(--app-border)', color: 'var(--app-text)' }}>
                     {JSON.stringify(llmValidateResult.runtime, null, 2)}
                   </pre>
                 </div>
@@ -1601,73 +1534,67 @@ const Settings: React.FC = () => {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-md overflow-hidden lg:col-span-2">
-          <div className="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
-            <div className="flex items-center">
-              <SettingsIcon className="w-5 h-5 text-purple-600 mr-2" />
-              <h3 className="font-semibold text-gray-900">API 配置</h3>
+        <div className="card overflow-hidden lg:col-span-2">
+          <div className="card-header">
+            <div className="card-title">
+              <SettingsIcon size={14} style={{ color: 'var(--brand-accent)' }} />
+              API 配置
             </div>
             <button
               onClick={handleCheckApiHealth}
               disabled={checkingApiHealth}
-              className="flex items-center px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:bg-gray-400 text-sm"
+              className="btn btn-primary"
             >
-              <RefreshCw className={`w-4 h-4 mr-2 ${checkingApiHealth ? 'animate-spin' : ''}`} />
+              <RefreshCw size={12} className={checkingApiHealth ? 'animate-spin' : ''} />
               连通性检查
             </button>
           </div>
-          <div className="p-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="card-body space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  API 基础 URL
-                </label>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>API 基础 URL</label>
                 <input
                   type="text"
-                  value={import.meta.env.VITE_API_URL || '相对路径(/api/v1/*)'}
+                  value={import.meta.env.VITE_API_URL || '相对路径 (/api/v1/*)'}
                   disabled
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500"
+                  className="input"
+                  style={{ opacity: 0.6, cursor: 'not-allowed' }}
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  API 版本
-                </label>
+                <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>API 版本</label>
                 <input
                   type="text"
                   value="v1"
                   disabled
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500"
+                  className="input"
+                  style={{ opacity: 0.6, cursor: 'not-allowed' }}
                 />
               </div>
             </div>
 
-            <div className="mt-4 p-3 rounded-lg bg-gray-50 border border-gray-200 space-y-1 text-sm">
-              <div>
-                <span className="text-gray-500">语义引擎状态:</span>{' '}
-                <span className={apiHealth?.status === 'healthy' ? 'text-green-700 font-medium' : 'text-gray-700'}>
-                  {apiHealth?.status || '未检查'}
-                </span>
-              </div>
-              <div>
-                <span className="text-gray-500">服务:</span>{' '}
-                <span className="text-gray-800">{apiHealth?.service || '-'}</span>
-              </div>
-              <div>
-                <span className="text-gray-500">版本:</span>{' '}
-                <span className="text-gray-800">{apiHealth?.version || '-'}</span>
-              </div>
-              <div>
-                <span className="text-gray-500">检查时间:</span>{' '}
-                <span className="text-gray-800">{formatCheckedAt(apiHealth?.checked_at || '')}</span>
-              </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: '引擎状态', value: apiHealth?.status || '未检查', ok: apiHealth?.status === 'healthy' },
+                { label: '服务名称', value: apiHealth?.service || '-', ok: null },
+                { label: '版本号', value: apiHealth?.version || '-', ok: null },
+                { label: '最后检查', value: formatCheckedAt(apiHealth?.checked_at || ''), ok: null },
+              ].map(item => (
+                <div key={item.label} className="p-3 rounded-xl" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)' }}>
+                  <div className="section-label mb-1.5">{item.label}</div>
+                  <div className="text-sm font-semibold truncate" style={{ color: item.ok === true ? 'var(--color-success-dark)' : item.ok === false ? 'var(--color-error-dark)' : 'var(--app-text)' }}>
+                    {item.value}
+                  </div>
+                </div>
+              ))}
             </div>
 
-            <p className="mt-2 text-xs text-gray-500">
-              API 基础地址通过环境变量设置（`VITE_API_URL` / 代理规则）。生产环境请保持与 Nginx 路由一致。
-            </p>
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ background: 'var(--app-surface-muted)', border: '1px solid var(--app-border)', color: 'var(--app-text-subtle)' }}>
+              API 基础地址通过环境变量设置（VITE_API_URL / 代理规则）。生产环境请保持与 Nginx 路由一致。
+            </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
