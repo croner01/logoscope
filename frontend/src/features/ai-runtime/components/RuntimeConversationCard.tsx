@@ -284,7 +284,8 @@ const renderCommandBlock = (block: RuntimeTranscriptCommandBlock) => {
   return (
     <div key={block.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <span className={`rounded-full border px-2 py-0.5 ${getStatusClassName(block.status)}`}>
+        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${getStatusClassName(block.status)}`}>
+          {String(block.status || '').trim().toLowerCase() === 'pending' && <Loader2 className="h-3 w-3 animate-spin" />}
           {formatStatusLabel(block.status)}
         </span>
         {typeof block.exitCode === 'number' && <span>exit {block.exitCode}</span>}
@@ -364,7 +365,8 @@ const renderApprovalBlock = (
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`rounded-full border px-2 py-0.5 text-xs ${getStatusClassName(approval.status)}`}>
+            <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${getStatusClassName(approval.status)}`}>
+              {pending && <Loader2 className="h-3 w-3 animate-spin" />}
               {formatStatusLabel(approval.status)}
             </span>
             {approval.updatedAt && (

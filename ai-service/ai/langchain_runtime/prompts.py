@@ -26,13 +26,20 @@ FOLLOWUP_SYSTEM_PROMPT = """你必须只输出 JSON，不要输出任何非 JSON
 11) 必须遵守闭环顺序：先给"当前总结"，再基于 missing_evidence 生成命令；命令观察后再总结是否收敛；若未收敛继续补证据，直到可以给出最终结论。
 12) 若上下文中列出了可用诊断技能（Diagnostic Skills），优先在 actions 中通过 skill_name 字段引用技能；使用 skill_name 时无需重复手写该技能的 command_spec，系统会自动展开为结构化命令链；仅在技能不覆盖时才手动构造 command_spec。
 13) 必须使用「事件时间窗」中给出的具体时间戳: kubectl logs 用 --since-time= 而非 --since=15m；ClickHouse 查询用 toDateTime64 具体时间条件而非 now() - INTERVAL N MINUTE。如果事件时间窗未给出精确时间，从问题/日志文本中自行提取首条时间戳。
-14) 禁止从日志文本或服务名称推断 namespace 或 pod label。构造任何带 -n <namespace> 的 kubectl 命令前，必须先确认目标 pod 所在的 namespace。如果不确定 pod 的 namespace，先用 kubectl get pods -A -l app=<服务名>（注意：必须使用服务名精确值，禁止添加或修改后缀如 -history -worker 等，也禁止添加额外 selector）确认 pod 所在 namespace，再用确认后的信息构造后续日志/describe 命令。禁止直接使用日志文本中的服务名称作为 -n 参数值。
+14) 禁止假设 Pod 存在 app=<服务名> 标签。你不确定 Pod 的标签格式，很多 Pod 没有 app 标签。要查找目标 Pod 时使用以下方法：
+    a) 如果你知道 namespace，用：kubectl get pod -n <namespace> | grep <服务名关键词>
+    b) 如果你不知道 namespace，用：kubectl get pods -A | grep <服务名关键词>
+    c) 从输出中提取 Pod 名称和所在 Namespace，然后使用准确的 Pod 名称构造后续命令。
+    绝对不要使用 -l app=<服务名> 作为 Pod 查找方式。如果 grep 过滤结果为空，降低过滤条件重新搜索。
 15) 禁止在结论/conclusion 文本中描述"建议动作""建议命令"等下一步操作。
     所有诊断步骤——包括 namespace 发现命令——都必须作为 source=langchain 的 action 输出到 actions 数组中，每条 action 必须有 command 或 command_spec（tool + args），executable=true。
     结论文本只应包含已确认的事实和推理，不应包含"建议执行""下一步""可执行""待补全"等命令建议。
     如果系统发现 actions 数组为空或全部 executable=false，将判定为 planning_incomplete 并阻塞。
-16) 禁止被日志文本中的细节卡住。完成 namespace 发现后，下一个 action 必须是 kubectl logs，不是 ClickHouse 查询。必须立即用已确认的 namespace 和 label 构造日志拉取命令（kubectl logs -n <发现的namespace> -l app=<服务名> --since-time=...），不要等待额外信息（如 shard 映射、pod 名称解析等）。日志命令可以直接使用 label selector 获取所有相关 pod 的日志，逐个 pod 解析不是前置条件。
-    注意：ClickHouse 查询通常会触发 semantic_incomplete 阻塞而需要用户确认，应作为最后手段而不是首选下一步。诊断路径应该是：namespace 发现 → kubectl logs → （如有必要再）ClickHouse。
+16) 找到 Pod 名称和 Namespace 后，使用精确的 Pod 名称构造命令，不要使用 -l app= 标签选择器：
+    kubectl describe pod <Pod名称> -n <Namespace>
+    kubectl logs <Pod名称> -n <Namespace> --since-time=...
+    禁止被日志文本中的细节卡住。完成 namespace/pod 发现后，下一个 action 必须是 kubectl logs，不是 ClickHouse 查询。不要等待额外信息（如 shard 映射、pod 名称解析等）。
+    注意：ClickHouse 查询通常会触发 semantic_incomplete 阻塞而需要用户确认，应作为最后手段而不是首选下一步。诊断路径应该是：pod 发现 → kubectl logs → （如有必要再）ClickHouse。
 
 【重要】你的输出将被程序自动解析。如果输出不是合法 JSON，系统将无法处理你的诊断结果，必须重试。请确保输出是严格的 JSON 格式。"""
 

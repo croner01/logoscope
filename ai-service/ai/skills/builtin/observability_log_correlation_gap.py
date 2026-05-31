@@ -68,12 +68,16 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
         start, end = self._resolve_window(context)
         anchor_kind, anchor_value = self._resolve_anchor(context)
 
-        # kubectl logs does not support -A, resolve namespace dynamically
-        ns_resolve = "$(kubectl get pods -A -l app=%s -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo islap)" % svc
+        # Don't assume app= label exists. Discover pod name and namespace via name-based grep.
         log_window_command = (
-            f"kubectl logs -n {ns_resolve} -l app={svc} --since-time={start} --tail=200"
+            f"kubectl get pods -A --no-headers 2>/dev/null | grep -Fi {svc} | head -1 "
+            f"| while read ns pod _; do "
+            f"kubectl logs \"$pod\" -n \"$ns\" --since-time={start} --tail=200; done"
             if start
-            else f"kubectl logs -n {ns_resolve} -l app={svc} --since=15m --tail=200"
+            else
+            f"kubectl get pods -A --no-headers 2>/dev/null | grep -Fi {svc} | head -1 "
+            f"| while read ns pod _; do "
+            f"kubectl logs \"$pod\" -n \"$ns\" --since=15m --tail=200; done"
         )
 
         where_clauses = []
@@ -95,12 +99,16 @@ class ObservabilityLogCorrelationGapSkill(DiagnosticSkill):
             "FORMAT PrettyCompact"
         )
 
-        # kubectl logs does not support -A, resolve namespace dynamically
-        qs_ns_resolve = "$(kubectl get pods -A -l app=query-service -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo islap)"
+        # Don't assume app= label exists. Discover pod name and namespace via name-based grep.
         query_service_command = (
-            f"kubectl logs -n {qs_ns_resolve} -l app=query-service --since-time={start} --tail=200"
+            f"kubectl get pods -A --no-headers 2>/dev/null | grep -Fi query-service | head -1 "
+            f"| while read ns pod _; do "
+            f"kubectl logs \"$pod\" -n \"$ns\" --since-time={start} --tail=200; done"
             if start
-            else f"kubectl logs -n {qs_ns_resolve} -l app=query-service --since=15m --tail=200"
+            else
+            f"kubectl get pods -A --no-headers 2>/dev/null | grep -Fi query-service | head -1 "
+            f"| while read ns pod _; do "
+            f"kubectl logs \"$pod\" -n \"$ns\" --since=15m --tail=200; done"
         )
 
         anchor_title = "使用时间窗确认候选日志锚点"

@@ -1,4 +1,5 @@
 import React from 'react';
+import { Loader2 } from 'lucide-react';
 
 import type { RuntimeApprovalEntry } from '../types/view';
 
@@ -19,33 +20,40 @@ const ApprovalPanel: React.FC<ApprovalPanelProps> = ({ approvals, disabled, onAp
 
   return (
     <div className="space-y-2">
-      {approvals.map((item) => (
-        <div key={item.id} className="rounded border border-amber-200 bg-amber-50 p-2">
-          <div className="text-[11px] font-medium text-amber-900">{item.title}</div>
-          <div className="mt-1 break-all rounded border border-amber-100 bg-white px-2 py-1 text-[11px] text-amber-900">
-            <code>{item.command}</code>
+      {approvals.map((item) => {
+        const isPending = String(item.status || '').trim().toLowerCase() === 'pending';
+        return (
+          <div key={item.id} className={`rounded border p-2 ${isPending ? 'border-amber-300 bg-amber-50 animate-pulse' : 'border-amber-200 bg-amber-50'}`}>
+            <div className="flex items-center gap-2 text-[11px] font-medium text-amber-900">
+              {isPending && <Loader2 className="h-3 w-3 animate-spin shrink-0" />}
+              {item.title}
+            </div>
+            <div className="mt-1 break-all rounded border border-amber-100 bg-white px-2 py-1 text-[11px] text-amber-900">
+              <code>{item.command}</code>
+            </div>
+            <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-amber-700">
+              {item.commandType && <span>type: {item.commandType}</span>}
+              {item.riskLevel && <span>risk: {item.riskLevel}</span>}
+              {item.requiresElevation && <span>need elevation</span>}
+              {item.requiresConfirmation && !item.requiresElevation && <span>need confirm</span>}
+            </div>
+            {item.message && (
+              <div className="mt-1 text-[10px] text-amber-800 whitespace-pre-wrap">{item.message}</div>
+            )}
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => onApprove?.(item)}
+                disabled={disabled || typeof onApprove !== 'function'}
+                className="inline-flex items-center gap-1.5 rounded bg-amber-600 px-2 py-1 text-[11px] text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                审批并执行
+              </button>
+            </div>
           </div>
-          <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-amber-700">
-            {item.commandType && <span>type: {item.commandType}</span>}
-            {item.riskLevel && <span>risk: {item.riskLevel}</span>}
-            {item.requiresElevation && <span>need elevation</span>}
-            {item.requiresConfirmation && !item.requiresElevation && <span>need confirm</span>}
-          </div>
-          {item.message && (
-            <div className="mt-1 text-[10px] text-amber-800 whitespace-pre-wrap">{item.message}</div>
-          )}
-          <div className="mt-2">
-            <button
-              type="button"
-              onClick={() => onApprove?.(item)}
-              disabled={disabled || typeof onApprove !== 'function'}
-              className="rounded bg-amber-600 px-2 py-1 text-[11px] text-white hover:bg-amber-700 disabled:opacity-50"
-            >
-              审批并执行
-            </button>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 };

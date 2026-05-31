@@ -592,6 +592,7 @@ const getFollowUpSubgoalStatusTagClass = (status: string): string => {
 };
 
 const FOLLOWUP_ACTION_STATUS_LABELS: Record<string, string> = {
+  pending: '待执行',
   precheck: '策略预检',
   running: '执行中',
   executed: '已执行',
@@ -614,6 +615,9 @@ const formatFollowUpActionStatus = (status: unknown): string => {
 
 const getFollowUpActionStatusTagClass = (status: unknown): string => {
   const normalized = normalizeFollowUpActionStatus(status);
+  if (normalized === 'pending') {
+    return 'border-amber-300 bg-amber-50 text-amber-700 animate-pulse';
+  }
   if (normalized === 'running') {
     return 'border-blue-200 bg-blue-50 text-blue-700';
   }
@@ -5767,7 +5771,11 @@ const AIAnalysis: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           {analysisSessionId && (
-            <span className="text-[11px] text-slate-500 bg-slate-100 px-2 py-1 rounded border border-slate-200">
+            <span
+              className="text-[11px] text-slate-500 bg-slate-100 px-2 py-1 rounded border border-slate-200 cursor-pointer hover:bg-slate-200"
+              title={`分析会话 ID: ${analysisSessionId}（点击复制）`}
+              onClick={() => { void copyTextToClipboard(analysisSessionId); }}
+            >
               会话: {analysisSessionId.slice(0, 12)}…
             </span>
           )}
@@ -6106,7 +6114,7 @@ const AIAnalysis: React.FC = () => {
           </div>
 
           {/* ── AI 追问对话面板（独立主体，充分利用剩余高度） ── */}
-          <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex-1 min-h-0 flex flex-col">
             {/* Chat 头部 */}
             <div className="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 bg-slate-50 shrink-0">
               <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
@@ -6559,7 +6567,8 @@ const AIAnalysis: React.FC = () => {
                                   )}
                                   <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-emerald-700">
                                     {statusLabel && (
-                                      <span className={`inline-flex items-center rounded-full border px-2 py-0.5 ${getFollowUpActionStatusTagClass(statusRaw)}`}>
+                                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${getFollowUpActionStatusTagClass(statusRaw)}`}>
+                                        {statusRaw === 'pending' && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
                                         状态: {statusLabel}
                                       </span>
                                     )}
@@ -6672,7 +6681,8 @@ const AIAnalysis: React.FC = () => {
                                   className="rounded border border-amber-100 bg-white p-1.5"
                                 >
                                   <div className="flex flex-wrap items-center gap-2 text-[10px]">
-                                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 ${getFollowUpActionStatusTagClass(statusRaw)}`}>
+                                    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${getFollowUpActionStatusTagClass(statusRaw)}`}>
+                                      {statusRaw === 'pending' && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
                                       {formatFollowUpActionStatus(statusRaw)}
                                     </span>
                                     {riskLevel && <span className="text-amber-700">风险: {riskLevel}</span>}
@@ -6739,6 +6749,25 @@ const AIAnalysis: React.FC = () => {
               {followUpNotice && (
                 <div className="text-xs text-emerald-700">{followUpNotice}</div>
               )}
+              {runtimePanelRuns.length > 0 && (
+                <div className="border-t border-gray-200 pt-3">
+                  <RuntimeActivityPanel
+                    runs={runtimePanelRuns}
+                    disabled={followUpLoading || approvalDialogSubmitting}
+                    onApprove={openRuntimeApprovalDialog}
+                    onSubmitUserInput={(params) => {
+                      return handleContinueRuntimeUserInput({
+                        runId: params.runId,
+                        text: params.text,
+                        source: params.source,
+                      });
+                    }}
+                    onCancelRun={(runId) => {
+                      void handleCancelRuntimeRun(runId);
+                    }}
+                  />
+                </div>
+              )}
             </div>
 
             {/* 快捷追问建议 */}
@@ -6800,33 +6829,21 @@ const AIAnalysis: React.FC = () => {
                 </button>
               </div>
               <div className="mt-1.5 text-[10px] text-gray-400 flex flex-wrap gap-3">
-                {analysisSessionId && <span>分析会话: {analysisSessionId.slice(0, 8)}…</span>}
+                {analysisSessionId && (
+                  <span
+                    className="cursor-pointer hover:text-indigo-600"
+                    title={`分析会话 ID: ${analysisSessionId}（点击复制）`}
+                    onClick={() => { void copyTextToClipboard(analysisSessionId); }}
+                  >
+                    分析会话: {analysisSessionId.slice(0, 8)}…
+                  </span>
+                )}
                 {followUpMessages.length > 0 && <span>消息数: {followUpMessages.length}</span>}
                 {tokenHint.historyCompacted && <span className="text-indigo-500">长会话已自动摘要压缩</span>}
                 <span>敏感字段自动脱敏已开启</span>
               </div>
             </div>
 
-            {/* RuntimeActivityPanel */}
-            {runtimePanelRuns.length > 0 && (
-              <div className="px-3 pb-2 shrink-0">
-                <RuntimeActivityPanel
-                  runs={runtimePanelRuns}
-                  disabled={followUpLoading || approvalDialogSubmitting}
-                  onApprove={openRuntimeApprovalDialog}
-                  onSubmitUserInput={(params) => {
-                    return handleContinueRuntimeUserInput({
-                      runId: params.runId,
-                      text: params.text,
-                      source: params.source,
-                    });
-                  }}
-                  onCancelRun={(runId) => {
-                    void handleCancelRuntimeRun(runId);
-                  }}
-                />
-              </div>
-            )}
           </div>
         </div>
 

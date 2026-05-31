@@ -150,7 +150,13 @@ const RuntimeActivityPanel: React.FC<RuntimeActivityPanelProps> = ({
             )}
             <div className="mt-3 space-y-3">
               <div>
-                <div className="mb-1 text-[11px] font-medium text-slate-600">待审批动作</div>
+                <div className="mb-1 flex items-center gap-2 text-[11px] font-medium text-slate-600">
+                  {run.approvals.some((a) => String(a.status || '').trim().toLowerCase() === 'pending') && (
+                    <span className="inline-flex h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                  )}
+                  待审批动作
+                  {run.approvals.length > 0 && <span className="text-[10px] text-amber-600">({run.approvals.length})</span>}
+                </div>
                 <ApprovalPanel approvals={run.approvals} disabled={disabled} onApprove={onApprove} />
               </div>
               <div>

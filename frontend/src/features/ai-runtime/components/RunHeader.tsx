@@ -1,4 +1,5 @@
 import React from 'react';
+import { Loader2 } from 'lucide-react';
 
 interface RunHeaderProps {
   runId: string;
@@ -10,6 +11,19 @@ interface RunHeaderProps {
   canCancel?: boolean;
   onCancel?: (runId: string) => void;
 }
+
+const formatStatusLabel = (status: string): string => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'waiting_approval') return '等待审批';
+  if (normalized === 'waiting_user_input') return '待确认信息';
+  if (normalized === 'pending') return '待确认';
+  if (normalized === 'running') return '执行中';
+  if (normalized === 'completed') return '已完成';
+  if (normalized === 'failed') return '执行失败';
+  if (normalized === 'cancelled') return '已取消';
+  if (normalized === 'blocked') return '已阻断';
+  return normalized || status;
+};
 
 const formatRuntimeTime = (value?: string): string => {
   const normalized = String(value || '').trim();
@@ -37,6 +51,11 @@ const getStatusClassName = (status: string): string => {
   return 'border-blue-200 bg-blue-50 text-blue-700';
 };
 
+const isWaiting = (s: string): boolean => {
+  const n = String(s || '').trim().toLowerCase();
+  return n === 'waiting_approval' || n === 'waiting_user_input' || n === 'pending';
+};
+
 const RunHeader: React.FC<RunHeaderProps> = ({
   runId,
   title,
@@ -51,8 +70,9 @@ const RunHeader: React.FC<RunHeaderProps> = ({
     <div className="min-w-0">
       <div className="text-sm font-medium text-slate-900 truncate">{title}</div>
       <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 ${getStatusClassName(status)}`}>
-          {status}
+        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${getStatusClassName(status)}`}>
+          {isWaiting(status) && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+          {formatStatusLabel(status)}
         </span>
         {currentPhase && (
           <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-slate-600">

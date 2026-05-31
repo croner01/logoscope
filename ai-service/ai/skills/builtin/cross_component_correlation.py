@@ -221,8 +221,10 @@ def _build_pod_log_commands(ctx: SkillContext) -> List[Dict[str, Any]]:
             "step_id": f"ccc-pod-logs-{safe_svc}",
             "title": f"获取 {safe_svc} Pod 最近日志",
             "command": (
-                f"kubectl logs -n {ns} -l app={safe_svc} "
-                f"--tail={_POD_LOG_TAIL} --prefix --ignore-errors 2>&1 | tail -n {_POD_LOG_TAIL}"
+                f"kubectl get pods -n {ns} --no-headers 2>/dev/null | grep -Fi {safe_svc} | head -1 "
+                f"| while read pod _; do "
+                f"kubectl logs \"$pod\" -n {ns} "
+                f"--tail={_POD_LOG_TAIL} --prefix --ignore-errors 2>&1 | tail -n {_POD_LOG_TAIL}; done"
             ),
         })
 

@@ -41,16 +41,15 @@ class K8sPodDiagnosticsSkill(DiagnosticSkill):
 
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
         svc = _as_str(context.service_name)
-        label_flag = f"-l app={svc}" if svc else ""
-        # -A covers all namespaces; works with both get and describe
-        ns_flag = "-A"
+        # Don't assume pods have app=<svc> label. Use name-based filtering via grep.
+        pod_filter = f"| grep -i {svc}" if svc else ""
 
         steps = [
             SkillStep(
                 step_id="k8s-locate-pod",
                 title="查找 Pod 所在的命名空间",
                 command_spec=_generic_exec(
-                    f"kubectl get pods {ns_flag} {label_flag} -o wide 2>/dev/null | head -20".strip(),
+                    f"kubectl get pods -A --no-headers 2>/dev/null {pod_filter} | head -20".strip(),
                     timeout_s=15,
                 ),
                 purpose="确认目标 Pod 是否存在及其正确的命名空间",
@@ -61,9 +60,8 @@ class K8sPodDiagnosticsSkill(DiagnosticSkill):
             SkillStep(
                 step_id="k8s-describe-pod",
                 title="Describe Pod 详情",
-                # FIX: kubectl describe does NOT support --tail; removed invalid flag
                 command_spec=_generic_exec(
-                    f"kubectl describe pod {label_flag} {ns_flag}".strip(),
+                    f"kubectl get pods -A --no-headers 2>/dev/null {pod_filter} | head -5 | awk '{{print $1, $2}}' | while read ns pod; do kubectl describe pod $pod -n $ns 2>/dev/null; done".strip(),
                     timeout_s=20,
                 ),
                 purpose="查看 Pod 状态、重启原因、资源限制、最近 Events",
@@ -76,8 +74,7 @@ class K8sPodDiagnosticsSkill(DiagnosticSkill):
                 step_id="k8s-logs-tail",
                 title="获取容器最近日志",
                 command_spec=_generic_exec(
-                    f"kubectl logs {label_flag} {ns_flag} --tail=100 --previous 2>/dev/null || "
-                    f"kubectl logs {label_flag} {ns_flag} --tail=100".strip(),
+                    f"kubectl get pods -A --no-headers 2>/dev/null {pod_filter} | head -5 | awk '{{print $1, $2}}' | while read ns pod; do kubectl logs $pod -n $ns --tail=100 --previous 2>/dev/null || kubectl logs $pod -n $ns --tail=100 2>/dev/null; done || echo 'No logs available'".strip(),
                     timeout_s=25,
                 ),
                 purpose="定位崩溃时刻的错误栈和关键异常",
@@ -88,7 +85,7 @@ class K8sPodDiagnosticsSkill(DiagnosticSkill):
                 step_id="k8s-get-events",
                 title="获取集群 Events（跨命名空间）",
                 command_spec=_generic_exec(
-                    f"kubectl get events {ns_flag} --sort-by=.lastTimestamp | tail -30",
+                    f"kubectl get events -A --sort-by=.lastTimestamp | tail -30",
                     timeout_s=15,
                 ),
                 purpose="查看最近集群事件，关注 Warning 和 Killing",
@@ -100,7 +97,7 @@ class K8sPodDiagnosticsSkill(DiagnosticSkill):
                 step_id="k8s-top-pod",
                 title="查看各命名空间 Pod 资源用量",
                 command_spec=_generic_exec(
-                    f"kubectl top pod {ns_flag} --no-headers 2>/dev/null | sort -k3 -hr | head -20",
+                    f"kubectl top pod -A --no-headers 2>/dev/null | sort -k3 -hr | head -20",
                     timeout_s=15,
                 ),
                 purpose="确认内存/CPU 是否已达到 limit，辅助 OOM 判断",

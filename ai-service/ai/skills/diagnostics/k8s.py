@@ -76,24 +76,25 @@ class K8sDiagnosticSkill(DiagnosticSkill):
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
         ns = _as_str(context.namespace) or "islap"
         svc = _as_str(context.service_name)
-        label_flag = f"-l app={svc}" if svc else ""
+        # Don't assume pods have app=<svc> label. Use name-based filtering instead.
+        pod_filter = f"| grep -i {svc}" if svc else ""
 
         steps = [
             SkillStep(
                 step_id="k8s-describe-pod",
-                title="Describe Pod 详情",
+                title="列出 Pod 并查看详情",
                 command_spec=_generic_exec(
-                    f"kubectl describe pod {label_flag} -n {ns} --tail=50".strip(),
+                    f"kubectl get pods -n {ns} --no-headers 2>/dev/null {pod_filter} | head -20".strip(),
                     timeout_s=20,
                 ),
-                purpose="查看 Pod 状态、重启原因、资源限制、最近 Events",
-                parse_hints={"extract": ["Restart Count", "Last State", "Reason", "OOMKilled", "Events"]},
+                purpose="查找并列出目标 Pod，确认其名称和当前状态",
+                parse_hints={"extract": ["NAME", "READY", "STATUS", "RESTARTS"]},
             ),
             SkillStep(
                 step_id="k8s-logs-current",
                 title="获取当前容器日志",
                 command_spec=_generic_exec(
-                    f"kubectl logs {label_flag} -n {ns} --tail=100 --all-containers=true".strip(),
+                    f"kubectl get pods -n {ns} --no-headers 2>/dev/null {pod_filter} | head -5 | awk '{{print $1}}' | xargs -I{{}} kubectl logs {{}} -n {ns} --tail=100 --all-containers=true 2>/dev/null || echo 'No logs available'".strip(),
                     timeout_s=25,
                 ),
                 purpose="定位当前错误日志和异常信息",
@@ -104,7 +105,7 @@ class K8sDiagnosticSkill(DiagnosticSkill):
                 step_id="k8s-logs-previous",
                 title="获取前一次容器日志",
                 command_spec=_generic_exec(
-                    f"kubectl logs {label_flag} -n {ns} --previous --tail=100 --all-containers=true 2>/dev/null || echo 'No previous logs'".strip(),
+                    f"kubectl get pods -n {ns} --no-headers 2>/dev/null {pod_filter} | head -5 | awk '{{print $1}}' | xargs -I{{}} kubectl logs {{}} -n {ns} --previous --tail=100 --all-containers=true 2>/dev/null || echo 'No previous logs'".strip(),
                     timeout_s=25,
                 ),
                 purpose="查看崩溃前的日志，定位崩溃原因",

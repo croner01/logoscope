@@ -1,4 +1,5 @@
 import React from 'react';
+import { Loader2 } from 'lucide-react';
 
 import type { RuntimeCommandEntry } from '../types/view';
 
@@ -13,6 +14,9 @@ const getCommandStatusClassName = (status: string): string => {
   }
   if (normalized === 'failed' || normalized === 'cancelled') {
     return 'border-rose-200 bg-rose-50 text-rose-700';
+  }
+  if (normalized === 'pending') {
+    return 'border-amber-200 bg-amber-50 text-amber-700 animate-pulse';
   }
   return 'border-blue-200 bg-blue-50 text-blue-700';
 };
@@ -42,7 +46,8 @@ const CommandOutputPanel: React.FC<CommandOutputPanelProps> = ({ commandRuns }) 
                 <div className="min-w-0">
                   <div className="text-[11px] font-medium text-slate-800 break-all">{item.command}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
-                    <span className={`inline-flex items-center rounded-full border px-1.5 py-0.5 ${getCommandStatusClassName(item.status)}`}>
+                    <span className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 ${getCommandStatusClassName(item.status)}`}>
+                      {String(item.status || '').trim().toLowerCase() === 'pending' && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
                       {item.status}
                     </span>
                     {item.commandType && <span>type: {item.commandType}</span>}

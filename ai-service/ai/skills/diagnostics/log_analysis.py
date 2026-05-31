@@ -93,15 +93,17 @@ class LogAnalysisDiagnosticSkill(DiagnosticSkill):
     def plan_steps(self, context: SkillContext) -> List[SkillStep]:
         ns = _as_str(context.namespace) or "islap"
         svc = _as_str(context.service_name)
-        label_flag = f"-l app={svc}" if svc else ""
+        # Don't assume pods have app=<svc> label. Use name-based filtering via grep.
+        pod_filter = f"| grep -i {svc}" if svc else ""
 
         steps = [
             SkillStep(
                 step_id="log-tail-current",
                 title="获取当前服务日志",
                 command_spec=_generic_exec(
-                    f"kubectl logs -n {ns} {label_flag} --tail=200 --all-containers=true 2>/dev/null || "
-                    f"kubectl logs -n {ns} {label_flag} --tail=200".strip(),
+                    (f"kubectl get pods -n {ns} --no-headers 2>/dev/null {pod_filter} | head -3 | awk '{{print $1}}' | "
+                     f"xargs -I{{}} kubectl logs {{}} -n {ns} --tail=200 --all-containers=true 2>/dev/null || "
+                     f"echo 'No logs available'").strip(),
                     timeout_s=30,
                 ),
                 purpose="获取完整日志用于分析",
@@ -116,8 +118,9 @@ class LogAnalysisDiagnosticSkill(DiagnosticSkill):
                 step_id="log-context-before",
                 title="获取前序日志上下文",
                 command_spec=_generic_exec(
-                    f"kubectl logs -n {ns} {label_flag} --tail=50 --timestamps=true 2>/dev/null | "
-                    f"head -50 || echo 'No previous logs available'".strip(),
+                    (f"kubectl get pods -n {ns} --no-headers 2>/dev/null {pod_filter} | head -3 | awk '{{print $1}}' | "
+                     f"xargs -I{{}} kubectl logs {{}} -n {ns} --tail=50 --timestamps=true 2>/dev/null | "
+                     f"head -50 || echo 'No previous logs available'").strip(),
                     timeout_s=20,
                 ),
                 purpose="获取异常发生前的日志上下文",

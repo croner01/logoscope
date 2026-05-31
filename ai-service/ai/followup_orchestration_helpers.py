@@ -176,11 +176,18 @@ def _build_k8s_logs_evidence_command(
     window_start_iso: str = "",
 ) -> str:
     target_service = _as_str(service_name).strip() or "query-service"
-    # kubectl logs does NOT support --all-namespaces/-A, so resolve namespace dynamically
-    ns_resolve = "$(kubectl get pods -A -l app=%s -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)" % target_service
+    # Don't assume app= label exists. Discover pod name and namespace by name pattern.
     if window_start_iso:
-        return f"kubectl logs -n {ns_resolve} -l app={target_service} --since-time={window_start_iso} --tail=200"
-    return f"kubectl logs -n {ns_resolve} -l app={target_service} --since=15m --tail=200"
+        return (
+            f"kubectl get pods -A --no-headers 2>/dev/null | grep -Fi {target_service} | head -1 "
+            f"| while read ns pod _; do "
+            f"kubectl logs \"$pod\" -n \"$ns\" --since-time={window_start_iso} --tail=200; done"
+        )
+    return (
+        f"kubectl get pods -A --no-headers 2>/dev/null | grep -Fi {target_service} | head -1 "
+        f"| while read ns pod _; do "
+        f"kubectl logs \"$pod\" -n \"$ns\" --since=15m --tail=200; done"
+    )
 
 
 def _build_clickhouse_query_log_evidence_command(
@@ -487,10 +494,10 @@ def _build_non_executable_command_templates(
             )
             continue
         if any(token in text_blob for token in ["连接池", "pool", "timeout", "配置"]):
-            _append(f"kubectl -A describe pod -l app={service_name or 'query-service'}")
+            _append(f"kubectl get pods -A | grep -Fi {service_name or 'query-service'} | head -5")
             continue
         if any(token in text_blob for token in ["cpu", "内存", "网络", "资源"]):
-            _append(f"kubectl -A top pod -l app={service_name or 'query-service'} --no-headers | head -20")
+            _append(f"kubectl top pod -A --no-headers 2>/dev/null | grep -Fi {service_name or 'query-service'} | head -20")
 
     if not templates:
         _append_context_defaults()
