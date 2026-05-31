@@ -146,6 +146,7 @@ interface AIAnalysisResult {
 interface AIAnalysisResponse extends AIAnalysisResult {
   analysis_method?: string;
   model?: string;
+  requested_model?: string;
   cached?: boolean;
   latency_ms?: number;
   error?: string;
@@ -1838,7 +1839,7 @@ const AIAnalysis: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [sourceLogData, setSourceLogData] = useState<LocationState['logData'] | null>(null);
   const [useLLM, setUseLLM] = useState(true);
-  const [llmInfo, setLLMInfo] = useState<{ method?: string; model?: string; cached?: boolean; latency_ms?: number } | null>(null);
+  const [llmInfo, setLLMInfo] = useState<{ method?: string; model?: string; requested_model?: string; cached?: boolean; latency_ms?: number } | null>(null);
   const [similarCases, setSimilarCases] = useState<SimilarCase[]>([]);
   const [loadingSimilarCases, setLoadingSimilarCases] = useState(false);
   const [selectedSimilarCase, setSelectedSimilarCase] = useState<SimilarCase | null>(null);
@@ -2576,6 +2577,7 @@ const AIAnalysis: React.FC = () => {
     setLLMInfo({
       method: recoveredResult.analysis_method || historySession.analysis_method || 'history',
       model: recoveredResult.model || historySession.llm_model,
+      requested_model: recoveredResult.requested_model,
       cached: recoveredResult.cached,
       latency_ms: recoveredResult.latency_ms,
     });
@@ -2661,6 +2663,7 @@ const AIAnalysis: React.FC = () => {
     setLLMInfo({
       method: recoveredResult.analysis_method || String(historyCase?.llm_metadata?.analysis_method || 'history'),
       model: recoveredResult.model || historyCase.llm_model,
+      requested_model: recoveredResult.requested_model,
       cached: recoveredResult.cached,
       latency_ms: recoveredResult.latency_ms,
     });
@@ -2738,6 +2741,7 @@ const AIAnalysis: React.FC = () => {
     setLLMInfo({
       method: response.analysis_method || fallbackMethod,
       model: response.model,
+      requested_model: response.requested_model,
       cached: response.cached,
       latency_ms: response.latency_ms,
     });
@@ -6893,7 +6897,13 @@ const AIAnalysis: React.FC = () => {
                     <>
                       <BrainCircuit className="w-3.5 h-3.5 text-purple-500" />
                       <span className="text-purple-600 font-medium">LLM</span>
-                      {llmInfo.model && <span className="text-gray-400">({llmInfo.model})</span>}
+                      {llmInfo.model && (
+                        <span className="text-gray-400">
+                          ({llmInfo.requested_model && llmInfo.requested_model !== llmInfo.model
+                            ? `${llmInfo.requested_model} → ${llmInfo.model} ⚠️`
+                            : llmInfo.model})
+                        </span>
+                      )}
                       {llmInfo.cached && <span className="text-green-500">缓存</span>}
                       {llmInfo.latency_ms && <span>{llmInfo.latency_ms}ms</span>}
                     </>
