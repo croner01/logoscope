@@ -73,7 +73,7 @@ class TestGetHost:
 
         _patch_clickhouse_execute.return_value = (
             '{"name":"node-3","host":"10.0.0.3","port":22,"user":"root",'
-            '"key_file":"/etc/ssh-keys/default/id_rsa",'
+            '"key_file":"",'
             '"labels_json":"{}","created_at":"2026-05-30 00:00:00.000",'
             '"updated_at":"2026-05-30 00:00:00.000"}\n'
         )

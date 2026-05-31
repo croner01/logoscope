@@ -58,8 +58,13 @@ export default defineConfig(({ mode }) => {
         // AI Service Runtime V2
         '/api/v2': buildProxy(AI_SERVICE_TARGET),
 
-        // SSH Gateway (host registry)
-        '/ssh-gateway': buildProxy(SSH_GATEWAY_TARGET),
+        // SSH Gateway (host registry) — rewrite /ssh-gateway/* → /*
+        '/ssh-gateway': {
+          target: SSH_GATEWAY_TARGET,
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => path.replace(/^\/ssh-gateway/, ''),
+        },
       },
     },
     build: {

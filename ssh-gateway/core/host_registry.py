@@ -172,7 +172,7 @@ def ensure_schema() -> None:
             host String,
             port UInt16 DEFAULT 22,
             user String DEFAULT 'root',
-            key_file String DEFAULT '/etc/ssh-keys/default/id_rsa',
+            key_file String DEFAULT '',
             private_key String DEFAULT '',
             labels_json String DEFAULT '{{}}',
             created_at DateTime64(3, 'UTC'),
@@ -223,7 +223,7 @@ def register_host(
     host: str,
     port: int = 22,
     user: str = "root",
-    key_file: str = "/etc/ssh-keys/default/id_rsa",
+    key_file: str = "",
     labels: Optional[Dict[str, str]] = None,
     private_key: Optional[str] = None,
 ) -> Dict[str, Any]:

@@ -50,7 +50,7 @@ const EMPTY_FORM: RegisterFormData = {
   host: '',
   port: '22',
   user: 'root',
-  key_file: '/etc/ssh-keys/default/id_rsa',
+  key_file: '',
   private_key: '',
   labels_key: '',
   labels_value: '',

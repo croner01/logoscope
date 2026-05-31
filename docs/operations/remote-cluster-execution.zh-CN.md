@@ -678,7 +678,7 @@ curl -sS -X DELETE http://ssh-gateway:8096/hosts/node-N
 | `host` | string | — | IP 地址或主机名（必填） |
 | `port` | int | 22 | SSH 端口（1-65535） |
 | `user` | string | `root` | SSH 登录用户 |
-| `key_file` | string | `/etc/ssh-keys/default/id_rsa` | 密钥文件路径（与 `private_key` 二选一） |
+| `key_file` | string | ""（空字符串） | 密钥文件路径（与 `private_key` 二选一） |
 | `private_key` | string | null | 粘贴私钥内容（API 不返回此字段） |
 | `labels` | object | null | 自定义标签（K/V） |
 
