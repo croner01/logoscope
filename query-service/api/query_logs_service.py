@@ -409,7 +409,7 @@ def _append_request_id_filter(
     params: Dict[str, Any],
     request_id: Optional[str],
 ) -> None:
-    """Append exact request_id matching across structured attributes fields."""
+    """Append request_id matching across structured attributes and message text."""
     normalized = str(request_id or "").strip()
     if not normalized:
         return
@@ -425,6 +425,7 @@ def _append_request_id_filter(
             "JSONExtractString(attributes_json, 'trace', 'request_id') = {request_id:String}",
         ]
     )
+    clauses.append("message ILIKE concat('%', {request_id:String}, '%')")
     where_conditions.append(f"({' OR '.join(clauses)})")
     params["request_id"] = normalized
 

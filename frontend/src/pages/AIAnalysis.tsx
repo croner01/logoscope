@@ -2911,10 +2911,15 @@ const AIAnalysis: React.FC = () => {
     return [...tracebackErrors, ...otherErrors, ...others].slice(0, CROSS_COMPONENT_PULL_LIMIT);
   };
 
+  const formatLocalTime = (d: Date): string => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  };
+
   const formatCrossPullEvent = (event: Event): string => {
     const timestampRaw = String(event.timestamp || '').trim();
     const parsed = timestampRaw ? new Date(timestampRaw) : new Date();
-    const timestamp = Number.isNaN(parsed.getTime()) ? timestampRaw : parsed.toISOString();
+    const timestamp = Number.isNaN(parsed.getTime()) ? timestampRaw : formatLocalTime(parsed);
     const level = String(event.level || 'INFO').toUpperCase();
     const service = String(event.service_name || 'unknown');
     const message = compactTracebackForDraft(String(event.message || ''));
@@ -3001,6 +3006,9 @@ const AIAnalysis: React.FC = () => {
 
     const anchorIso = resolveAnchorTimestampForCrossPull();
     const { start_time, end_time } = buildCrossPullTimeWindow(anchorIso);
+    if (typeof console !== 'undefined') {
+      console.log('[CrossPull] extracted:', { requestId, traceId, sourceService, targetService, sourceLogDataTimestamp: sourceLogData?.timestamp, anchorIso, start_time, end_time, baseText: baseText.slice(0, 200) });
+    }
     const queryTasks: Array<{ label: string; task: Promise<{ events: Event[] }> }> = [];
 
     if (requestId) {
@@ -3083,6 +3091,28 @@ const AIAnalysis: React.FC = () => {
         failedReasons.push(parseCrossPullTaskError(label, item.reason));
       }
     });
+
+    // Phase 2: ID 查询结果只来自一个服务时，自动在相同时间窗口内扫描全部服务的 ERROR/FATAL 日志
+    if (fetched.length > 0) {
+      const uniqueServices = new Set(fetched.map((e) => String(e.service_name || '').trim()).filter(Boolean));
+      if (uniqueServices.size <= 1) {
+        const expandResult = await api.getEvents({
+          levels: 'ERROR,FATAL',
+          start_time,
+          end_time,
+          limit: 240,
+          exclude_health_check: true,
+        }).catch(() => null);
+        if (expandResult && Array.isArray(expandResult.events)) {
+          const existingIds = new Set(fetched.map((e) => e.id));
+          for (const event of expandResult.events) {
+            if (!existingIds.has(event.id)) {
+              fetched.push(event);
+            }
+          }
+        }
+      }
+    }
 
     const deduped = dedupeCrossPullEvents(fetched);
     const selectedEvents = prioritizeCrossPullEvents(deduped);
