@@ -237,12 +237,18 @@ def register_host(
     encoded_key = _encode_private_key(private_key)
     if encoded_key and _logger.isEnabledFor(logging.DEBUG):
         _logger.debug("Storing private_key for host '%s' (%s)", name, _mask_key_preview(private_key or ""))
+    # If a private_key is provided and no explicit key_file was given,
+    # store empty key_file to avoid persisting the misleading default path.
+    if encoded_key and not key_file:
+        resolved_key_file = ""
+    else:
+        resolved_key_file = as_str(key_file) or "/etc/ssh-keys/default/id_rsa"
     record = {
         "name": name,
         "host": host,
         "port": max(1, min(65535, int(port))),
         "user": as_str(user) or "root",
-        "key_file": as_str(key_file) or "/etc/ssh-keys/default/id_rsa",
+        "key_file": resolved_key_file,
         "private_key": encoded_key,
         "labels_json": json.dumps(labels if isinstance(labels, dict) else {}, ensure_ascii=False),
         "created_at": now,

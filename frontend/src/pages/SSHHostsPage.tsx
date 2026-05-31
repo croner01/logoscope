@@ -139,12 +139,14 @@ const SSHHostsPage: React.FC = () => {
 
     setRegistering(true);
     try {
+      const kf = form.key_file.trim();
       await api.registerHost({
         name,
         host,
         port: parseInt(form.port, 10) || 22,
         user: form.user.trim() || 'root',
-        key_file: form.key_file.trim() || '/etc/ssh-keys/default/id_rsa',
+        // Only send key_file when explicitly provided (private_key takes priority)
+        key_file: kf || undefined,
         private_key: form.private_key.trim() || undefined,
         labels: Object.keys(labels).length > 0 ? labels : undefined,
       });
@@ -303,8 +305,8 @@ const SSHHostsPage: React.FC = () => {
                       <td className="py-3 px-4" style={{ color: 'var(--brand-primary)' }}>{record.host}</td>
                       <td className="py-3 px-4" style={{ color: 'var(--app-text)' }}>{record.port}</td>
                       <td className="py-3 px-4" style={{ color: 'var(--app-text)' }}>{record.user}</td>
-                      <td className="py-3 px-4 max-w-[200px] truncate" style={{ color: 'var(--app-text-muted)' }} title={record.key_file}>
-                        <code className="text-xs">{record.key_file}</code>
+                      <td className="py-3 px-4 max-w-[200px] truncate" style={{ color: 'var(--app-text-muted)' }} title={record.key_file !== '-' ? record.key_file : ''}>
+                        <code className="text-xs">{record.key_file === '-' ? <span style={{ color: 'var(--app-text-subtle)' }}>-</span> : record.key_file}</code>
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex flex-wrap gap-1">
@@ -414,6 +416,9 @@ const SSHHostsPage: React.FC = () => {
                   onChange={(e) => setForm((p) => ({ ...p, key_file: e.target.value }))}
                   className="input"
                 />
+                <p className="text-[10px] mt-1" style={{ color: 'var(--app-text-subtle)' }}>
+                  与私钥内容二选一。填写路径时需密钥文件已在 Pod 上存在（Secret 挂载方式）
+                </p>
               </div>
 
               <div>
@@ -423,13 +428,21 @@ const SSHHostsPage: React.FC = () => {
                 </label>
                 <textarea
                   value={form.private_key}
-                  onChange={(e) => setForm((p) => ({ ...p, private_key: e.target.value }))}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setForm((p) => ({
+                      ...p,
+                      private_key: val,
+                      // 填入私钥内容时自动清空密钥文件路径（二选一）
+                      key_file: val.trim() ? '' : p.key_file,
+                    }));
+                  }}
                   rows={6}
                   className="input font-mono text-xs"
                   placeholder={`-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----`}
                 />
                 <p className="text-[10px] mt-1" style={{ color: 'var(--app-text-subtle)' }}>
-                  粘贴私钥文件内容后，SSH Gateway 将写入临时文件建立连接（不会持久化到磁盘）
+                  粘贴私钥内容后，SSH Gateway 将写入临时文件建立连接，无需提供密钥文件路径
                 </p>
               </div>
 

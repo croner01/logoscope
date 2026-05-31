@@ -3940,7 +3940,7 @@ export const api = {
     key_file?: string;
     private_key?: string;
     labels?: Record<string, string>;
-  }) => apiClient.registerHost(params),
+  }) => apiClient.registerHost(params as Parameters<typeof apiClient.registerHost>[0]),
   deleteHost: (name: string) => apiClient.deleteHost(name),
 };
 
