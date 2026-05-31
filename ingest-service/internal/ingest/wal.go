@@ -25,40 +25,40 @@ type queueWAL struct {
 	opsSinceSync int
 }
 
-func openQueueWAL(cfg Config) (*queueWAL, []queueItem, uint64, error) {
+func openQueueWAL(cfg Config) (*queueWAL, []queueItem, uint64, int, error) {
 	if err := os.MkdirAll(cfg.WALDir, 0o755); err != nil {
-		return nil, nil, 0, fmt.Errorf("create wal dir failed: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("create wal dir failed: %w", err)
 	}
 
 	path := filepath.Join(cfg.WALDir, cfg.WALFileName)
-	pendingItems, maxItemID, err := readPendingFromWAL(path)
+	pendingItems, maxItemID, truncated, err := readPendingFromWAL(path)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, 0, err
 	}
 
 	if err := rewriteWAL(path, pendingItems); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, truncated, err
 	}
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("open wal for append failed: %w", err)
+		return nil, nil, 0, truncated, fmt.Errorf("open wal for append failed: %w", err)
 	}
 
 	return &queueWAL{
 		path:      path,
 		file:      file,
 		syncEvery: maxInt(1, cfg.WALSyncEvery),
-	}, pendingItems, maxItemID, nil
+	}, pendingItems, maxItemID, truncated, nil
 }
 
-func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
+func readPendingFromWAL(path string) ([]queueItem, uint64, int, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []queueItem{}, 0, nil
+			return []queueItem{}, 0, 0, nil
 		}
-		return nil, 0, fmt.Errorf("open wal failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("open wal failed: %w", err)
 	}
 	defer file.Close()
 
@@ -79,15 +79,11 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 
 		record := walRecord{}
 		if err := json.Unmarshal(line, &record); err != nil {
-			// If this is the last line (no more data after it), it's likely a
-			// truncated write from a crash (write(2) is not atomic with respect
-			// to process death). Skip the incomplete line and continue; the
-			// caller's rewriteWAL will produce a clean file.
 			if !scanner.Scan() && scanner.Err() == nil {
 				truncated = true
 				break
 			}
-			return nil, 0, fmt.Errorf("parse wal line %d failed: %w", lineNumber, err)
+			return nil, 0, 0, fmt.Errorf("parse wal line %d failed: %w", lineNumber, err)
 		}
 		if record.ID > maxItemID {
 			maxItemID = record.ID
@@ -96,7 +92,7 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 		switch record.Op {
 		case "add":
 			if record.ID == 0 {
-				return nil, 0, fmt.Errorf("invalid wal add id on line %d", lineNumber)
+				return nil, 0, 0, fmt.Errorf("invalid wal add id on line %d", lineNumber)
 			}
 			if _, exists := pendingMap[record.ID]; !exists {
 				orderedIDs = append(orderedIDs, record.ID)
@@ -110,13 +106,15 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 		case "ack":
 			delete(pendingMap, record.ID)
 		default:
-			return nil, 0, fmt.Errorf("unknown wal op on line %d: %s", lineNumber, record.Op)
+			return nil, 0, 0, fmt.Errorf("unknown wal op on line %d: %s", lineNumber, record.Op)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, fmt.Errorf("scan wal failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("scan wal failed: %w", err)
 	}
+	var truncatedI64 int
 	if truncated {
+		truncatedI64 = 1
 		log.Printf("[ingest-go] wal: ignoring truncated line %d, file will be cleaned up on rewrite", lineNumber)
 	}
 
@@ -126,9 +124,8 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 			pendingItems = append(pendingItems, item)
 		}
 	}
-	return pendingItems, maxItemID, nil
+	return pendingItems, maxItemID, truncatedI64, nil
 }
-
 func rewriteWAL(path string, pendingItems []queueItem) error {
 	tempPath := path + ".tmp"
 	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)

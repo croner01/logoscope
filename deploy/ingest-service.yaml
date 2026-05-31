@@ -118,11 +118,11 @@ spec:
           value: "info"
         # 内存队列配置（降级方案）
         - name: MEMORY_QUEUE_MAX_SIZE
-          value: "40000"  # prod 参考: 12000
+          value: "10000"  # prod 参考: 5000
         - name: MEMORY_QUEUE_FLUSH_BATCH_SIZE
           value: "1000"
         - name: MEMORY_QUEUE_DROP_OLDEST_WHEN_FULL
-          value: "false"
+          value: "true"
         volumeMounts:
         - name: ingest-wal
           mountPath: /var/lib/ingest/wal

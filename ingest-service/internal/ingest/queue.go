@@ -46,6 +46,7 @@ type queueStats struct {
 	WALAppended              int64
 	WALAcked                 int64
 	WALReplayRecovered       int64
+	WALTruncated             int64
 	WALWriteFailures         int64
 	LastError                string
 }
@@ -82,10 +83,11 @@ func NewQueueWriter(cfg Config) *QueueWriter {
 func (w *QueueWriter) Init() error {
 	recoveredCount := 0
 	if w.cfg.WALEnabled {
-		wal, replayItems, maxItemID, err := openQueueWAL(w.cfg)
+		wal, replayItems, maxItemID, truncated, err := openQueueWAL(w.cfg)
 		if err != nil {
 			return err
 		}
+		w.stats.WALTruncated += int64(truncated)
 
 		w.mu.Lock()
 		w.wal = wal
@@ -854,6 +856,7 @@ func (w *QueueWriter) GetStats() map[string]any {
 		"wal_appended":                w.stats.WALAppended,
 		"wal_acked":                   w.stats.WALAcked,
 		"wal_replay_recovered":        w.stats.WALReplayRecovered,
+		"wal_truncated":               w.stats.WALTruncated,
 		"wal_write_failures":          w.stats.WALWriteFailures,
 		"last_error":                  nullIfEmpty(w.stats.LastError),
 		"kafka_connected":             w.kafkaConnected,
@@ -904,6 +907,9 @@ func (w *QueueWriter) RenderPrometheusMetrics() string {
 		"# HELP ingest_queue_wal_acked_total Total WAL ack records appended.",
 		"# TYPE ingest_queue_wal_acked_total counter",
 		fmt.Sprintf("ingest_queue_wal_acked_total %v", stats["wal_acked"]),
+		"# HELP ingest_queue_wal_truncated_total Total WAL truncated lines skipped on replay.",
+		"# TYPE ingest_queue_wal_truncated_total counter",
+		fmt.Sprintf("ingest_queue_wal_truncated_total %v", stats["wal_truncated"]),
 		"# HELP ingest_queue_wal_write_failures_total Total WAL write failures.",
 		"# TYPE ingest_queue_wal_write_failures_total counter",
 		fmt.Sprintf("ingest_queue_wal_write_failures_total %v", stats["wal_write_failures"]),
