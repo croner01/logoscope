@@ -110,10 +110,14 @@ def _is_low_trust_answer_command(action_dict: Dict[str, Any]) -> bool:
     return "answer_command_requires_structured_action" in reason
 
 
-def _infer_query_template_command_spec(command: str) -> tuple[str, Dict[str, Any]]:
+def _infer_query_template_command_spec(
+    command: str,
+    analysis_context: Optional[Dict[str, Any]] = None,
+) -> tuple[str, Dict[str, Any]]:
     """
     将模板命令推断为可回填的 command_spec 草稿。
     仅返回只读 query 命令，避免把高风险或语义不完整命令带入下一轮。
+    根据命令前缀自动注入 target_kind/target_identity，提高模板可用性。
     """
     normalized_command = _normalize_followup_command_line(command)
     if not _as_str(normalized_command):
@@ -124,13 +128,31 @@ def _infer_query_template_command_spec(command: str) -> tuple[str, Dict[str, Any
         or _as_str(command_meta.get("command_type")).strip().lower() != "query"
     ):
         return "", {}
+
+    # 根据命令类型推断 target_kind / target_identity，在 compile 前注入。
+    # 仅注入可确定的字段：当 context 中 namespace 可用时注入 kubectl identity，
+    # 否则交由 compile 从命令本身的 -n 等标志中推断，避免与命令硬编码的值冲突。
+    args: Dict[str, Any] = {
+        "command": normalized_command,
+        "timeout_s": 30,
+    }
+    lower_cmd = normalized_command.lower()
+    if lower_cmd.startswith("kubectl"):
+        args["target_kind"] = "k8s_cluster"
+        ctx = analysis_context if isinstance(analysis_context, dict) else {}
+        ns = _as_str(ctx.get("namespace") or ctx.get("service_namespace")).strip()
+        if ns:
+            args["target_identity"] = f"namespace:{ns}"
+        # 无上下文 namespace 时不设 target_identity，由 compile 从 -n 标志推断
+    elif "clickhouse" in lower_cmd:
+        args["target_kind"] = "clickhouse_cluster"
+        args["target_identity"] = "database:logs"
+    # else: 其他命令由 compile 内部自动推断
+
     compiled = compile_followup_command_spec(
         {
             "tool": "generic_exec",
-            "args": {
-                "command": normalized_command,
-                "timeout_s": 30,
-            },
+            "args": args,
         }
     )
     if not bool(compiled.get("ok")):
@@ -422,7 +444,7 @@ def _build_non_executable_query_command_hints(
             if _is_low_trust_answer_command(action_dict):
                 command = ""
             else:
-                template_command, _ = _infer_query_template_command_spec(command)
+                template_command, _ = _infer_query_template_command_spec(command, analysis_context=analysis_context)
                 if template_command:
                     _append_hint(template_command, "来自当前计划但缺少可执行结构化参数")
                     continue
@@ -1144,6 +1166,56 @@ def _build_followup_actions(
     return actions[:safe_max_items]
 
 
+def _prefill_command_spec(
+    action: Dict[str, Any],
+    analysis_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """自动补全 command_spec 中缺失的 target_kind / target_identity / timeout_s。
+
+    仅在字段完全为空时注入，不覆盖 AI 已填写的值。
+    """
+    spec = action.get("command_spec")
+    if not isinstance(spec, dict):
+        return action
+    args = spec.get("args")
+    if not isinstance(args, dict):
+        args = {}
+        spec["args"] = args
+
+    has_target_kind = bool(_as_str(args.get("target_kind") or spec.get("target_kind")).strip())
+    has_target_identity = bool(_as_str(args.get("target_identity") or spec.get("target_identity")).strip())
+
+    # 推断 target_kind
+    if not has_target_kind:
+        command = _as_str(args.get("command") or spec.get("command")).lower()
+        if "kubectl" in command:
+            args["target_kind"] = "k8s_cluster"
+        elif "clickhouse" in command:
+            args["target_kind"] = "clickhouse_cluster"
+        else:
+            args["target_kind"] = "runtime_node"
+
+    resolved_target_kind = _as_str(args.get("target_kind") or spec.get("target_kind")).strip()
+
+    # 推断 target_identity
+    if not has_target_identity:
+        if resolved_target_kind == "k8s_cluster":
+            ctx = analysis_context if isinstance(analysis_context, dict) else {}
+            ns = _as_str(ctx.get("namespace") or ctx.get("service_namespace")).strip() or "default"
+            args["target_identity"] = f"namespace:{ns}"
+        elif resolved_target_kind == "clickhouse_cluster":
+            args["target_identity"] = "database:logs"
+        else:
+            args["target_identity"] = "runtime:local"
+
+    # 补全 timeout_s（默认 30s）
+    if not args.get("timeout_s") and not spec.get("timeout_s"):
+        args["timeout_s"] = 30
+
+    action["command_spec"] = spec
+    return action
+
+
 def _build_followup_react_loop(
     *,
     actions: List[Dict[str, Any]],
@@ -1298,6 +1370,10 @@ def _build_followup_react_loop(
         command_run_id = _as_str(obs_dict.get("command_run_id")).strip()
         if command_run_id and command_run_id not in full_evidence_by_run_id:
             full_evidence_by_run_id[command_run_id] = obs_dict
+
+    # Pre-fill missing command_spec fields before compilation/blocking decisions
+    for action in safe_actions:
+        _prefill_command_spec(action, analysis_context)
 
     plan_total = len(safe_actions)
     query_total = sum(1 for item in safe_actions if _as_str(item.get("command_type")) == "query")
@@ -1551,7 +1627,7 @@ def _build_followup_react_loop(
         )
         for line in hint_lines:
             suggested_command = _extract_command_from_hint_line(line)
-            _, suggested_command_spec = _infer_query_template_command_spec(suggested_command)
+            _, suggested_command_spec = _infer_query_template_command_spec(suggested_command, analysis_context=analysis_context)
             template_summary = line
             template_disposition = "structured_spec_required"
             template_message = "generated_non_executable_query_template"
