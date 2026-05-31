@@ -15,6 +15,7 @@ const AIRuntimePlayground = lazy(() => import('./pages/AIRuntimePlayground'));
 const AICaseManagement = lazy(() => import('./pages/AICaseManagement'));
 const LabelsDiscovery = lazy(() => import('./pages/LabelsDiscovery'));
 const Settings = lazy(() => import('./pages/Settings'));
+const SSHHosts = lazy(() => import('./pages/SSHHostsPage'));
 
 const RouteFallback: React.FC = () => (
   <div className="flex h-full min-h-[280px] items-center justify-center px-6">
@@ -46,6 +47,7 @@ const App: React.FC = () => {
           <Route path="/ai-cases" element={renderRoute(<AICaseManagement />)} />
           <Route path="/labels" element={renderRoute(<LabelsDiscovery />)} />
           <Route path="/settings" element={renderRoute(<Settings />)} />
+          <Route path="/ssh-hosts" element={renderRoute(<SSHHosts />)} />
         </Route>
       </Routes>
     </BrowserRouter>

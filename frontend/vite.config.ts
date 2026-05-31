@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => {
   const TOPOLOGY_SERVICE_TARGET = env.VITE_TOPOLOGY_SERVICE_TARGET || 'http://localhost:8082';
   const SEMANTIC_ENGINE_TARGET = env.VITE_SEMANTIC_ENGINE_TARGET || 'http://localhost:8080';
   const AI_SERVICE_TARGET = env.VITE_AI_SERVICE_TARGET || 'http://localhost:8090';
+  const SSH_GATEWAY_TARGET = env.VITE_SSH_GATEWAY_TARGET || 'http://localhost:8096';
 
   return {
     plugins: [react()],
@@ -56,6 +57,14 @@ export default defineConfig(({ mode }) => {
 
         // AI Service Runtime V2
         '/api/v2': buildProxy(AI_SERVICE_TARGET),
+
+        // SSH Gateway (host registry) — rewrite /ssh-gateway/* → /*
+        '/ssh-gateway': {
+          target: SSH_GATEWAY_TARGET,
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => path.replace(/^\/ssh-gateway/, ''),
+        },
       },
     },
     build: {

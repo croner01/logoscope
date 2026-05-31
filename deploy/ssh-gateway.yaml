@@ -35,6 +35,19 @@ spec:
               value: "262144"
             - name: SSH_GATEWAY_HOSTS_CONFIG
               value: "/etc/ssh-hosts/config.yaml"
+            # ClickHouse host registry (optional — enables dynamic host registration)
+            - name: SSH_GATEWAY_HOST_REGISTRY_CH_URL
+              value: "http://clickhouse:8123"
+            - name: SSH_GATEWAY_HOST_REGISTRY_CH_DATABASE
+              value: "logs"
+            - name: SSH_GATEWAY_HOST_REGISTRY_CH_TABLE
+              value: "ssh_host_registry"
+            - name: SSH_GATEWAY_HOST_REGISTRY_CH_USER
+              value: "default"
+            - name: SSH_GATEWAY_HOST_REGISTRY_CH_PASSWORD
+              value: ""
+            - name: SSH_GATEWAY_HOST_REGISTRY_CH_FAIL_OPEN
+              value: "true"
           volumeMounts:
             - name: ssh-hosts-config
               mountPath: /etc/ssh-hosts

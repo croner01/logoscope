@@ -8,6 +8,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _mock_clickhouse():
+    """Mock ClickHouse HTTP calls globally to avoid real CH connections."""
+    with patch("core.host_registry._clickhouse_execute") as mock_ch:
+        mock_ch.return_value = ""
+        yield
+
+
 @pytest.fixture
 def app():
     from app import app as _app

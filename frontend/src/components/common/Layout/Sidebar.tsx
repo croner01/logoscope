@@ -16,6 +16,7 @@ import {
   Settings,
   Activity,
   FlaskConical,
+  Server,
   ChevronLeft,
   ChevronRight,
   User,
@@ -64,6 +65,7 @@ const navGroups: NavGroup[] = [
   {
     label: '系统',
     items: [
+      { path: '/ssh-hosts', label: 'SSH 主机管理', icon: <Server size={16} /> },
       { path: '/settings', label: '设置', icon: <Settings size={16} /> },
     ],
   },
