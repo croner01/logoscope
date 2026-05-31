@@ -26,6 +26,7 @@ for _candidate in _SHARED_LIB_CANDIDATES:
 
 from config import config
 from api.ingest import router as ingest_router
+from api.upload import router as upload_router
 from platform_kernel.fastapi_kernel import install_common_fastapi_handlers
 from utils.logging_config import get_logger, setup_logging
 
@@ -67,6 +68,7 @@ unhandled_exception_handler = _common_handlers["unhandled_exception_handler"]
 
 # 注册路由
 app.include_router(ingest_router, tags=["ingest"])
+app.include_router(upload_router, tags=["upload"])
 
 
 @app.get("/health")
