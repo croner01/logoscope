@@ -3759,6 +3759,15 @@ export class APIClient {
   }
 
   /**
+   * 获取指定 provider 的可用模型列表
+   */
+  async getLLMAvailableModels(provider: string): Promise<{ provider: string; models: string[] }> {
+    const params = new URLSearchParams({ provider });
+    const resp = await this.client.get(`${API_PREFIX}/ai/llm/models?${params.toString()}`);
+    return resp.data as { provider: string; models: string[] };
+  }
+
+  /**
    * 创建拓扑快照
    */
   async createTopologySnapshot(params: { time_window?: string; namespace?: string }): Promise<{ id: string; created_at: string }> {
@@ -3962,6 +3971,7 @@ export const api = {
   getLLMRuntimeStatus: () => apiClient.getLLMRuntimeStatus(),
   validateLLMRuntimeConfig: (params: LooseAny) => apiClient.validateLLMRuntimeConfig(params),
   updateLLMRuntimeConfig: (params: LooseAny) => apiClient.updateLLMRuntimeConfig(params),
+  getLLMAvailableModels: (provider: string) => apiClient.getLLMAvailableModels(provider),
   createTopologySnapshot: (params: LooseAny) => apiClient.createTopologySnapshot(params),
   getTopologySnapshots: (params?: LooseAny) => apiClient.getTopologySnapshots(params),
   clearCache: (pattern?: string) => apiClient.clearCache(pattern),

@@ -480,6 +480,8 @@ const Settings: React.FC = () => {
   const [llmValidateResult, setLlmValidateResult] = useState<LLMValidateResult | null>(null);
   const [kbForm, setKbForm] = useState<KBRemoteRuntimeForm>(DEFAULT_KB_FORM);
   const [kbValidateResult, setKbValidateResult] = useState<KBValidateResult | null>(null);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
 
   const fetchRuntimeStatus = useCallback(async (showNotice = false) => {
     setRefreshingLLMRuntime(true);
@@ -503,6 +505,26 @@ const Settings: React.FC = () => {
       }
     } finally {
       setRefreshingLLMRuntime(false);
+    }
+  }, []);
+
+  const loadModelList = useCallback(async (provider: string) => {
+    if (!provider) {
+      setAvailableModels([]);
+      return;
+    }
+    setLoadingModels(true);
+    try {
+      const data = await api.getLLMAvailableModels(provider);
+      if (data?.models && Array.isArray(data.models)) {
+        setAvailableModels(data.models);
+      } else {
+        setAvailableModels([]);
+      }
+    } catch {
+      setAvailableModels([]);
+    } finally {
+      setLoadingModels(false);
     }
   }, []);
 
@@ -623,6 +645,12 @@ const Settings: React.FC = () => {
   useEffect(() => {
     fetchSettingsData({ initial: true });
   }, [fetchSettingsData]);
+
+  useEffect(() => {
+    if (llmForm.provider) {
+      loadModelList(llmForm.provider);
+    }
+  }, [llmForm.provider, loadModelList]);
 
   const handleRefreshAll = async () => {
     await fetchSettingsData({ initial: false });
@@ -1404,7 +1432,11 @@ const Settings: React.FC = () => {
                   <label className="block text-xs font-medium mb-1" style={{ color: 'var(--app-text-muted)' }}>Provider</label>
                   <select
                     value={llmForm.provider}
-                    onChange={(e) => setLlmForm((prev) => ({ ...prev, provider: e.target.value }))}
+                    onChange={(e) => {
+                      const newProvider = e.target.value;
+                      setLlmForm((prev) => ({ ...prev, provider: newProvider }));
+                      loadModelList(newProvider);
+                    }}
                     className="input"
                   >
                     {(llmRuntime.supported_providers.length > 0
@@ -1422,8 +1454,15 @@ const Settings: React.FC = () => {
                     value={llmForm.model}
                     onChange={(e) => setLlmForm((prev) => ({ ...prev, model: e.target.value }))}
                     placeholder="例如: gpt-4o-mini / claude-3-5-sonnet"
+                    list="llm-model-suggestions"
                     className="input"
                   />
+                  <datalist id="llm-model-suggestions">
+                    {availableModels.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                  {loadingModels && <span className="text-xs text-gray-400 ml-2">加载中...</span>}
                 </div>
 
                 <div>
