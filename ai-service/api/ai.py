@@ -35,7 +35,7 @@ from ai.followup_command import (
     _validate_requested_followup_command,
 )
 from ai.langchain_runtime import run_followup_langchain
-from ai.llm_service import get_llm_service, reset_llm_service
+from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
 from ai.knowledge_provider import get_knowledge_gateway, shutdown_knowledge_gateway, reload_knowledge_gateway
 from ai.followup_prompt_helpers import (
     _build_followup_planner_prompt,
@@ -4365,6 +4365,18 @@ async def analyze_trace_llm(request: LLMTraceAnalyzeRequest) -> Dict[str, Any]:
 async def get_llm_runtime_status() -> Dict[str, Any]:
     """获取 LLM 运行时状态与预留配置契约。"""
     return _build_llm_runtime_status()
+
+
+@router.get("/llm/models")
+async def get_llm_available_models(provider: str = "") -> Dict[str, Any]:
+    """
+    获取指定 provider 的可用模型列表。
+    若未指定 provider，返回所有 provider 的模型字典。
+    """
+    if provider:
+        models = get_provider_models(provider)
+        return {"provider": provider.lower(), "models": models}
+    return {"models": PROVIDER_MODELS}
 
 
 @router.post("/llm/runtime/validate")
