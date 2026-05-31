@@ -27,7 +27,6 @@ class Config(BaseServiceConfig):
             default_port=8080,
             enable_clickhouse=False,
             enable_neo4j=False,
-            enable_redis=True,
             warn_if_empty_neo4j_password=False,
         )
 
