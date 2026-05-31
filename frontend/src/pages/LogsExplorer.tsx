@@ -29,11 +29,13 @@ import { extractEventRequestIds, extractEventTraceIds } from '../utils/logCorrel
 import { copyTextToClipboard } from '../utils/clipboard';
 import { formatTime } from '../utils/formatters';
 import { exportLogsToCSV, exportToJSON, generateExportFilename } from '../utils/export';
+import UploadDialog from '../components/logs/UploadDialog';
 import { resolveCanonicalServiceName } from '../utils/serviceName';
 import {
   Search,
   RefreshCw,
   Download,
+  Upload,
   X,
   Copy,
   ChevronLeft,
@@ -814,6 +816,7 @@ const LogsExplorer: React.FC = () => {
   const [excludeHealthCheck, setExcludeHealthCheck] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
   const [pagedEvents, setPagedEvents] = useState<LogEvent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [anchorTime, setAnchorTime] = useState<string | null>(null);
@@ -2844,6 +2847,16 @@ const LogsExplorer: React.FC = () => {
               <RefreshCw className="w-4 h-4" />
             </button>
 
+            {/* 上传按钮 */}
+            <button
+              onClick={() => setShowUploadDialog(true)}
+              className="btn btn-ghost flex items-center gap-1.5 px-3 py-2 text-sm"
+              title="上传离线日志"
+            >
+              <Upload className="w-4 h-4" />
+              <span className="text-sm">上传</span>
+            </button>
+
             {/* 导出按钮 */}
             <div className="relative">
               <button
@@ -3494,6 +3507,18 @@ const LogsExplorer: React.FC = () => {
       {isResizing && (
         <div className="fixed inset-0 z-50 cursor-col-resize" />
       )}
+
+      <UploadDialog
+        open={showUploadDialog}
+        onClose={() => setShowUploadDialog(false)}
+        onSuccess={() => {
+          if (isPatternMode) {
+            refetchAggregated();
+          } else {
+            refetch();
+          }
+        }}
+      />
     </div>
   );
 };
