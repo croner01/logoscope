@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -68,6 +69,7 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 	pendingMap := make(map[uint64]queueItem)
 	var maxItemID uint64
 	lineNumber := 0
+	truncated := false
 	for scanner.Scan() {
 		lineNumber++
 		line := scanner.Bytes()
@@ -77,6 +79,14 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 
 		record := walRecord{}
 		if err := json.Unmarshal(line, &record); err != nil {
+			// If this is the last line (no more data after it), it's likely a
+			// truncated write from a crash (write(2) is not atomic with respect
+			// to process death). Skip the incomplete line and continue; the
+			// caller's rewriteWAL will produce a clean file.
+			if !scanner.Scan() && scanner.Err() == nil {
+				truncated = true
+				break
+			}
 			return nil, 0, fmt.Errorf("parse wal line %d failed: %w", lineNumber, err)
 		}
 		if record.ID > maxItemID {
@@ -105,6 +115,9 @@ func readPendingFromWAL(path string) ([]queueItem, uint64, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, 0, fmt.Errorf("scan wal failed: %w", err)
+	}
+	if truncated {
+		log.Printf("[ingest-go] wal: ignoring truncated line %d, file will be cleaned up on rewrite", lineNumber)
 	}
 
 	pendingItems := make([]queueItem, 0, len(pendingMap))
