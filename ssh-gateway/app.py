@@ -13,9 +13,20 @@ from typing import Any, Dict, Optional
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
 app = FastAPI(title="ssh-gateway", version="1.0.0")
+
+# CORS — allow all origins since this is an internal cluster service
+# proxied through Vite / Nginx; needed for OPTIONS preflight from
+# frontend development server.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Optional: host registry management API (ClickHouse-backed)
 try:
