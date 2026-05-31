@@ -4,6 +4,7 @@ Follow-up session/history helper functions.
 Extracted from `api/ai.py` to reduce orchestration file size.
 """
 
+import os
 import uuid
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -78,6 +79,10 @@ def _build_followup_session_seed(
 ) -> Dict[str, Any]:
     result_payload = analysis_context.get("result")
     normalized_result = result_payload if isinstance(result_payload, dict) else {}
+    # 优先使用当前运行时配置的模型，避免从历史会话继承旧模型名
+    inherited_model = _as_str((analysis_context.get("llm_info") or {}).get("model"))
+    current_model = _as_str(os.getenv("LLM_MODEL")).strip()
+    effective_model = current_model or inherited_model
     return {
         "analysis_type": _as_str(analysis_context.get("analysis_type"), "log"),
         "service_name": _as_str(analysis_context.get("service_name")),
@@ -89,7 +94,7 @@ def _build_followup_session_seed(
             "raw": normalized_result,
         },
         "analysis_method": _as_str((analysis_context.get("llm_info") or {}).get("method")),
-        "llm_model": _as_str((analysis_context.get("llm_info") or {}).get("model")),
+        "llm_model": effective_model,
         "llm_provider": _as_str(llm_provider),
     }
 
