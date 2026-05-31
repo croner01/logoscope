@@ -237,12 +237,10 @@ def register_host(
     encoded_key = _encode_private_key(private_key)
     if encoded_key and _logger.isEnabledFor(logging.DEBUG):
         _logger.debug("Storing private_key for host '%s' (%s)", name, _mask_key_preview(private_key or ""))
-    # If a private_key is provided and no explicit key_file was given,
-    # store empty key_file to avoid persisting the misleading default path.
-    if encoded_key and not key_file:
-        resolved_key_file = ""
-    else:
-        resolved_key_file = as_str(key_file) or "/etc/ssh-keys/default/id_rsa"
+    # Store empty key_file when private_key is provided,
+    # to avoid persisting a misleading default path.
+    # When key_file is explicitly given (no private_key), use it as-is.
+    resolved_key_file = as_str(key_file) if key_file else ""
     record = {
         "name": name,
         "host": host,
@@ -326,12 +324,13 @@ def _normalize_host_row(row: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         labels = {}
     pk_b64 = as_str(row.get("private_key", ""))
+    raw_key_file = row.get("key_file")
     return {
         "name": as_str(row.get("name")),
         "host": as_str(row.get("host")),
         "port": int(row.get("port", 22)),
         "user": as_str(row.get("user"), "root"),
-        "key_file": as_str(row.get("key_file"), "/etc/ssh-keys/default/id_rsa"),
+        "key_file": as_str(raw_key_file) if raw_key_file is not None else "",
         "private_key_b64": pk_b64,
         "has_private_key": bool(pk_b64),
         "labels": labels if isinstance(labels, dict) else {},

@@ -101,12 +101,13 @@ async def unregister_host_by_name(name: str):
 
 def _record_to_response(record: Dict[str, Any]) -> HostResponse:
     labels_raw = record.get("labels") if isinstance(record.get("labels"), dict) else {}
+    kf = record.get("key_file") or ""
     return HostResponse(
         name=record.get("name", ""),
         host=record.get("host", ""),
         port=int(record.get("port", 22)),
         user=record.get("user", "root"),
-        key_file=record.get("key_file", "") or "-",
+        key_file=kf if kf else "-",
         labels=labels_raw,
         created_at=record.get("created_at", ""),
         updated_at=record.get("updated_at", ""),

@@ -107,11 +107,12 @@ def _resolve_node_config(node_name: str) -> Dict[str, Any] | None:
         ch_host = get_host(node_name)
         if ch_host is not None:
             logger.info("Resolved host '%s' from ClickHouse registry", node_name)
+            ch_key_file = ch_host.get("key_file") or ""
             return {
                 "host": ch_host.get("host"),
                 "user": ch_host.get("user", "root"),
                 "port": int(ch_host.get("port", 22)),
-                "key_file": ch_host.get("key_file", "/etc/ssh-keys/default/id_rsa"),
+                "key_file": ch_key_file,
                 "private_key_b64": ch_host.get("private_key_b64", ""),
             }
     except Exception as exc:
@@ -170,10 +171,7 @@ def _execute_ssh(command: str, node_cfg: Dict[str, Any], timeout: int) -> ExecRe
     and written to a temp file (cleaned up after execution).
     """
     private_key_b64 = node_cfg.get("private_key_b64", "")
-    key_file = node_cfg.get(
-        "key_file",
-        f"/etc/ssh-keys/{node_cfg.get('name', 'unknown')}/id_rsa",
-    )
+    key_file = node_cfg.get("key_file") or ""
     temp_key: tempfile.NamedTemporaryFile | None = None
 
     # If an inline private key is provided, write it to a temp file
