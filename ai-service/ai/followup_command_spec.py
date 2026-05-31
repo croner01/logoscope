@@ -1081,6 +1081,44 @@ def build_followup_command_spec_match_key(spec: Any) -> str:
     return json.dumps(safe, ensure_ascii=False, sort_keys=True)
 
 
+def _repair_glued_command(command_text: str) -> str:
+    """修复常见的命令格式粘连问题。
+
+    处理场景：
+    - kubectl-nislaplogs → kubectl -n islap logs
+    - grep-ierror → grep -i error
+    - head-20 → head -20
+    - clickhouse-client--query → clickhouse-client --query
+
+    与 _compact_command_normalizer 互补——本函数专门处理
+    kubectl 后直接跟连字符的场景（kubectl-xxx），而
+    _compact_command_normalizer 处理 kubectl 后直接跟字母的场景（kubectlns）。
+    """
+    if not command_text or len(command_text) < 5:
+        return command_text
+
+    repaired = command_text
+    # kubectl followed by glued hyphen-flags: kubectl-nislaplogs...
+    repaired = re.sub(
+        r'\bkubectl(?=-[a-z])',
+        'kubectl ',
+        repaired,
+    )
+    # Known flag patterns: grep-ierror, head-20, tail-100
+    repaired = re.sub(
+        r'\b(grep|head|tail|sort|awk|xargs)(?=-[a-z0-9])',
+        r'\1 ',
+        repaired,
+    )
+    # clickhouse-client--query → clickhouse-client --query
+    repaired = re.sub(
+        r'(\bclickhouse-client)(?=--)',
+        r'\1 ',
+        repaired,
+    )
+    return repaired
+
+
 def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False) -> Dict[str, Any]:
     safe = normalize_followup_command_spec(spec)
     if not safe:
@@ -1126,11 +1164,29 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
         head = _as_str(command_argv[0]).strip().lower()
         glued_head_prefix = _detect_glued_command_head(head)
         if glued_head_prefix:
-            return {
-                "ok": False,
-                "reason": "glued_command_tokens",
-                "detail": f"command head '{head}' should be separated (expected '{glued_head_prefix} ...')",
-            }
+            # Attempt repair for glued tokens before giving up
+            if command_text:
+                repaired_text = _repair_glued_command(command_text)
+                if repaired_text != command_text:
+                    try:
+                        repaired_argv = [item for item in shlex.split(repaired_text) if _as_str(item).strip()]
+                        if repaired_argv:
+                            repaired_head = _as_str(repaired_argv[0]).strip().lower()
+                            if not _detect_glued_command_head(repaired_head):
+                                # Repair succeeded — rebuild context with repaired argv
+                                args["command"] = repaired_text
+                                args["command_argv"] = repaired_argv
+                                command_argv = repaired_argv
+                                head = repaired_head
+                                glued_head_prefix = None
+                    except Exception:
+                        pass
+            if glued_head_prefix:
+                return {
+                    "ok": False,
+                    "reason": "glued_command_tokens",
+                    "detail": f"command head '{head}' should be separated (expected '{glued_head_prefix} ...')",
+                }
         if head not in _GENERIC_EXEC_ALLOWED_HEADS:
             return {"ok": False, "reason": "unsupported_command_head", "detail": f"unsupported command head: {head}"}
         if head == "kubectl":
@@ -1161,6 +1217,20 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
                     ),
                 }
             if any(("(" in token or ")" in token) for token in kubectl_scope_argv[1:]):
+                # Attempt repair: remove parentheses and recompile
+                if command_text:
+                    repaired_text = re.sub(r'[()]', '', command_text)
+                    if repaired_text != command_text:
+                        try:
+                            repaired_argv = [item for item in shlex.split(repaired_text) if _as_str(item).strip()]
+                            if repaired_argv:
+                                args["command"] = repaired_text
+                                args["command_argv"] = repaired_argv
+                                command_argv = repaired_argv
+                                # Recurse with repaired command to go through full pipeline
+                                return compile_followup_command_spec(spec, run_sql_preflight=run_sql_preflight)
+                        except Exception:
+                            pass
                 return {
                     "ok": False,
                     "reason": "invalid_kubectl_token",
