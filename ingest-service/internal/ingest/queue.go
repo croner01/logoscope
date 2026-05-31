@@ -112,8 +112,13 @@ func (w *QueueWriter) Init() error {
 
 	if w.cfg.KafkaAsyncEnabled() {
 		w.startReconnectLoop()
+
+		// Synchronously drain WAL-recovered items before accepting new
+		// requests, so the memory queue doesn't blow past the limit the
+		// instant the HTTP server starts.
 		if recoveredCount > 0 {
 			w.requestFlush()
+			w.flushMemoryQueue(context.Background())
 		}
 	}
 
