@@ -755,6 +755,14 @@ export interface AggregatedLogsParams extends LogsQueryParams {
   max_samples?: number;
 }
 
+/** Offline log upload result */
+export interface UploadResult {
+  status: string;
+  upload_id: string;
+  total: number;
+  batches: number;
+}
+
 /**
  * API 客户端类
  */
@@ -1104,6 +1112,37 @@ export class APIClient {
       limit: response.data?.limit ?? normalizedParams.limit ?? 20,
       context: response.data?.context || {},
     };
+  }
+
+  /**
+   * Upload a log file for offline ingestion.
+   * Supports .log, .txt, .json files up to 500MB.
+   */
+  async uploadLogs(
+    file: File,
+    options?: {
+      serviceName?: string;
+      namespace?: string;
+      onProgress?: (percent: number) => void;
+      signal?: AbortSignal;
+    },
+  ): Promise<UploadResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (options?.serviceName) formData.append('service_name', options.serviceName);
+    if (options?.namespace) formData.append('namespace', options.namespace);
+
+    const response = await this.client.post('/api/v1/logs/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (event) => {
+        if (event.total && options?.onProgress) {
+          options.onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      },
+      signal: options?.signal,
+      timeout: 300_000,
+    });
+    return response.data as UploadResult;
   }
 
   /**
@@ -3818,6 +3857,7 @@ export const apiClient = new APIClient();
 export const api = {
   health: () => apiClient.health(),
   getEvents: (params?: LogsQueryParams) => apiClient.getEvents(params),
+  uploadLogs: (file: File, options?: Parameters<APIClient['uploadLogs']>[1]) => apiClient.uploadLogs(file, options),
   getLogsStats: (params?: { time_window?: string }) => apiClient.getLogsStats(params),
   getLogFacets: (params?: LogsFacetQueryParams) => apiClient.getLogFacets(params),
   getTopologyEdgeLogPreview: (params: {
