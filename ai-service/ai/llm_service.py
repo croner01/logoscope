@@ -169,6 +169,35 @@ def _resolve_llm_api_base(provider: str) -> Optional[str]:
     return None
 
 
+# Known models per provider, used by GET /api/v1/ai/llm/models
+PROVIDER_MODELS: Dict[str, List[str]] = {
+    "deepseek": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+    ],
+    "openai": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo",
+    ],
+    "claude": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-7",
+        "claude-haiku-4-5",
+        "claude-sonnet-4-20250514",
+    ],
+    "local": [],
+}
+
+
+def get_provider_models(provider: str) -> List[str]:
+    """Return known models for the given provider (case-insensitive)."""
+    return PROVIDER_MODELS.get(provider.strip().lower(), [])
+
+
 @dataclass
 class LLMConfig:
     """LLM 配置"""
@@ -191,6 +220,7 @@ class LLMResponse:
     """LLM 响应"""
     content: str
     model: str
+    requested_model: str = ""  # 实际请求的模型名，用于追踪降级
     provider: str
     usage: Dict[str, int] = field(default_factory=dict)
     cached: bool = False
@@ -303,6 +333,7 @@ class OpenAIProvider(BaseLLMProvider):
             return LLMResponse(
                 content=cached,
                 model=self.config.model,
+                requested_model=self.config.model,
                 provider=self.provider_name,
                 cached=True,
             )
@@ -336,6 +367,7 @@ class OpenAIProvider(BaseLLMProvider):
             return LLMResponse(
                 content=content,
                 model=response.model,
+                requested_model=kwargs.get("model", self.config.model),
                 provider=self.provider_name,
                 usage=_usage_to_dict(getattr(response, "usage", None)),
                 latency_ms=latency_ms,
@@ -346,6 +378,7 @@ class OpenAIProvider(BaseLLMProvider):
             return LLMResponse(
                 content="",
                 model=self.config.model,
+                requested_model=self.config.model,
                 provider=self.provider_name,
                 error=str(e),
             )
@@ -751,6 +784,7 @@ class LLMService:
             result["cached"] = response.cached
             result["latency_ms"] = response.latency_ms
             result["model"] = response.model
+            result["requested_model"] = response.requested_model
             return result
         return {
             "error": "Failed to parse LLM response",
