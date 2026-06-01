@@ -3312,9 +3312,11 @@ const LogsExplorer: React.FC = () => {
                 </div>
 
                 <div
-                  className="resize-handle-v shrink-0"
+                  className="resize-handle-h shrink-0"
                   onMouseDown={(e) => handleResizeStart(e, false)}
-                />
+                >
+                  <div />
+                </div>
               </>
             )}
           </>
@@ -3495,9 +3497,11 @@ const LogsExplorer: React.FC = () => {
         {showSidebar && (
           <>
             <div
-              className="resize-handle-v shrink-0"
+              className="resize-handle-h shrink-0"
               onMouseDown={(e) => handleResizeStart(e, true)}
-            />
+            >
+              <div />
+            </div>
             {renderSidebar()}
           </>
         )}
