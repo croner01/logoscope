@@ -543,6 +543,17 @@ class LogWorker:
           "record_count": N,
           "records": [...]
         }
+
+        上传格式 (type=upload):
+        {
+          "type": "upload",
+          "upload_id": "upl_xxx",
+          "service_name": "offline-upload",
+          "namespace": "default",
+          "records": [
+            {"message": "...", "timestamp": "...", "level": "INFO", ...}
+          ]
+        }
         """
         try:
             payload = json.loads(message.data.decode("utf-8"))
@@ -555,15 +566,23 @@ class LogWorker:
             and str(payload.get("signal_type", "")).strip().lower() == "logs"
             and isinstance(payload.get("records"), list)
         )
-        if not is_batched_logs:
-            return await self._process_log_message(message)
+        if is_batched_logs:
+            records = payload.get("records") or []
+            if not records:
+                logger.debug("Received empty batched logs envelope")
+                return True
+            return self._process_log_records_batch(records)
 
-        records = payload.get("records") or []
-        if not records:
-            logger.debug("Received empty batched logs envelope")
-            return True
+        # 处理 upload 类型 envelope（来自离线文件上传）
+        is_upload_envelope = (
+            isinstance(payload, dict)
+            and str(payload.get("type", "")).strip().lower() == "upload"
+            and isinstance(payload.get("records"), list)
+        )
+        if is_upload_envelope:
+            return self._process_upload_envelope(payload)
 
-        return self._process_log_records_batch(records)
+        return await self._process_log_message(message)
 
     async def _process_log_message(self, message: Message) -> bool:
         """处理日志消息。"""
@@ -628,6 +647,58 @@ class LogWorker:
         if self.processed_count % 10 == 0:
             logger.info("Processed logs count=%s", self.processed_count)
         return True
+
+    def _process_upload_envelope(self, envelope: Dict[str, Any]) -> bool:
+        """
+        展开 upload-type envelope 为单个 log 记录并批量处理。
+
+        Upload 记录缺少 K8s 元数据，填充合成 pod_name + namespace，
+        使 pod/namespace 字段在查询时有值可显。
+        """
+        upload_id = str(envelope.get("upload_id", "") or "")
+        service_name = str(envelope.get("service_name", "offline-upload") or "offline-upload").strip()
+        namespace = str(envelope.get("namespace", "default") or "default").strip()
+        raw_records = envelope.get("records", [])
+        if not isinstance(raw_records, list) or not raw_records:
+            logger.debug("Received empty upload envelope upload_id=%s", upload_id)
+            return True
+
+        synthetic_pod = f"upload-{upload_id[:12]}" if upload_id else "offline-upload"
+
+        expanded: List[Dict[str, Any]] = []
+        for rec in raw_records:
+            if not isinstance(rec, dict):
+                continue
+            msg = rec.get("message", "") or ""
+            ts = rec.get("timestamp", "") or ""
+            level = str(rec.get("level", "INFO") or "INFO").upper()[:8]
+            raw_attrs = rec.get("_raw_attributes", {})
+            if not isinstance(raw_attrs, dict):
+                raw_attrs = {}
+
+            expanded.append({
+                "log": msg,
+                "timestamp": ts,
+                "severity": level,
+                "service.name": service_name,
+                "attributes": {**raw_attrs, "upload_id": upload_id},
+                "resource": {},
+                "kubernetes": {
+                    "pod_name": synthetic_pod,
+                    "namespace_name": namespace,
+                    "labels": {
+                        "source": "upload",
+                        "upload_id": upload_id,
+                        "service_name": service_name,
+                    },
+                },
+            })
+
+        logger.info(
+            "Upload envelope expanded: upload_id=%s service=%s namespace=%s records=%d",
+            upload_id, service_name, namespace, len(expanded),
+        )
+        return self._process_log_records_batch(expanded)
 
     def _process_log_record(self, log_data: Dict[str, Any]) -> bool:
         """处理单条已解析的日志记录。"""

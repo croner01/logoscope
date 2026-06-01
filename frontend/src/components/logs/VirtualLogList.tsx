@@ -205,8 +205,11 @@ const LogRow = memo(({ index, style, data }: ListChildComponentProps<RowData>) =
         </div>
         
         {/* Pod列 */}
-        <div className="text-xs text-gray-600 font-mono truncate" title={log.pod_name}>
+        <div className="text-xs text-gray-600 font-mono truncate flex items-center gap-1" title={log.pod_name}>
           {log.pod_name || '-'}
+          {(log.pod_name || '').startsWith('upload-') && (
+            <span className="shrink-0 bg-amber-100 text-amber-700 text-[10px] px-1 py-0.5 rounded font-sans">离线</span>
+          )}
         </div>
         
         {/* 级别列 */}

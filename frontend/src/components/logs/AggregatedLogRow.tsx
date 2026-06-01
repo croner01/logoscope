@@ -185,8 +185,11 @@ const AggregatedLogRow: React.FC<AggregatedLogRowProps> = ({
                       [{sample.service_name}]
                     </span>
                     {sample.pod_name && (
-                      <span className="text-xs text-gray-400 font-mono">
+                      <span className="text-xs text-gray-400 font-mono flex items-center gap-1">
                         {sample.pod_name}
+                        {(sample.pod_name || '').startsWith('upload-') && (
+                          <span className="shrink-0 bg-amber-100 text-amber-700 text-[10px] px-1 py-0.5 rounded font-sans">离线</span>
+                        )}
                       </span>
                     )}
                   </div>

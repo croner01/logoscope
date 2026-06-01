@@ -601,32 +601,6 @@ def _build_log_queue_messages(
                         messages.append(
                             transform_single_otlp_log(resource_dict, log_record, metadata)
                         )
-        elif isinstance(item, dict) and item.get("type") == "upload":
-            upload_id = item.get("upload_id", "")
-            service_name = item.get("service_name", "offline-upload")
-            namespace = item.get("namespace", "default")
-            for upload_record in item.get("records", []):
-                msg = upload_record.get("message", "")
-                ts = upload_record.get("timestamp", "")
-                level = upload_record.get("level", "INFO")
-                raw_attrs = upload_record.get("_raw_attributes", {})
-                messages.append({
-                    "log": msg,
-                    "timestamp": ts,
-                    "severity": level,
-                    "service.name": service_name,
-                    "attributes": {**raw_attrs, "upload_id": upload_id},
-                    "resource": {},
-                    "kubernetes": {
-                        "pod_name": f"upload-{upload_id[:12]}",
-                        "namespace_name": namespace,
-                        "labels": {
-                            "source": "upload",
-                            "upload_id": upload_id,
-                            "service_name": service_name,
-                        },
-                    },
-                })
         else:
             messages.append(transform_fluent_bit_json(item, metadata))
 
