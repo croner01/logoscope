@@ -1948,6 +1948,7 @@ const AIAnalysis: React.FC = () => {
   const agentRuntimeCommandSessionsRef = useRef<Record<string, AgentRuntimeCommandSession>>({});
   const agentRuntimeCommandControllersRef = useRef<Record<string, AbortController>>({});
   const resetRuntimeSessionsRef = useRef<() => void>(() => {});
+  const autoOpenedApprovalIdsRef = useRef<Set<string>>(new Set());
   const useLLMRef = useRef(useLLM);
   const applyHistorySessionToAnalysisRef = useRef<((historySession: NonNullable<LocationState['historySession']>) => void) | null>(null);
   const applyHistoryCaseToAnalysisRef = useRef<((historyCase: NonNullable<LocationState['historyCase']>) => void) | null>(null);
@@ -4407,6 +4408,52 @@ const AIAnalysis: React.FC = () => {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [approvalDialog, closeApprovalDialog]);
+
+  useEffect(() => {
+    if (approvalDialog) {
+      return;
+    }
+    const currentPendingIds = new Set<string>();
+    for (const msg of followUpMessages) {
+      const metadata = (msg.metadata && typeof msg.metadata === 'object') ? msg.metadata : null;
+      if (!metadata) continue;
+      const approvals = Array.isArray(metadata.approval_required)
+        ? metadata.approval_required as Array<Record<string, unknown>>
+        : [];
+      for (const item of approvals) {
+        const status = String(item.status || '').trim().toLowerCase();
+        if (status !== 'pending') continue;
+        const approvalId = String(item.approval_id || '').trim();
+        const command = normalizeExecutableCommand(String(item.command || ''));
+        if (!approvalId || !command) continue;
+        currentPendingIds.add(approvalId);
+        if (autoOpenedApprovalIdsRef.current.has(approvalId)) continue;
+        const candidate: FollowUpApprovalCandidate = {
+          id: `${String(msg.message_id || 'msg').trim()}:approval:${approvalId}`,
+          message_id: String(msg.message_id || '').trim() || undefined,
+          action_id: String(item.action_id || '').trim() || undefined,
+          command,
+          command_type: String(item.command_type || '').trim() || undefined,
+          risk_level: String(item.risk_level || '').trim() || undefined,
+          requires_elevation: Boolean(item.requires_elevation),
+          requires_confirmation: Boolean(item.requires_confirmation),
+          confirmation_ticket: String(item.confirmation_ticket || item.approval_id || '').trim() || undefined,
+          message: String(item.message || '').trim() || undefined,
+          title: String(item.title || '审批动作').trim() || '审批动作',
+          runtime_run_id: String(item.runtime_run_id || '').trim() || undefined,
+          runtime_approval_id: String(item.runtime_approval_id || item.approval_id || '').trim() || undefined,
+        };
+        autoOpenedApprovalIdsRef.current.add(approvalId);
+        openApprovalDialog(candidate);
+        return;
+      }
+    }
+    for (const id of autoOpenedApprovalIdsRef.current) {
+      if (!currentPendingIds.has(id)) {
+        autoOpenedApprovalIdsRef.current.delete(id);
+      }
+    }
+  }, [followUpMessages, approvalDialog, openApprovalDialog]);
 
   const { runtimePanelRuns: followUpRuntimePanelRuns, resetRuntimeSessions: resetFollowUpRuntimeSessions } = useRuntimeCommandSessions({
     followUpMessages,
