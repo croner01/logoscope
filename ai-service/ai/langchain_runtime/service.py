@@ -18,7 +18,8 @@ from ai.followup_command_spec import (
     compile_followup_command_spec,
     normalize_followup_command_spec,
 )
-from ai.followup_planning_helpers import _resolve_followup_evidence_window
+from ai.followup_planning_helpers import _extract_namespace_from_question, _resolve_followup_evidence_window
+from ai.llm_service import _is_reasoning_model
 from ai.llm_stream_helpers import collect_chat_response
 
 try:
@@ -1272,7 +1273,12 @@ async def run_followup_langchain(
     message = f"{FOLLOWUP_SYSTEM_PROMPT}\n\n{prompt}"
 
     llm_provider_name = getattr(llm_service, 'config', None) and getattr(llm_service.config, 'provider', None)
-    use_json_response_format = llm_provider_name in ('deepseek', 'openai', 'local')
+    llm_model_name = getattr(llm_service, 'config', None) and getattr(llm_service.config, 'model', None)
+    use_json_response_format = (
+        llm_provider_name in ('deepseek', 'openai', 'local')
+        and llm_model_name
+        and not _is_reasoning_model(llm_model_name)
+    )
 
     llm_timeout_fallback = False
     raw_token_stream_enabled = _should_stream_raw_tokens()
@@ -1359,7 +1365,12 @@ async def run_followup_langchain(
             nl_actions = None
             if structured is None and not _looks_like_json_payload(answer_text):
                 try:
-                    nl_namespace = _as_str(analysis_context.get("namespace")) or "islap"
+                    _nl_ctx_ns = _as_str(analysis_context.get("namespace"))
+                    if not _nl_ctx_ns:
+                        _nl_ctx_ns = _extract_namespace_from_question(
+                            _as_str(analysis_context.get("question") or analysis_context.get("input_text") or "")
+                        )
+                    nl_namespace = _nl_ctx_ns or "islap"
                     nl_service_name = _as_str(analysis_context.get("service_name"))
                     nl_actions = await _extract_commands_from_nl(
                         llm_service=llm_service,
@@ -1413,7 +1424,12 @@ async def run_followup_langchain(
                     nl_text = "\n".join(nl_fields)
                     if nl_text.strip():
                         try:
-                            nl_namespace = _as_str(analysis_context.get("namespace")) or "islap"
+                            _nl_ctx_ns = _as_str(analysis_context.get("namespace"))
+                            if not _nl_ctx_ns:
+                                _nl_ctx_ns = _extract_namespace_from_question(
+                                    _as_str(analysis_context.get("question") or analysis_context.get("input_text") or "")
+                                )
+                            nl_namespace = _nl_ctx_ns or "islap"
                             nl_service_name = _as_str(analysis_context.get("service_name"))
                             nl_fallback_actions = await _extract_commands_from_nl(
                                 llm_service=llm_service,

@@ -2526,7 +2526,7 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-014", request))
 
-        self._assert_blocked_command_spec(result, reason_fragment="shell")
+        assert result["status"] == "confirmation_required"
 
     def test_execute_followup_command_allows_pipe_operator_without_whitespace(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2542,7 +2542,7 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-015", request))
 
-        self._assert_blocked_command_spec(result, reason_fragment="shell")
+        assert result["status"] == "confirmation_required"
 
     def test_execute_followup_command_allows_and_chain_operator(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2667,14 +2667,13 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-019b", request))
 
-        self._assert_blocked_command_spec(result, reason_fragment="shell")
+        assert result["status"] == "confirmation_required"
 
     def test_execute_followup_command_operator_injection_from_equivalent_match_key_requires_confirmation(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
         import asyncio
 
-        # 在 command_spec 强制 + 禁 shell 操作符后，该注入样式仍会先经过审批确认流程，
-        # 但最终执行仍由结构化策略约束。
+        # Pipe 操作符现已允许通过编译，该命令会走审批确认流程。
         mock_store = self._build_store("```bash\necho 'a|b'\n```")
         request = self._build_command_request(
             command="echo a|b",
@@ -2685,7 +2684,7 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-019c", request))
 
-        self._assert_blocked_command_spec(result, reason_fragment="shell")
+        assert result["status"] == "confirmation_required"
 
     def test_execute_followup_command_rejects_redirection_family_variants_during_precheck(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest

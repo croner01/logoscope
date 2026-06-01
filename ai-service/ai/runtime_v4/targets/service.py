@@ -957,6 +957,62 @@ class RuntimeV4TargetRegistry:
             target_identity=safe_identity,
         )
         if not matched_targets:
+            # 回退解析：当 namespace:X 身份在 k8s_cluster 上未注册时，
+            # 尝试通过已注册的父集群目标获取 cluster_id 用于命令路由。
+            # 不写死字段映射，动态使用当前注册的集群目标。
+            if safe_kind == "k8s_cluster" and safe_identity.startswith("namespace:"):
+                parent_candidates = self.list_targets(
+                    target_kind="k8s_cluster",
+                    status="active",
+                    limit=10,
+                )
+                parents = [
+                    t for t in parent_candidates
+                    if _as_str(t.get("target_identity")).lower() != safe_identity
+                ]
+                if len(parents) == 1:
+                    parent = parents[0]
+                    parent_meta = parent.get("metadata") if isinstance(parent.get("metadata"), dict) else {}
+                    parent_cluster_id = _as_str(parent_meta.get("cluster_id"))
+                    parent_contract = _build_metadata_contract(
+                        target_kind=_as_str(parent.get("target_kind")),
+                        target_identity=_as_str(parent.get("target_identity")),
+                        metadata=parent_meta,
+                    )
+                    exec_scope = dict(parent_contract.get("execution_scope") or {})
+                    exec_scope["target_identity"] = safe_identity
+                    exec_scope["target_kind"] = safe_kind
+                    ns_name = safe_identity.split(":", 1)[1] if ":" in safe_identity else ""
+                    fallback_reason = (
+                        f"namespace {ns_name} resolved via parent cluster {parent_cluster_id}"
+                    )
+                    safe_reason = _as_str(reason)
+                    combined_reason = (
+                        f"{safe_reason}; {fallback_reason}" if safe_reason else fallback_reason
+                    )
+                    return {
+                        "target_id": _as_str(parent.get("target_id")),
+                        "target_kind": safe_kind,
+                        "target_identity": safe_identity,
+                        "registered": True,
+                        "status": "active",
+                        "result": "allow",
+                        "reason": combined_reason,
+                        "missing_capabilities": required,
+                        "matched_capabilities": _normalize_capabilities(parent.get("capabilities")),
+                        "target": parent,
+                        "run_id": _as_str(run_id),
+                        "action_id": _as_str(action_id),
+                        "metadata_contract": parent_contract,
+                        "resolved_target_context": {
+                            "target_id": _as_str(parent.get("target_id")),
+                            "target_kind": safe_kind,
+                            "target_identity": safe_identity,
+                            "metadata": dict(parent_contract.get("metadata") or {}),
+                            "execution_scope": exec_scope,
+                        },
+                    }
+
             return {
                 "target_id": "",
                 "target_kind": safe_kind,

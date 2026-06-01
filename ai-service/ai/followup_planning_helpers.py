@@ -141,6 +141,9 @@ def _infer_query_template_command_spec(
         args["target_kind"] = "k8s_cluster"
         ctx = analysis_context if isinstance(analysis_context, dict) else {}
         ns = _as_str(ctx.get("namespace") or ctx.get("service_namespace")).strip()
+        if not ns:
+            question = _as_str(ctx.get("question") or ctx.get("input_text") or "")
+            ns = _extract_namespace_from_question(question)
         if ns:
             args["target_identity"] = f"namespace:{ns}"
         # 无上下文 namespace 时不设 target_identity，由 compile 从 -n 标志推断
@@ -1166,6 +1169,29 @@ def _build_followup_actions(
     return actions[:safe_max_items]
 
 
+_NAMESPACE_FROM_QUESTION_PATTERNS = [
+    # "ems 命名空间" → captures "ems"; 只用字母数字+连字符避免捕获中文
+    re.compile(r'([a-zA-Z0-9][-a-zA-Z0-9]*)\s*命名空间'),
+    # "namespace:ems"
+    re.compile(r'namespace:([a-zA-Z0-9][-a-zA-Z0-9]*)'),
+]
+
+
+def _extract_namespace_from_question(question: str) -> str:
+    """从用户追问文本中提取命名空间（如 ems）。"""
+    safe_q = _as_str(question).strip()
+    if not safe_q:
+        return ""
+    for pattern in _NAMESPACE_FROM_QUESTION_PATTERNS:
+        m = pattern.search(safe_q)
+        if m:
+            ns = m.group(1).strip().lower()
+            # 过滤掉通用/非命名空间匹配
+            if ns and ns not in ("k8s", "kubernetes", "集群", "环境", "远端", "命名空间", ""):
+                return ns
+    return ""
+
+
 def _prefill_command_spec(
     action: Dict[str, Any],
     analysis_context: Optional[Dict[str, Any]] = None,
@@ -1201,7 +1227,12 @@ def _prefill_command_spec(
     if not has_target_identity:
         if resolved_target_kind == "k8s_cluster":
             ctx = analysis_context if isinstance(analysis_context, dict) else {}
-            ns = _as_str(ctx.get("namespace") or ctx.get("service_namespace")).strip() or "default"
+            ns = _as_str(ctx.get("namespace") or ctx.get("service_namespace")).strip()
+            if not ns:
+                question = _as_str(ctx.get("question") or ctx.get("input_text") or "")
+                ns = _extract_namespace_from_question(question)
+            if not ns:
+                ns = "default"
             args["target_identity"] = f"namespace:{ns}"
         elif resolved_target_kind == "clickhouse_cluster":
             args["target_identity"] = "database:logs"

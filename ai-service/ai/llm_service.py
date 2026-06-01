@@ -18,7 +18,7 @@ import hashlib
 import asyncio
 import re
 from collections import OrderedDict
-from typing import Dict, Any, List, Optional, Literal, AsyncIterator
+from typing import Dict, Any, List, Optional, Literal, AsyncIterator, Set
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
@@ -198,6 +198,20 @@ def get_provider_models(provider: str) -> List[str]:
     return PROVIDER_MODELS.get(provider.strip().lower(), [])
 
 
+# Models that use reasoning (thinking) tokens; they may not support response_format
+REASONING_MODELS: Set[str] = {
+    "deepseek-reasoner",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+}
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """Check if the given model uses reasoning/thinking format."""
+    clean = model.strip().lower()
+    return any(clean.startswith(prefix) for prefix in REASONING_MODELS)
+
+
 @dataclass
 class LLMConfig:
     """LLM 配置"""
@@ -220,8 +234,8 @@ class LLMResponse:
     """LLM 响应"""
     content: str
     model: str
-    requested_model: str = ""  # 实际请求的模型名，用于追踪降级
     provider: str
+    requested_model: str = ""  # 实际请求的模型名，用于追踪降级
     usage: Dict[str, int] = field(default_factory=dict)
     cached: bool = False
     latency_ms: int = 0
@@ -355,7 +369,8 @@ class OpenAIProvider(BaseLLMProvider):
                 temperature=kwargs.get("temperature", self.config.temperature),
             )
             response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
-            if response_format is not None:
+            requested_model = kwargs.get("model", self.config.model)
+            if response_format is not None and not _is_reasoning_model(requested_model):
                 create_kwargs["response_format"] = response_format
             response = await client.chat.completions.create(**create_kwargs)
 
@@ -406,7 +421,8 @@ class OpenAIProvider(BaseLLMProvider):
                 stream=True,
             )
             response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
-            if response_format is not None:
+            requested_model = kwargs.get("model", self.config.model)
+            if response_format is not None and not _is_reasoning_model(requested_model):
                 create_kwargs["response_format"] = response_format
             stream = await client.chat.completions.create(**create_kwargs)
             async for event in stream:
@@ -636,7 +652,8 @@ class LocalModelProvider(BaseLLMProvider):
                 stream=True,
             )
             response_format = kwargs.get("response_format") or getattr(self.config, 'response_format', None)
-            if response_format is not None:
+            requested_model = kwargs.get("model", self.config.model)
+            if response_format is not None and not _is_reasoning_model(requested_model):
                 create_kwargs["response_format"] = response_format
             stream = await client.chat.completions.create(**create_kwargs)
             async for event in stream:
@@ -918,12 +935,16 @@ def get_llm_service() -> LLMService:
     global _llm_service
     if _llm_service is None:
         provider = _resolve_provider()
+        model = _resolve_llm_model(provider)
+        configured_max_tokens = int(os.getenv("LLM_MAX_TOKENS", "2000"))
+        if configured_max_tokens <= 2000 and _is_reasoning_model(model):
+            configured_max_tokens = 8000
         config = LLMConfig(
             provider=provider,
-            model=_resolve_llm_model(provider),
+            model=model,
             api_key=_resolve_llm_api_key(provider),
             api_base=_resolve_llm_api_base(provider),
-            max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2000")),
+            max_tokens=configured_max_tokens,
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             cache_enabled=os.getenv("LLM_CACHE_ENABLED", "true").lower() == "true",
             cache_max_entries=max(1, int(os.getenv("LLM_CACHE_MAX_ENTRIES", "2048"))),

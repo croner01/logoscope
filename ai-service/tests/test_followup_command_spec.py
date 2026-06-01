@@ -292,7 +292,7 @@ def test_compile_followup_command_spec_rejects_selector_namespace_glue_without_e
     assert result["reason"] == "suspicious_selector_namespace_glue"
 
 
-def test_compile_followup_command_spec_rejects_compact_pipe_operator_in_generic_exec():
+def test_compile_followup_command_spec_allows_compact_pipe_operator_in_generic_exec():
     result = compile_followup_command_spec(
         {
             "tool": "generic_exec",
@@ -305,8 +305,7 @@ def test_compile_followup_command_spec_rejects_compact_pipe_operator_in_generic_
         }
     )
 
-    assert result["ok"] is False
-    assert result["reason"] == "command_argv contains blocked shell operators"
+    assert result["ok"] is True
 
 
 def test_compile_followup_command_spec_rejects_compact_redirection_operator_in_generic_exec():

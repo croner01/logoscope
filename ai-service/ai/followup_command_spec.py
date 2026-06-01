@@ -14,15 +14,13 @@ import os
 import re
 import shlex
 import subprocess
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 _K8S_NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _SUPPORTED_TOOLS = {"kubectl_clickhouse_query", "k8s_clickhouse_query", "clickhouse_query", "generic_exec"}
 _CLICKHOUSE_TARGET_IDENTITY_PATTERN = re.compile(r"^database:[A-Za-z0-9_.-]+$")
 _GENERIC_EXEC_BLOCKED_TOKENS = {
-    "|",
-    "|&",
     "||",
     "&&",
     ";",
@@ -1153,6 +1151,19 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
         if not command_argv:
             return {"ok": False, "reason": "command_argv is empty"}
         command_argv = _canonicalize_clickhouse_client_argv(command_argv)
+
+        # Handle pipe operators: split into pipeline segments, compile first segment only
+        pipeline_after: List[str] = []
+        if command_argv:
+            _pipe_index = None
+            for _i, _token in enumerate(command_argv):
+                if _token in ("|", "|&"):
+                    _pipe_index = _i
+                    break
+            if _pipe_index is not None:
+                pipeline_after = command_argv[_pipe_index:]
+                command_argv = command_argv[:_pipe_index]
+
         if len(command_argv) > 64:
             return {"ok": False, "reason": "command_argv exceeds max length(64)"}
         if any(any(ch in token for ch in ("\n", "\r", "`")) for token in command_argv):
@@ -1280,7 +1291,14 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
             target_kind = "unknown"
         if not target_identity:
             target_identity = "unknown"
-        command = " ".join(shlex.quote(token) for token in command_argv)
+        main_cmd = " ".join(shlex.quote(token) for token in command_argv)
+        if pipeline_after:
+            _pipe_str = " ".join(
+                _t if _t in ("|", "|&") else shlex.quote(_t) for _t in pipeline_after
+            )
+            command = main_cmd + " " + _pipe_str
+        else:
+            command = main_cmd
         return {
             "ok": True,
             "tool": "generic_exec",
