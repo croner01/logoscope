@@ -24,6 +24,7 @@ func NewServer(cfg Config, queue *QueueWriter) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/logs", s.ingestHandler("logs"))
+	mux.HandleFunc("/v1/logs/upload", s.uploadHandler)
 	mux.HandleFunc("/v1/metrics", s.ingestHandler("metrics"))
 	mux.HandleFunc("/v1/traces", s.ingestHandler("traces"))
 	mux.HandleFunc("/health", s.healthHandler)
