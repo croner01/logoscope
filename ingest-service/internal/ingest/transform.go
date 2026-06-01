@@ -26,6 +26,76 @@ func isOTLPFormat(payload map[string]any) bool {
 	return hasResourceLogs || hasResourceMetrics || hasResourceSpans
 }
 
+func isUploadEnvelope(payload map[string]any) bool {
+	if payload == nil {
+		return false
+	}
+	if strings.ToLower(asString(payload["type"])) != "upload" {
+		return false
+	}
+	_, hasRecords := payload["records"]
+	return hasRecords
+}
+
+func expandUploadRecords(envelope map[string]any, metadata map[string]any) []map[string]any {
+	uploadID := asString(envelope["upload_id"])
+	serviceName := firstNonEmpty(asString(envelope["service_name"]), "offline-upload")
+	namespace := firstNonEmpty(asString(envelope["namespace"]), "default")
+
+	syntheticPod := "offline-upload"
+	if uid := strings.TrimSpace(uploadID); uid != "" {
+		if len(uid) > 12 {
+			uid = uid[:12]
+		}
+		syntheticPod = "upload-" + uid
+	}
+
+	records := asSlice(envelope["records"])
+	messages := make([]map[string]any, 0, len(records))
+
+	for _, recAny := range records {
+		rec, ok := recAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg := asString(rec["message"])
+		if msg == "" {
+			continue
+		}
+		ts := asString(rec["timestamp"])
+		level := strings.ToUpper(asString(rec["level"]))
+		if level == "" {
+			level = "INFO"
+		}
+		rawAttrs := asMap(rec["_raw_attributes"])
+
+		expandedRec := map[string]any{
+			"log":        msg,
+			"timestamp":  ts,
+			"severity":   level,
+			"attributes": rawAttrs,
+			"resource":   map[string]any{},
+			"kubernetes": map[string]any{
+				"pod_name":       syntheticPod,
+				"namespace_name": namespace,
+				"labels": map[string]any{
+					"source":       "upload",
+					"upload_id":    uploadID,
+					"service_name": serviceName,
+				},
+			},
+		}
+		message := transformFluentBitJSON(expandedRec, metadata)
+		recServiceName := firstNonEmpty(asString(rec["service_name"]), serviceName)
+		if recServiceName != "" {
+			message["service.name"] = recServiceName
+		}
+		messages = append(messages, message)
+	}
+
+	return messages
+}
+
 func buildLogBatchPayloads(logRecords []map[string]any, chunkSize int) []map[string]any {
 	if chunkSize <= 0 {
 		chunkSize = 1
@@ -90,6 +160,10 @@ func buildLogQueueMessages(payloadObj any, rawPayload string, metadata map[strin
 		}
 		if isOTLPFormat(payloadMap) {
 			messages = append(messages, buildOTLPLogRecords(payloadMap, metadata)...)
+			continue
+		}
+		if isUploadEnvelope(payloadMap) {
+			messages = append(messages, expandUploadRecords(payloadMap, metadata)...)
 			continue
 		}
 		messages = append(messages, transformFluentBitJSON(payloadMap, metadata))

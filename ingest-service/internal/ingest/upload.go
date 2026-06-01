@@ -23,12 +23,13 @@ const (
 
 var (
 	uploadTimestampPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))`),
-		regexp.MustCompile(`(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+\d+\s+(ERROR|CRITICAL|WARN|INFO|DEBUG)`),
-		regexp.MustCompile(`(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+(?:\[)?(ERROR|CRITICAL|WARN|INFO|DEBUG)`),
-		regexp.MustCompile(`(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)`),
+		regexp.MustCompile(`(\d{4}[-/]\d{2}[-/]\d{2}T\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2}))`),
+		regexp.MustCompile(`(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+\d+\s+(ERROR|CRITICAL|WARN|INFO|DEBUG)`),
+		regexp.MustCompile(`(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+(?:\[)?(ERROR|CRITICAL|WARN|INFO|DEBUG)`),
+		regexp.MustCompile(`(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)`),
 	}
-	uploadServiceNamePattern = regexp.MustCompile(`\d+\s+(?:ERROR|CRITICAL|WARN|INFO|DEBUG)\s+([\w-]+)`)
+	uploadTimestampNormalizer = strings.NewReplacer("/", "-", ",", ".")
+	uploadServiceNamePattern  = regexp.MustCompile(`\d+\s+(?:ERROR|CRITICAL|WARN|INFO|DEBUG)\s+([\w-]+)`)
 
 	genericLogNames = map[string]bool{
 		"output": true, "log": true, "console": true,
@@ -266,7 +267,7 @@ func parseTextRecord(line string) map[string]any {
 	for i, pattern := range uploadTimestampPatterns {
 		matches := pattern.FindStringSubmatch(msg)
 		if len(matches) >= 2 {
-			rec["timestamp"] = matches[1]
+			rec["timestamp"] = normalizeUploadTimestamp(matches[1])
 			if i >= 1 && i <= 2 && len(matches) >= 3 {
 				level := strings.ToUpper(matches[2])
 				rec["level"] = level
@@ -275,6 +276,13 @@ func parseTextRecord(line string) map[string]any {
 		}
 	}
 	return rec
+}
+
+func normalizeUploadTimestamp(ts string) string {
+	if ts == "" {
+		return ts
+	}
+	return uploadTimestampNormalizer.Replace(ts)
 }
 
 func normalizeJSONRecord(rec map[string]any) map[string]any {
@@ -296,10 +304,12 @@ func normalizeJSONRecord(rec map[string]any) map[string]any {
 	if _, ok := rec["timestamp"]; !ok {
 		for _, key := range []string{"@timestamp", "time", "ts", "datetime"} {
 			if val, exists := rec[key]; exists {
-				rec["timestamp"] = fmt.Sprintf("%v", val)
+				rec["timestamp"] = normalizeUploadTimestamp(fmt.Sprintf("%v", val))
 				break
 			}
 		}
+	} else if ts, ok := rec["timestamp"].(string); ok {
+		rec["timestamp"] = normalizeUploadTimestamp(ts)
 	}
 	// Normalize level field
 	if _, ok := rec["level"]; !ok {

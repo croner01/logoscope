@@ -162,3 +162,202 @@ func TestTransformSingleOTLPLogUsesKubernetesMapAttributes(t *testing.T) {
 		t.Fatalf("expected labels.app frontend, got %v", labels["app"])
 	}
 }
+
+func TestIsUploadEnvelopeNilPayload(t *testing.T) {
+	if isUploadEnvelope(nil) {
+		t.Fatal("expected false for nil payload")
+	}
+}
+
+func TestIsUploadEnvelopeNonMapPayload(t *testing.T) {
+	if isUploadEnvelope(map[string]any{"type": "logs"}) {
+		t.Fatal("expected false for non-upload type")
+	}
+	if isUploadEnvelope(map[string]any{"type": "upload"}) {
+		t.Fatal("expected false for upload type without records key")
+	}
+}
+
+func TestIsUploadEnvelopeValid(t *testing.T) {
+	envelope := map[string]any{
+		"type":    "upload",
+		"records": []any{},
+	}
+	if !isUploadEnvelope(envelope) {
+		t.Fatal("expected true for valid upload envelope")
+	}
+}
+
+func TestExpandUploadRecordsBasic(t *testing.T) {
+	envelope := map[string]any{
+		"type":         "upload",
+		"upload_id":    "upl_18c4a1b2c3d4",
+		"service_name": "my-service",
+		"namespace":    "production",
+		"records": []any{
+			map[string]any{
+				"message":   "[ERROR] connection timeout",
+				"timestamp": "2026-06-01T11:22:31Z",
+				"level":     "ERROR",
+			},
+			map[string]any{
+				"message":   "[INFO] retry succeeded",
+				"timestamp": "2026-06-01T11:22:33Z",
+				"level":     "INFO",
+			},
+		},
+	}
+
+	messages := expandUploadRecords(envelope, map[string]any{})
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	first := messages[0]
+	if first["log"] != "[ERROR] connection timeout" {
+		t.Fatalf("expected log msg, got %v", first["log"])
+	}
+	if first["timestamp"] != "2026-06-01T11:22:31Z" {
+		t.Fatalf("expected timestamp, got %v", first["timestamp"])
+	}
+	if first["severity"] != "ERROR" {
+		t.Fatalf("expected severity ERROR, got %v", first["severity"])
+	}
+	if first["service.name"] != "my-service" {
+		t.Fatalf("expected service.name my-service, got %v", first["service.name"])
+	}
+
+	k8s := asMap(first["kubernetes"])
+	if k8s["pod_name"] != "upload-upl_18c4a1b2" {
+		t.Fatalf("expected synthetic pod_name, got %v", k8s["pod_name"])
+	}
+	if k8s["namespace_name"] != "production" {
+		t.Fatalf("expected namespace production, got %v", k8s["namespace_name"])
+	}
+
+	labels := asMap(k8s["labels"])
+	if labels["source"] != "upload" {
+		t.Fatalf("expected labels.source upload, got %v", labels["source"])
+	}
+	if labels["upload_id"] != "upl_18c4a1b2c3d4" {
+		t.Fatalf("expected labels.upload_id, got %v", labels["upload_id"])
+	}
+}
+
+func TestExpandUploadRecordsDefaults(t *testing.T) {
+	envelope := map[string]any{
+		"type":    "upload",
+		"records": []any{
+			map[string]any{
+				"message":   "plain log line",
+				"timestamp": "",
+				"level":     "",
+			},
+		},
+	}
+
+	messages := expandUploadRecords(envelope, map[string]any{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+
+	msg := messages[0]
+	if msg["log"] != "plain log line" {
+		t.Fatalf("expected log msg, got %v", msg["log"])
+	}
+	if msg["severity"] != "INFO" {
+		t.Fatalf("expected default severity INFO, got %v", msg["severity"])
+	}
+	if msg["service.name"] != "offline-upload" {
+		t.Fatalf("expected default service.name offline-upload, got %v", msg["service.name"])
+	}
+
+	k8s := asMap(msg["kubernetes"])
+	if k8s["pod_name"] != "offline-upload" {
+		t.Fatalf("expected default pod_name offline-upload, got %v", k8s["pod_name"])
+	}
+	if k8s["namespace_name"] != "default" {
+		t.Fatalf("expected default namespace default, got %v", k8s["namespace_name"])
+	}
+}
+
+func TestExpandUploadRecordsSkipsEmptyMessage(t *testing.T) {
+	envelope := map[string]any{
+		"type":    "upload",
+		"records": []any{
+			map[string]any{"message": "", "level": "ERROR"},
+			map[string]any{"message": "valid message", "level": "INFO"},
+		},
+	}
+
+	messages := expandUploadRecords(envelope, map[string]any{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message after skipping empty, got %d", len(messages))
+	}
+	if messages[0]["log"] != "valid message" {
+		t.Fatalf("expected valid message, got %v", messages[0]["log"])
+	}
+}
+
+func TestExpandUploadRecordsSkipsNonMapRecords(t *testing.T) {
+	envelope := map[string]any{
+		"type": "upload",
+		"records": []any{
+			"not a map",
+			map[string]any{"message": "valid", "level": "INFO"},
+			123,
+		},
+	}
+
+	messages := expandUploadRecords(envelope, map[string]any{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message after skipping non-maps, got %d", len(messages))
+	}
+}
+
+func TestBuildLogQueueMessagesExpandsUploadEnvelope(t *testing.T) {
+	payload := map[string]any{
+		"type":      "upload",
+		"upload_id": "upl_test12345",
+		"records": []any{
+			map[string]any{
+				"message":   "uploaded log line",
+				"timestamp": "2026-06-01T12:00:00Z",
+				"level":     "WARN",
+			},
+		},
+	}
+
+	messages := buildLogQueueMessages(payload, "{}", map[string]any{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message from upload envelope, got %d", len(messages))
+	}
+
+	msg := messages[0]
+	if msg["log"] != "uploaded log line" {
+		t.Fatalf("expected log msg, got %v", msg["log"])
+	}
+	if msg["severity"] != "WARN" {
+		t.Fatalf("expected severity WARN, got %v", msg["severity"])
+	}
+
+	k8s := asMap(msg["kubernetes"])
+	if k8s["pod_name"] != "upload-upl_test1234" {
+		t.Fatalf("expected pod_name upload-upl_test1234, got %v", k8s["pod_name"])
+	}
+}
+
+func TestBuildLogQueueMessagesEmptyUploadRecordsFallsBack(t *testing.T) {
+	payload := map[string]any{
+		"type":    "upload",
+		"records": []any{},
+	}
+
+	messages := buildLogQueueMessages(payload, "", map[string]any{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 fallback message, got %d", len(messages))
+	}
+	if messages[0]["log"] != "" {
+		t.Fatalf("expected empty log from fallback, got %v", messages[0]["log"])
+	}
+}
