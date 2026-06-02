@@ -931,10 +931,7 @@ const LogsExplorer: React.FC = () => {
   const isPatternMode = logsViewMode === 'pattern';
   const isStreamMode = logsViewMode === 'stream';
   const hasExplicitTimeRange = Boolean(startTime || endTime);
-  const hasPreciseCorrelationFilters = Boolean(
-    traceIdFilter || requestIdFilter || correlationTraceIds.length > 0 || correlationRequestIds.length > 0,
-  );
-  
+
   const apiParams = useMemo(() => {
     const params: LogsQueryParams = { limit: PAGE_SIZE };
     if (selectedLevels.length === 1) params.level = selectedLevels[0];
@@ -955,17 +952,17 @@ const LogsExplorer: React.FC = () => {
     if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
+      if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
+      if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
+      if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
+      if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
       if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     return params;
-  }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, hasPreciseCorrelationFilters, effectiveDefaultTimeWindow]);
+  }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
 
   const { data, loading, error, refetch } = useEvents(apiParams);
   const aggregatedParams = useMemo(() => {
@@ -994,10 +991,10 @@ const LogsExplorer: React.FC = () => {
     if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
+      if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
+      if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
+      if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
+      if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
       if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!startTime && !endTime) {
@@ -1021,7 +1018,6 @@ const LogsExplorer: React.FC = () => {
     excludeHealthCheck,
     anchorTime,
     topologyJumpContext,
-    hasPreciseCorrelationFilters,
     effectiveDefaultTimeWindow,
   ]);
   const {
@@ -1054,10 +1050,10 @@ const LogsExplorer: React.FC = () => {
     if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
-      if (!hasPreciseCorrelationFilters && topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
+      if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
+      if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
+      if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
+      if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
       if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!startTime && !endTime) {
@@ -1067,7 +1063,7 @@ const LogsExplorer: React.FC = () => {
     params.limit_namespaces = 300;
     params.limit_levels = 20;
     return params;
-  }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, hasPreciseCorrelationFilters, effectiveDefaultTimeWindow]);
+  }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
   const { data: facetsData } = useLogFacets(facetParams);
 
   useEffect(() => {

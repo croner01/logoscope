@@ -826,6 +826,13 @@ def query_logs(
     effective_search = None if edge_context_active else context.get("search")
     if same_edge_endpoints and not explicit_search:
         effective_search = None
+    if not edge_context_active and not same_edge_endpoints \
+            and normalized_source_service and normalized_target_service \
+            and (requested_trace_ids or requested_request_ids):
+        requested_service_names = normalize_optional_str_list_fn(
+            [normalized_target_service, *requested_service_names]
+        )
+        effective_search = None
     effective_start_time = context.get("start_time")
     effective_end_time = context.get("end_time")
     fallback_time_window = context.get("time_window") or _resolve_query_logs_default_window()
@@ -1128,6 +1135,13 @@ def query_logs_facets(
     effective_correlation_mode = _normalize_correlation_mode(correlation_mode)
     effective_search = None if edge_context_active else context.get("search")
     if same_edge_endpoints and not explicit_search:
+        effective_search = None
+    if not edge_context_active and not same_edge_endpoints \
+            and normalized_source_service and normalized_target_service \
+            and (requested_trace_ids or requested_request_ids):
+        requested_service_names = normalize_optional_str_list_fn(
+            [normalized_target_service, *requested_service_names]
+        )
         effective_search = None
     effective_start_time = context.get("start_time")
     effective_end_time = context.get("end_time")
@@ -1946,6 +1960,13 @@ def query_logs_aggregated(
     normalized_anchor_time = str(anchor_time or "").strip() or None
     effective_search = None if edge_context_active else context.get("search")
     if same_edge_endpoints and not explicit_search:
+        effective_search = None
+    if not edge_context_active and not same_edge_endpoints \
+            and normalized_source_service and normalized_target_service \
+            and (requested_trace_ids or requested_request_ids):
+        requested_service_names = normalize_optional_str_list_fn(
+            [normalized_target_service, *requested_service_names]
+        )
         effective_search = None
     effective_start_time = context.get("start_time")
     effective_end_time = context.get("end_time")
