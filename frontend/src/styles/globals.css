@@ -558,6 +558,10 @@ h1,h2,h3,h4,h5,h6 { font-weight: 600; line-height: 1.25; }
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+@keyframes edgeFadeIn {
+  from { opacity: 0.3; }
+  to   { opacity: 1; }
+}
 
 .animate-spin      { animation: spin 1s linear infinite; }
 .animate-pulse     { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
@@ -565,6 +569,7 @@ h1,h2,h3,h4,h5,h6 { font-weight: 600; line-height: 1.25; }
 .animate-slide-r   { animation: slideInRight 0.22s ease-out both; }
 .animate-slide-d   { animation: slideInDown 0.18s ease-out both; }
 .animate-status    { animation: statusPulse 2s ease-in-out infinite; }
+.edge-entering     { animation: edgeFadeIn 2s ease-out forwards; }
 
 /* Skeleton shimmer */
 .skeleton {

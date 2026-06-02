@@ -11,6 +11,8 @@ import {
   Maximize2,
   Minimize2,
   Network,
+  Pin,
+  PinOff,
   RefreshCw,
   X,
   ZoomIn,
@@ -23,7 +25,7 @@ import LoadingState from '../components/common/LoadingState';
 import ErrorState from '../components/common/ErrorState';
 import Tooltip from '../components/common/Tooltip';
 import { api } from '../utils/api';
-import type { Event } from '../utils/api';
+import type { Event, TopologyGraph } from '../utils/api';
 import { extractEventRequestIds, extractEventTraceIds } from '../utils/logCorrelation';
 import {
   computeEdgeIssueScore,
@@ -44,6 +46,7 @@ import { resolveCanonicalServiceName } from '../utils/serviceName';
 
 type LayoutMode = 'swimlane' | 'grid' | 'free';
 type EvidenceMode = 'all' | 'observed' | 'inferred';
+type EdgeLifecycleState = 'entering' | 'active' | 'departing';
 type MessageTargetPattern = 'url' | 'kv' | 'proxy' | 'rpc';
 type InferenceMode = 'rule' | 'hybrid_score';
 type TopologyEntity = {
@@ -219,6 +222,8 @@ interface EdgeRenderDatum {
   flowDotCount: number;
   flowDuration: number;
   color: { stroke: string; marker: string; severity: 'danger' | 'warning' | 'normal'; meaning: string };
+  lifecycleStage?: EdgeLifecycleState;
+  lifecycleDashArray?: string;
 }
 
 interface HoverCardState {
@@ -1044,6 +1049,12 @@ const TopologyPage: React.FC = () => {
   const [selectedPathId, setSelectedPathId] = useState('');
   const [changeOverlayEvents, setChangeOverlayEvents] = useState<ChangeOverlayEvent[]>([]);
   const [suppressWeakEdges, setSuppressWeakEdges] = useState(true);
+  const [isFrozen, setIsFrozen] = useState(false);
+  const [edgeLifecycle, setEdgeLifecycle] = useState<Record<string, EdgeLifecycleState>>({});
+  const frozenTopologyRef = useRef<TopologyGraph | null>(null);
+  const departingTimersRef = useRef<Record<string, number>>({});
+  const previousEdgeKeysRef = useRef<Set<string>>(new Set());
+  const initializedEdgeKeysRef = useRef(false);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1116,7 +1127,11 @@ const TopologyPage: React.FC = () => {
       message_target_max_per_log: messageTargetMaxPerLog,
     },
   });
+
   const topologyData = useMemo(() => {
+    if (isFrozen && frozenTopologyRef.current) {
+      return frozenTopologyRef.current;
+    }
     const realtimeWindow = String(realtimeTopology?.metadata?.time_window || '').trim().toUpperCase();
     const expectedWindow = String(timeWindow || '').trim().toUpperCase();
     const realtimeInferenceQuality = realtimeTopology?.metadata?.inference_quality || {};
@@ -1162,7 +1177,18 @@ const TopologyPage: React.FC = () => {
     queryNamespace,
     realtimeTopology,
     timeWindow,
+    isFrozen,
   ]);
+
+  useEffect(() => {
+    if (isFrozen && !frozenTopologyRef.current) {
+      frozenTopologyRef.current = topologyData;
+    }
+    if (!isFrozen) {
+      frozenTopologyRef.current = null;
+    }
+  }, [isFrozen, topologyData]);
+
   const hasTopologyMetadata = useMemo(() => {
     const metadata = topologyData?.metadata;
     if (!metadata || typeof metadata !== 'object') {
@@ -1510,6 +1536,83 @@ const TopologyPage: React.FC = () => {
     () => (filteredTopology.edges || []) as TopologyEdgeEntity[],
     [filteredTopology.edges],
   );
+
+  useEffect(() => {
+    if (isFrozen) return;
+    const baseEdges = topologyData?.edges || [];
+    if (!baseEdges.length) return;
+
+    const newKeys: Set<string> = new Set(baseEdges.map((e: TopologyEdgeEntity) => edgePairKey(e)));
+
+    if (!initializedEdgeKeysRef.current) {
+      previousEdgeKeysRef.current = newKeys;
+      initializedEdgeKeysRef.current = true;
+      const initial: Record<string, EdgeLifecycleState> = {};
+      newKeys.forEach((k: string) => { initial[k] = 'active'; });
+      setEdgeLifecycle(initial);
+      return;
+    }
+
+    const prevKeys = previousEdgeKeysRef.current;
+    const enteringKeys = new Set([...newKeys].filter((k: string) => !prevKeys.has(k)));
+    const departingKeys = new Set([...prevKeys].filter((k: string) => !newKeys.has(k)));
+
+    setEdgeLifecycle((prev) => {
+      const next: Record<string, EdgeLifecycleState> = {};
+
+      newKeys.forEach((key: string) => {
+        const priorState = prev[key];
+        if (enteringKeys.has(key)) {
+          next[key] = 'entering';
+        } else if (priorState === 'departing') {
+          if (departingTimersRef.current[key] !== undefined) {
+            window.clearTimeout(departingTimersRef.current[key]);
+            delete departingTimersRef.current[key];
+          }
+          next[key] = 'active';
+        } else {
+          next[key] = 'active';
+        }
+      });
+
+      departingKeys.forEach((key: string) => {
+        next[key] = 'departing';
+        if (departingTimersRef.current[key] === undefined) {
+          departingTimersRef.current[key] = window.setTimeout(() => {
+            setEdgeLifecycle((currentState) => {
+              const updated = { ...currentState };
+              delete updated[key];
+              return updated;
+            });
+            delete departingTimersRef.current[key];
+          }, 5000);
+        }
+      });
+
+      return next;
+    });
+
+    enteringKeys.forEach((key: string) => {
+      window.setTimeout(() => {
+        setEdgeLifecycle((currentState) => {
+          if (currentState[key] === 'entering') {
+            return { ...currentState, [key]: 'active' };
+          }
+          return currentState;
+        });
+      }, 2000);
+    });
+
+    previousEdgeKeysRef.current = newKeys;
+  }, [topologyData?.edges, isFrozen]);
+
+  useEffect(() => {
+    return () => {
+      const timers = departingTimersRef.current;
+      Object.values(timers).forEach((id) => window.clearTimeout(id));
+      departingTimersRef.current = {};
+    };
+  }, []);
 
   const nodeLabelById = useMemo(() => {
     const mapping = new Map<string, string>();
@@ -2827,7 +2930,20 @@ const TopologyPage: React.FC = () => {
       const path = `M ${x1} ${y1} C ${c1x} ${c1y} ${c2x} ${c2y} ${x2} ${y2}`;
 
       const relation = getRelationshipLabel(edge?.metrics?.reason || '');
-      const color = getEdgeColor(edge);
+      const pairKey = edgePairKey(edge);
+      const lifecycle = edgeLifecycle[pairKey] || 'active';
+
+      let color = getEdgeColor(edge);
+      let lifecycleDashArray: string | undefined;
+
+      if (lifecycle === 'entering') {
+        color = { stroke: '#22d3ee', marker: 'arrow-entering', severity: 'normal' as const, meaning: '新链路' };
+        lifecycleDashArray = '6 4';
+      } else if (lifecycle === 'departing') {
+        color = { stroke: '#fb7185', marker: 'arrow-danger', severity: 'danger' as const, meaning: '即将移除' };
+        lifecycleDashArray = '6 4';
+      }
+
       const score = computeEdgeIssueScore(edge);
       const requestRate = toMetric(edge?.metrics?.rps ?? edge?.metrics?.call_count, 0);
       const baseWidth = Math.min(6.8, Math.max(2.2, Math.log10(requestRate + 10) * 1.75));
@@ -2925,6 +3041,8 @@ const TopologyPage: React.FC = () => {
         flowDotCount,
         flowDuration,
         color,
+        lifecycleStage: lifecycle,
+        lifecycleDashArray,
       });
     });
 
@@ -2942,6 +3060,7 @@ const TopologyPage: React.FC = () => {
     visibleNodes.length,
     visibleEdges,
     zoom,
+    edgeLifecycle,
   ]);
 
   const interactiveEdgeData = useMemo(() => {
@@ -3484,6 +3603,18 @@ const TopologyPage: React.FC = () => {
             <button onClick={refetch} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800">
               <RefreshCw className="mr-1 inline h-3.5 w-3.5" />刷新
             </button>
+            <button
+              onClick={() => setIsFrozen((prev) => !prev)}
+              className={`rounded-lg border px-3 py-1.5 text-xs ${
+                isFrozen
+                  ? 'border-blue-400 bg-blue-500/20 text-blue-100'
+                  : 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
+              }`}
+              title={isFrozen ? '已冻结：点击解除冻结恢复实时更新' : '冻结拓扑图谱'}
+            >
+              {isFrozen ? <PinOff className="mr-1 inline h-3.5 w-3.5" /> : <Pin className="mr-1 inline h-3.5 w-3.5" />}
+              {isFrozen ? '已冻结' : '冻结'}
+            </button>
             <button onClick={toggleFullscreen} className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-200 hover:bg-slate-800">
               {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
@@ -3494,6 +3625,11 @@ const TopologyPage: React.FC = () => {
           <span className={`inline-flex items-center rounded-full border px-2.5 py-1 ${topologyRenderSource === 'realtime' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100' : 'border-slate-600 bg-slate-900 text-slate-300'}`}>
             来源: {topologyRenderSource === 'realtime' ? '实时推送' : '查询快照'}
           </span>
+          {isFrozen && (
+            <span className="inline-flex items-center rounded-full border border-blue-400/50 bg-blue-500/15 px-2.5 py-1 text-blue-100">
+              <PinOff className="mr-1 h-3 w-3" />已冻结
+            </span>
+          )}
           <span className={`inline-flex items-center rounded-full border px-2.5 py-1 ${realtimeConnected ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100' : 'border-amber-500/40 bg-amber-500/10 text-amber-100'}`}>
             WS: {realtimeConnected ? '已连接' : '未连接'}
           </span>
@@ -3555,6 +3691,9 @@ const TopologyPage: React.FC = () => {
                   <marker id="arrow-danger" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
                     <path d="M0,0 L8,4 L0,8 L2,4 Z" fill="#fb7185" />
                   </marker>
+                  <marker id="arrow-entering" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                    <path d="M0,0 L8,4 L0,8 L2,4 Z" fill="#22d3ee" />
+                  </marker>
                 </defs>
 
                 {laneBands.map((lane, index) => (
@@ -3585,12 +3724,20 @@ const TopologyPage: React.FC = () => {
                 ))}
 
                 {edgeRenderData.map((item) => {
-                  const { uid, edge, path, color, edgeWidth, edgeOpacity, flowDotCount, labelVisible, labelX, labelY, labelStroke, labelTextColor, score, flowDuration } =
+                  const { uid, edge, path, color, edgeWidth, edgeOpacity, flowDotCount, labelVisible, labelX, labelY, labelStroke, labelTextColor, score, flowDuration,
+                    lifecycleStage, lifecycleDashArray } =
                     item;
+                  const dashProps = lifecycleDashArray ? { strokeDasharray: lifecycleDashArray } : {};
                   return (
-                    <g key={`edge-vis-${uid}`}>
-                      <path d={path} stroke={color.stroke} strokeWidth={edgeWidth + 4} fill="none" opacity={Math.max(0.1, edgeOpacity * 0.22)} />
-                      <path d={path} stroke={color.stroke} strokeWidth={edgeWidth} fill="none" opacity={edgeOpacity} markerEnd={`url(#${color.marker})`} />
+                    <g key={`edge-vis-${uid}`}
+                      className={lifecycleStage === 'entering' ? 'edge-entering' : undefined}
+                    >
+                      <path d={path} stroke={color.stroke} strokeWidth={edgeWidth + 4} fill="none" opacity={Math.max(0.1, edgeOpacity * 0.22)}
+                        {...dashProps}
+                      />
+                      <path d={path} stroke={color.stroke} strokeWidth={edgeWidth} fill="none" opacity={edgeOpacity} markerEnd={`url(#${color.marker})`}
+                        {...dashProps}
+                      />
                       {flowDotCount > 0 &&
                         Array.from({ length: flowDotCount }).map((_, dotIndex) => (
                           <circle
