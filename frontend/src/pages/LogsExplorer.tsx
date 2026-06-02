@@ -63,8 +63,8 @@ const LOG_LEVELS: readonly LogLevel[] = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERRO
 const isLogLevel = (value: string): value is LogLevel =>
   (LOG_LEVELS as readonly string[]).includes(value);
 const PAGE_SIZE = 200;
-const DEFAULT_LOGS_TIME_WINDOW = '1 HOUR';
-const FALLBACK_LOGS_TIME_WINDOW = '6 HOUR';
+const DEFAULT_LOGS_TIME_WINDOW = '30 MINUTE';
+const FALLBACK_LOGS_TIME_WINDOW = '30 MINUTE';
 type ResizableColumn = 'time' | 'service' | 'pod' | 'level' | 'action';
 type ColumnWidths = Record<ResizableColumn, number>;
 const DEFAULT_COLUMN_WIDTHS: ColumnWidths = {

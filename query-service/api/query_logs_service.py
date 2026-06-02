@@ -27,7 +27,7 @@ except ModuleNotFoundError as exc:
     PatternAggregator = _module.PatternAggregator
 
 _QUERY_LOGS_DEFAULT_TIME_WINDOW_ENV = "QUERY_LOGS_DEFAULT_TIME_WINDOW"
-_QUERY_LOGS_DEFAULT_TIME_WINDOW = "1 HOUR"
+_QUERY_LOGS_DEFAULT_TIME_WINDOW = "30 MINUTE"
 _QUERY_LOGS_MAX_THREADS_ENV = "QUERY_LOGS_MAX_THREADS"
 _QUERY_LOGS_MAX_THREADS = 4
 _QUERY_LOGS_FACETS_MAX_SERVICES_ENV = "QUERY_LOGS_FACETS_MAX_SERVICES"
@@ -957,7 +957,7 @@ def query_logs(
     {where_clause}
     ORDER BY timestamp DESC, id DESC
     LIMIT {{limit_plus_one:Int32}}
-    SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+    SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
     params["limit_plus_one"] = limit + 1
     params["max_threads"] = max_threads
@@ -1312,7 +1312,7 @@ def query_logs_facets(
     GROUP BY value
     ORDER BY count DESC, value ASC
     LIMIT {{limit_services:Int32}}
-    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}
+    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
     service_params["limit_services"] = applied_limit_services
     service_params["max_threads"] = max_threads
@@ -1353,7 +1353,7 @@ def query_logs_facets(
     GROUP BY value
     ORDER BY count DESC, value ASC
     LIMIT {{limit_levels:Int32}}
-    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}
+    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
     level_params["limit_levels"] = applied_limit_levels
     level_params["max_threads"] = max_threads
@@ -1399,7 +1399,7 @@ def query_logs_facets(
     GROUP BY value
     ORDER BY count DESC, value ASC
     LIMIT {{limit_namespaces:Int32}}
-    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}
+    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
     namespace_params["limit_namespaces"] = applied_limit_namespaces
     namespace_params["max_threads"] = max_threads
@@ -1585,7 +1585,7 @@ def query_topology_edge_logs_preview(
         {where_clause}
         ORDER BY timestamp DESC
         LIMIT {{query_limit:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         return storage_adapter.execute_query(query, final_params)
 
@@ -2054,7 +2054,7 @@ def query_logs_aggregated(
     {where_clause}
     ORDER BY timestamp DESC
     LIMIT {{limit:Int32}}
-    SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+    SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
     params["limit"] = limit
     params["max_threads"] = max_threads
@@ -2137,7 +2137,7 @@ def query_logs_context(
         PREWHERE trace_id = {{trace_id:String}}
         ORDER BY timestamp ASC, id ASC
         LIMIT {{limit:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         params = {
             "trace_id": normalized_trace_id,
@@ -2208,7 +2208,7 @@ def query_logs_context(
                   )
                 ORDER BY timestamp DESC, id DESC
                 LIMIT {{before_count:Int32}}
-                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
                 """
                 fallback_before_query = f"""
                 SELECT {context_fields}
@@ -2224,7 +2224,7 @@ def query_logs_context(
                   )
                 ORDER BY timestamp DESC, id DESC
                 LIMIT {{before_count:Int32}}
-                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
                 """
 
                 before_results: List[Dict[str, Any]] = []
@@ -2270,7 +2270,7 @@ def query_logs_context(
                   )
                 ORDER BY timestamp ASC, id ASC
                 LIMIT {{after_count:Int32}}
-                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
                 """
                 fallback_after_query = f"""
                 SELECT {context_fields}
@@ -2286,7 +2286,7 @@ def query_logs_context(
                   )
                 ORDER BY timestamp ASC, id ASC
                 LIMIT {{after_count:Int32}}
-                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+                SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
                 """
 
                 after_results: List[Dict[str, Any]] = []
@@ -2374,7 +2374,7 @@ def query_logs_context(
             AND {before_anchor_clause}
         ORDER BY timestamp DESC, id DESC
         LIMIT {{before_count:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         fallback_before_query = f"""
         SELECT {context_fields}
@@ -2383,7 +2383,7 @@ def query_logs_context(
             AND {before_anchor_clause}
         ORDER BY timestamp DESC, id DESC
         LIMIT {{before_count:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         before_results: List[Dict[str, Any]] = []
         for context_window_minutes in context_window_minutes_candidates:
@@ -2421,7 +2421,7 @@ def query_logs_context(
             AND {after_anchor_clause}
         ORDER BY timestamp ASC, id ASC
         LIMIT {{after_count:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         fallback_after_query = f"""
         SELECT {context_fields}
@@ -2430,7 +2430,7 @@ def query_logs_context(
             AND {after_anchor_clause}
         ORDER BY timestamp ASC, id ASC
         LIMIT {{after_count:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         after_results: List[Dict[str, Any]] = []
         for context_window_minutes in context_window_minutes_candidates:
@@ -2462,7 +2462,7 @@ def query_logs_context(
             AND timestamp = toDateTime64({{timestamp:String}}, 9, 'UTC')
         ORDER BY timestamp DESC, id DESC
         LIMIT {{current_limit:Int32}}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}
+        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
         """
         current_limit = max(int(limit or 0), before_count + after_count + 1, 20)
         current_results = storage_adapter.execute_query(
