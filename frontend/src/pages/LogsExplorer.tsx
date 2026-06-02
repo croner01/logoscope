@@ -826,7 +826,7 @@ const LogsExplorer: React.FC = () => {
   const [loadedPageCount, setLoadedPageCount] = useState(0);
   const [autoExpandedWindow, setAutoExpandedWindow] = useState(false);
   const loadingMoreRef = useRef(false);
-  const autoExpandGateRef = useRef(false);
+  const dataUpdatedAfterAutoExpandRef = useRef(true);
   const effectiveDefaultTimeWindow = autoExpandedWindow ? FALLBACK_LOGS_TIME_WINDOW : DEFAULT_LOGS_TIME_WINDOW;
 
   const applyTimeRange = useCallback((nextStart: string, nextEnd: string) => {
@@ -1078,6 +1078,7 @@ const LogsExplorer: React.FC = () => {
     setNextCursor(data.next_cursor || null);
     setAnchorTime(data.anchor_time || null);
     setLoadedPageCount((data.events || []).length > 0 ? 1 : 0);
+    dataUpdatedAfterAutoExpandRef.current = true;
   }, [data]);
 
   useEffect(() => {
@@ -1089,16 +1090,10 @@ const LogsExplorer: React.FC = () => {
     }
 
     if (!loading && data && (data.events || []).length === 0 && !autoExpandedWindow) {
-      autoExpandGateRef.current = true;
+      dataUpdatedAfterAutoExpandRef.current = false;
       setAutoExpandedWindow(true);
     }
   }, [hasExplicitTimeRange, autoExpandedWindow, loading, data]);
-
-  useEffect(() => {
-    if (loading) {
-      autoExpandGateRef.current = false;
-    }
-  }, [loading]);
 
   // 实时日志流
   const realtimeFilters = useMemo(() => ({
@@ -2601,6 +2596,11 @@ const LogsExplorer: React.FC = () => {
     return <ErrorState message={aggregatedError.message} onRetry={refetchAggregated} />;
   }
 
+  const shouldAutoExpand = !loading && data && (data.events || []).length === 0 && !autoExpandedWindow && !hasExplicitTimeRange;
+  const isInitialSyncPending = !loading && data && (data.events || []).length > 0 && pagedEvents.length === 0;
+  const isAutoExpandPending = autoExpandedWindow && !loading && !dataUpdatedAfterAutoExpandRef.current;
+  const showLoadingInsteadOfEmpty = loading || shouldAutoExpand || isInitialSyncPending || isAutoExpandPending;
+
   return (
     <div className="flex flex-col h-full overflow-hidden" style={{ background: 'var(--app-bg)' }}>
       {/* 顶部工具栏 */}
@@ -3439,7 +3439,7 @@ const LogsExplorer: React.FC = () => {
                       }
                     }}
                   />
-                ) : loading || autoExpandGateRef.current ? (
+                ) : showLoadingInsteadOfEmpty ? (
                   <div className="flex items-center justify-center h-full">
                     <LoadingState message="加载日志数据..." />
                   </div>
