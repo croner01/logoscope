@@ -20,7 +20,7 @@ import {
 } from '../features/ai-runtime/utils/runtimeMessages';
 import { api } from '../utils/api';
 import { buildRuntimeFollowUpContext } from '../utils/runtimeFollowUpContext';
-import type { Event } from '../utils/api';
+import type { Event, ExecExecutorStatusRow } from '../utils/api';
 import { normalizeAgentRunEventEnvelope, type AgentRunEventEnvelope } from '../utils/aiAgentRuntime';
 import {
   agentRunReducer,
@@ -41,6 +41,7 @@ import {
   extractTraceId,
   extractTraceIdFromRecord,
 } from '../utils/runtimeCorrelation';
+import { resolveRuntimeClientDeadlineMs } from '../utils/commandSpec';
 import {
   buildRuntimeDowngradeNotice,
   resolveRuntimeAnalysisMode,
@@ -1866,6 +1867,18 @@ const AIAnalysis: React.FC = () => {
   const [followUpHasUnseenUpdate, setFollowUpHasUnseenUpdate] = useState(false);
   const [approvalDialog, setApprovalDialog] = useState<FollowUpApprovalCandidate | null>(null);
   const [approvalDialogSubmitting, setApprovalDialogSubmitting] = useState(false);
+  const [manualActionDialog, setManualActionDialog] = useState<FollowUpApprovalCandidate | null>(null);
+  const [manualActionSubmitting, setManualActionSubmitting] = useState(false);
+  const [executorSummary, setExecutorSummary] = useState<{
+    total: number;
+    ready: number;
+    degraded: number;
+    generatedAt?: string;
+    topReadyProfiles: string[];
+    topDegradedProfiles: string[];
+    rows: ExecExecutorStatusRow[];
+  } | null>(null);
+  const [executorLoading, setExecutorLoading] = useState(false);
   const [contextPills, setContextPills] = useState<Array<{ key: string; value: string }>>([]);
   const [tokenHint, setTokenHint] = useState<{
     warning?: boolean;
@@ -1879,7 +1892,7 @@ const AIAnalysis: React.FC = () => {
   const [historyHint, setHistoryHint] = useState<string>('');
   // ── 布局 UI 状态 ──
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
-  const [activeRightTab, setActiveRightTab] = useState<'result' | 'kb' | 'actions'>('result');
+  const [activeRightTab, setActiveRightTab] = useState<'result' | 'kb' | 'actions' | 'executor'>('result');
   // 拖拽调整尺寸：输入卡片高度 & 右侧面板宽度
   const [inputPanelHeight, setInputPanelHeight] = useState<number>(320);
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(320);
@@ -4385,12 +4398,121 @@ const AIAnalysis: React.FC = () => {
     });
   }, []);
 
+  const openManualActionDialog = useCallback((candidate: FollowUpApprovalCandidate) => {
+    const command = normalizeExecutableCommand(candidate.command);
+    if (!command) {
+      setFollowUpError('手动确认命令为空，无法执行');
+      return;
+    }
+    setManualActionDialog({
+      ...candidate,
+      command,
+    });
+  }, []);
+
   const closeApprovalDialog = useCallback(() => {
     if (approvalDialogSubmitting) {
       return;
     }
     setApprovalDialog(null);
   }, [approvalDialogSubmitting]);
+
+  const closeManualActionDialog = useCallback(() => {
+    if (manualActionSubmitting) {
+      return;
+    }
+    setManualActionDialog(null);
+  }, [manualActionSubmitting]);
+
+  const refreshExecutorStatus = useCallback(async () => {
+    setExecutorLoading(true);
+    try {
+      const payload = await api.getExecExecutorStatus();
+      const readyRows = payload.rows.filter((item) => item.dispatch_ready);
+      const degradedRows = payload.rows.filter((item) => item.dispatch_degraded);
+      setExecutorSummary({
+        total: payload.total,
+        ready: payload.ready,
+        degraded: degradedRows.length,
+        generatedAt: payload.generated_at,
+        topReadyProfiles: readyRows.slice(0, 3).map((item) => item.executor_profile),
+        topDegradedProfiles: degradedRows.slice(0, 3).map((item) => item.executor_profile),
+        rows: payload.rows,
+      });
+    } catch (_error: unknown) {
+      // Silently ignore executor status fetch errors.
+    } finally {
+      setExecutorLoading(false);
+    }
+  }, []);
+
+  const executeManualActionDialog = useCallback(async () => {
+    if (!manualActionDialog) {
+      return;
+    }
+    const command = normalizeExecutableCommand(String(manualActionDialog.command || ''));
+    if (!command) {
+      setFollowUpError('手动确认命令为空，无法执行');
+      return;
+    }
+    const runtimeRunId = String(manualActionDialog.runtime_run_id || '').trim();
+    const messageId = String(manualActionDialog.message_id || '').trim();
+
+    setManualActionSubmitting(true);
+    setFollowUpError(null);
+    try {
+      if (runtimeRunId) {
+        await api.executeAIRunCommand(runtimeRunId, {
+          command,
+          purpose: manualActionDialog.title || command,
+          title: manualActionDialog.title || command,
+          action_id: manualActionDialog.action_id || undefined,
+          confirmed: true,
+          elevated: Boolean(manualActionDialog.requires_elevation),
+          client_deadline_ms: resolveRuntimeClientDeadlineMs(180000),
+        });
+        setManualActionDialog(null);
+        showFollowUpNotice('手动确认命令已提交执行', 2200);
+        return;
+      }
+
+      if (messageId && analysisSessionId) {
+        const precheck = await executeFollowUpCommandWithRecovery(
+          analysisSessionId,
+          messageId,
+          { command, confirmed: true, elevated: false },
+        );
+        const precheckStatus = String(precheck.status || '').toLowerCase();
+        if (precheckStatus === 'blocked' || precheckStatus === 'waiting_user_input') {
+          appendFollowUpAssistantMessage(
+            `[手动确认执行结果]\n${formatCommandExecutionMessage(precheck as Record<string, unknown>, command)}`,
+            { approval_execution: true, source_message_id: messageId, command },
+          );
+          setManualActionDialog(null);
+          return;
+        }
+        appendFollowUpAssistantMessage(
+          `[手动确认执行]\n${formatCommandExecutionMessage(precheck as Record<string, unknown>, command)}`,
+          { approval_execution: true, source_message_id: messageId, command },
+        );
+        setManualActionDialog(null);
+        showFollowUpNotice('手动确认命令已提交执行', 2200);
+        return;
+      }
+
+      setFollowUpError('缺少可执行上下文，请先发起分析后再试');
+    } catch (err: unknown) {
+      setFollowUpError(getErrorMessage(err, '手动确认命令执行失败'));
+    } finally {
+      setManualActionSubmitting(false);
+    }
+  }, [
+    manualActionDialog,
+    analysisSessionId,
+    executeFollowUpCommandWithRecovery,
+    appendFollowUpAssistantMessage,
+    showFollowUpNotice,
+  ]);
 
   useEffect(() => {
     if (!approvalDialog) {
@@ -4408,6 +4530,27 @@ const AIAnalysis: React.FC = () => {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [approvalDialog, closeApprovalDialog]);
+
+  useEffect(() => {
+    if (!manualActionDialog) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      event.preventDefault();
+      closeManualActionDialog();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [manualActionDialog, closeManualActionDialog]);
+
+  useEffect(() => {
+    void refreshExecutorStatus();
+  }, [refreshExecutorStatus]);
 
   useEffect(() => {
     if (approvalDialog) {
@@ -4498,6 +4641,34 @@ const AIAnalysis: React.FC = () => {
         return rightTime - leftTime;
       })
   ), [commandRuntimePanelRuns, followUpRuntimePanelRuns]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      if (approvalDialog || manualActionDialog) {
+        return;
+      }
+      const activeRuns = runtimePanelRuns.filter((run) => {
+        const s = String(run.status || '').trim().toLowerCase();
+        return s && s !== 'completed' && s !== 'failed' && s !== 'cancelled' && s !== 'blocked' && run.runId;
+      });
+      if (activeRuns.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      for (const run of activeRuns) {
+        api.interruptAIRun(run.runId, { reason: 'user_interrupt_esc' }).catch(() => {});
+      }
+      showFollowUpNotice(`已中断 ${activeRuns.length} 个运行`, 2200);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [approvalDialog, manualActionDialog, runtimePanelRuns, showFollowUpNotice]);
+
   const resetRuntimeSessions = useCallback(() => {
     resetFollowUpRuntimeSessions();
     resetCommandRuntimeSessions();
@@ -6656,14 +6827,25 @@ const AIAnalysis: React.FC = () => {
                                           : '该动作需要确认后执行。'}
                                       </div>
                                       <div className="mt-1">
-                                        <button
-                                          type="button"
-                                          onClick={() => openApprovalDialog(approvalCandidate)}
-                                          disabled={!canApproveAction}
-                                          className="px-2 py-1 text-[11px] rounded bg-amber-600 text-white border border-amber-600 hover:bg-amber-700 disabled:opacity-50"
-                                        >
-                                          {requiresElevation || requiresConfirmation ? '审批并执行' : '人工确认执行'}
-                                        </button>
+                                        {requiresElevation || requiresConfirmation ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => openApprovalDialog(approvalCandidate)}
+                                            disabled={!canApproveAction}
+                                            className="px-2 py-1 text-[11px] rounded bg-amber-600 text-white border border-amber-600 hover:bg-amber-700 disabled:opacity-50"
+                                          >
+                                            审批并执行
+                                          </button>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => openManualActionDialog(approvalCandidate)}
+                                            disabled={!canApproveAction}
+                                            className="px-2 py-1 text-[11px] rounded bg-cyan-600 text-white border border-cyan-600 hover:bg-cyan-700 disabled:opacity-50"
+                                          >
+                                            人工确认执行
+                                          </button>
+                                        )}
                                         {!canApproveAction && (
                                           <span className="ml-2 text-[10px] text-amber-700">
                                             {streamLoading ? '流式输出中，完成后可审批' : '缺少可执行上下文'}
@@ -6751,14 +6933,25 @@ const AIAnalysis: React.FC = () => {
                                   )}
                                   {approvalCandidate && (
                                     <div className="mt-1">
-                                      <button
-                                        type="button"
-                                        onClick={() => openApprovalDialog(approvalCandidate)}
-                                        disabled={!canApproveAction}
-                                        className="px-2 py-1 text-[11px] rounded bg-amber-600 text-white border border-amber-600 hover:bg-amber-700 disabled:opacity-50"
-                                      >
-                                        {requiresElevation || requiresConfirmation ? '审批并执行' : '人工确认执行'}
-                                      </button>
+                                      {requiresElevation || requiresConfirmation ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => openApprovalDialog(approvalCandidate)}
+                                          disabled={!canApproveAction}
+                                          className="px-2 py-1 text-[11px] rounded bg-amber-600 text-white border border-amber-600 hover:bg-amber-700 disabled:opacity-50"
+                                        >
+                                          审批并执行
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => openManualActionDialog(approvalCandidate)}
+                                          disabled={!canApproveAction}
+                                          className="px-2 py-1 text-[11px] rounded bg-cyan-600 text-white border border-cyan-600 hover:bg-cyan-700 disabled:opacity-50"
+                                        >
+                                          人工确认执行
+                                        </button>
+                                      )}
                                     </div>
                                   )}
                                 </div>
@@ -6913,9 +7106,10 @@ const AIAnalysis: React.FC = () => {
           <div className="flex shrink-0 border-b border-gray-100 bg-slate-50">
             {(
               [
-                { key: 'result', label: '分析结果', icon: <Zap className="w-3.5 h-3.5" /> },
-                { key: 'kb',     label: '知识库',   icon: <Bookmark className="w-3.5 h-3.5" /> },
-                { key: 'actions',label: '操作',     icon: <FileText className="w-3.5 h-3.5" /> },
+                { key: 'result',   label: '分析结果', icon: <Zap className="w-3.5 h-3.5" /> },
+                { key: 'kb',       label: '知识库',   icon: <Bookmark className="w-3.5 h-3.5" /> },
+                { key: 'actions',  label: '操作',     icon: <FileText className="w-3.5 h-3.5" /> },
+                { key: 'executor', label: '执行器',   icon: <RefreshCw className="w-3.5 h-3.5" /> },
               ] as const
             ).map((tab) => (
               <button
@@ -7378,6 +7572,110 @@ const AIAnalysis: React.FC = () => {
               />
             </div>
           )}
+          {/* Tab: 执行器 */}
+          {activeRightTab === 'executor' && (
+            <div className="flex-1 overflow-auto p-3">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-xs font-semibold text-gray-700">执行器 Readiness</h4>
+                <button
+                  type="button"
+                  onClick={() => { void refreshExecutorStatus(); }}
+                  disabled={executorLoading}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                >
+                  {executorLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                  刷新
+                </button>
+              </div>
+              {executorSummary ? (
+                <div className="space-y-3">
+                  <div className="flex gap-2 text-xs">
+                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-emerald-700">
+                      {executorSummary.ready}/{executorSummary.total} ready
+                    </span>
+                    {executorSummary.degraded > 0 && (
+                      <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-amber-700">
+                        {executorSummary.degraded} fallback
+                      </span>
+                    )}
+                  </div>
+                  {executorSummary.topReadyProfiles.length > 0 && (
+                    <div className="text-[11px] text-slate-600">
+                      <span className="font-medium">已接入:</span>{' '}
+                      {executorSummary.topReadyProfiles.join(' / ')}
+                    </div>
+                  )}
+                  {executorSummary.topDegradedProfiles.length > 0 && (
+                    <div className="text-[11px] text-slate-600">
+                      <span className="font-medium">回退中:</span>{' '}
+                      {executorSummary.topDegradedProfiles.join(' / ')}
+                    </div>
+                  )}
+                  {executorSummary.generatedAt && (
+                    <div className="text-[10px] text-slate-400">{formatTime(executorSummary.generatedAt)}</div>
+                  )}
+                  <details className="rounded border border-slate-200 bg-slate-50 p-2">
+                    <summary className="cursor-pointer list-none text-[11px] font-medium text-slate-700">
+                      Ready Profiles
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      {executorSummary.rows.filter((item) => item.dispatch_ready).length > 0 ? (
+                        executorSummary.rows.filter((item) => item.dispatch_ready).map((item) => (
+                          <div key={`ready-${item.executor_profile}`} className="rounded border border-emerald-200 bg-emerald-50 p-2 text-[10px] text-slate-700">
+                            <div className="flex flex-wrap gap-1">
+                              <span className="rounded-full border border-emerald-200 bg-white px-1.5 py-0.5 text-emerald-700 font-medium">
+                                {item.executor_profile}
+                              </span>
+                              {item.dispatch_backend && (
+                                <span className="rounded-full border border-slate-200 bg-white px-1.5 py-0.5">{item.dispatch_backend}</span>
+                              )}
+                              {item.target_identity && (
+                                <span className="rounded-full border border-slate-200 bg-white px-1.5 py-0.5">{item.target_identity}</span>
+                              )}
+                            </div>
+                            {item.dispatch_reason && <div className="mt-1">{item.dispatch_reason}</div>}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-[11px] text-slate-400">暂无可用的 ready profile</div>
+                      )}
+                    </div>
+                  </details>
+                  <details className="rounded border border-slate-200 bg-slate-50 p-2">
+                    <summary className="cursor-pointer list-none text-[11px] font-medium text-slate-700">
+                      Fallback Profiles
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      {executorSummary.rows.filter((item) => item.dispatch_degraded).length > 0 ? (
+                        executorSummary.rows.filter((item) => item.dispatch_degraded).map((item) => (
+                          <div key={`degraded-${item.executor_profile}`} className="rounded border border-amber-200 bg-amber-50 p-2 text-[10px] text-slate-700">
+                            <div className="flex flex-wrap gap-1">
+                              <span className="rounded-full border border-amber-200 bg-white px-1.5 py-0.5 text-amber-800 font-medium">
+                                {item.executor_profile}
+                              </span>
+                              {item.effective_executor_profile && item.effective_executor_profile !== item.executor_profile && (
+                                <span className="rounded-full border border-slate-200 bg-white px-1.5 py-0.5">{item.effective_executor_profile}</span>
+                              )}
+                              {item.target_identity && (
+                                <span className="rounded-full border border-slate-200 bg-white px-1.5 py-0.5">{item.target_identity}</span>
+                              )}
+                            </div>
+                            {item.dispatch_reason && <div className="mt-1">{item.dispatch_reason}</div>}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-[11px] text-slate-400">暂无 degraded profile</div>
+                      )}
+                    </div>
+                  </details>
+                </div>
+              ) : (
+                <div className="text-xs text-slate-400 py-8 text-center">
+                  {executorLoading ? '加载中...' : '点击刷新加载执行器状态'}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
       {approvalDialog && (
@@ -7463,6 +7761,84 @@ const AIAnalysis: React.FC = () => {
               >
                 {approvalDialogSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
                 审批并执行
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {manualActionDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="关闭手动确认弹窗"
+            onClick={closeManualActionDialog}
+            className="absolute inset-0 bg-black/40"
+          />
+          <div className="relative z-10 w-full max-w-2xl rounded-lg border border-cyan-200 bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-cyan-100 px-4 py-3">
+              <div>
+                <div className="text-xs text-cyan-700">人工确认执行</div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {manualActionDialog.title || '确认命令执行'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeManualActionDialog}
+                disabled={manualActionSubmitting}
+                className="inline-flex h-8 w-8 items-center justify-center rounded text-slate-500 hover:bg-slate-100 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="space-y-2 px-4 py-3 text-sm">
+              <div className="flex flex-wrap gap-2 text-[11px]">
+                {manualActionDialog.command_type && (
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-slate-700">
+                    类型: {manualActionDialog.command_type}
+                  </span>
+                )}
+                {manualActionDialog.risk_level && (
+                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 ${
+                    String(manualActionDialog.risk_level).toLowerCase() === 'high'
+                      ? 'border-rose-200 bg-rose-50 text-rose-700'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  }`}>
+                    风险: {manualActionDialog.risk_level}
+                  </span>
+                )}
+              </div>
+              <div className="rounded border border-slate-200 bg-slate-50 p-2 text-[12px] text-slate-800 break-all">
+                <code>{manualActionDialog.command}</code>
+              </div>
+              {manualActionDialog.message && (
+                <div className="rounded border border-cyan-200 bg-cyan-50 p-2 text-[12px] text-cyan-800 whitespace-pre-wrap">
+                  {manualActionDialog.message}
+                </div>
+              )}
+              <div className="text-[11px] text-slate-500">
+                该动作需要你手动确认后执行。确认后命令将直接提交，不会进入审批流。
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-cyan-100 px-4 py-3">
+              <button
+                type="button"
+                onClick={closeManualActionDialog}
+                disabled={manualActionSubmitting}
+                className="px-3 py-1.5 text-sm rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void executeManualActionDialog();
+                }}
+                disabled={manualActionSubmitting}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-cyan-600 text-white text-sm hover:bg-cyan-700 disabled:opacity-50"
+              >
+                {manualActionSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                确认并执行
               </button>
             </div>
           </div>
