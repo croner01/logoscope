@@ -826,6 +826,7 @@ const LogsExplorer: React.FC = () => {
   const [loadedPageCount, setLoadedPageCount] = useState(0);
   const [autoExpandedWindow, setAutoExpandedWindow] = useState(false);
   const loadingMoreRef = useRef(false);
+  const autoExpandGateRef = useRef(false);
   const effectiveDefaultTimeWindow = autoExpandedWindow ? FALLBACK_LOGS_TIME_WINDOW : DEFAULT_LOGS_TIME_WINDOW;
 
   const applyTimeRange = useCallback((nextStart: string, nextEnd: string) => {
@@ -929,6 +930,7 @@ const LogsExplorer: React.FC = () => {
   );
   const isPatternMode = logsViewMode === 'pattern';
   const isStreamMode = logsViewMode === 'stream';
+  const hasExplicitTimeRange = Boolean(startTime || endTime);
   const hasPreciseCorrelationFilters = Boolean(
     traceIdFilter || requestIdFilter || correlationTraceIds.length > 0 || correlationRequestIds.length > 0,
   );
@@ -957,7 +959,7 @@ const LogsExplorer: React.FC = () => {
       if (!hasPreciseCorrelationFilters && topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (!hasPreciseCorrelationFilters && topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
@@ -996,7 +998,7 @@ const LogsExplorer: React.FC = () => {
       if (!hasPreciseCorrelationFilters && topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (!hasPreciseCorrelationFilters && topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
@@ -1056,7 +1058,7 @@ const LogsExplorer: React.FC = () => {
       if (!hasPreciseCorrelationFilters && topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (!hasPreciseCorrelationFilters && topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (!hasPreciseCorrelationFilters && topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
@@ -1079,7 +1081,7 @@ const LogsExplorer: React.FC = () => {
   }, [data]);
 
   useEffect(() => {
-    if (hasExplicitServerFilters) {
+    if (hasExplicitTimeRange) {
       if (autoExpandedWindow) {
         setAutoExpandedWindow(false);
       }
@@ -1087,9 +1089,16 @@ const LogsExplorer: React.FC = () => {
     }
 
     if (!loading && data && (data.events || []).length === 0 && !autoExpandedWindow) {
+      autoExpandGateRef.current = true;
       setAutoExpandedWindow(true);
     }
-  }, [hasExplicitServerFilters, autoExpandedWindow, loading, data]);
+  }, [hasExplicitTimeRange, autoExpandedWindow, loading, data]);
+
+  useEffect(() => {
+    if (loading) {
+      autoExpandGateRef.current = false;
+    }
+  }, [loading]);
 
   // 实时日志流
   const realtimeFilters = useMemo(() => ({
@@ -3430,6 +3439,18 @@ const LogsExplorer: React.FC = () => {
                       }
                     }}
                   />
+                ) : loading || autoExpandGateRef.current ? (
+                  <div className="flex items-center justify-center h-full">
+                    <LoadingState message="加载日志数据..." />
+                  </div>
+                ) : searchQuery.trim() && searchQuery.trim() !== debouncedSearchQuery ? (
+                  <div className="flex items-center justify-center h-full">
+                    <EmptyState
+                      icon={<Search className="w-12 h-12 text-gray-300" />}
+                      title="搜索中..."
+                      description="正在查询匹配的日志"
+                    />
+                  </div>
                 ) : (
                   <div className="flex items-center justify-center h-full">
                     <EmptyState
