@@ -1053,7 +1053,9 @@ const TopologyPage: React.FC = () => {
   const [edgeLifecycle, setEdgeLifecycle] = useState<Record<string, EdgeLifecycleState>>({});
   const frozenTopologyRef = useRef<TopologyGraph | null>(null);
   const departingTimersRef = useRef<Record<string, number>>({});
+  const departingEdgesRef = useRef<Record<string, TopologyEdgeEntity>>({});
   const previousEdgeKeysRef = useRef<Set<string>>(new Set());
+  const prevVisibleEdgesRef = useRef<TopologyEdgeEntity[]>([]);
   const initializedEdgeKeysRef = useRef(false);
 
   const [zoom, setZoom] = useState(1);
@@ -1539,13 +1541,14 @@ const TopologyPage: React.FC = () => {
 
   useEffect(() => {
     if (isFrozen) return;
-    const baseEdges = topologyData?.edges || [];
-    if (!baseEdges.length) return;
+    const currentEdges = visibleEdges || [];
+    if (!currentEdges.length) return;
 
-    const newKeys: Set<string> = new Set(baseEdges.map((e: TopologyEdgeEntity) => edgePairKey(e)));
+    const newKeys: Set<string> = new Set(currentEdges.map((e: TopologyEdgeEntity) => edgePairKey(e)));
 
     if (!initializedEdgeKeysRef.current) {
       previousEdgeKeysRef.current = newKeys;
+      prevVisibleEdgesRef.current = currentEdges;
       initializedEdgeKeysRef.current = true;
       const initial: Record<string, EdgeLifecycleState> = {};
       newKeys.forEach((k: string) => { initial[k] = 'active'; });
@@ -1556,6 +1559,19 @@ const TopologyPage: React.FC = () => {
     const prevKeys = previousEdgeKeysRef.current;
     const enteringKeys = new Set([...newKeys].filter((k: string) => !prevKeys.has(k)));
     const departingKeys = new Set([...prevKeys].filter((k: string) => !newKeys.has(k)));
+
+    if (departingKeys.size > 0) {
+      const prevEdgesByKey = new Map<string, TopologyEdgeEntity>();
+      prevVisibleEdgesRef.current.forEach((e: TopologyEdgeEntity) => {
+        prevEdgesByKey.set(edgePairKey(e), e);
+      });
+      departingKeys.forEach((key: string) => {
+        const edgeObj = prevEdgesByKey.get(key);
+        if (edgeObj && !departingEdgesRef.current[key]) {
+          departingEdgesRef.current[key] = edgeObj;
+        }
+      });
+    }
 
     setEdgeLifecycle((prev) => {
       const next: Record<string, EdgeLifecycleState> = {};
@@ -1569,6 +1585,7 @@ const TopologyPage: React.FC = () => {
             window.clearTimeout(departingTimersRef.current[key]);
             delete departingTimersRef.current[key];
           }
+          delete departingEdgesRef.current[key];
           next[key] = 'active';
         } else {
           next[key] = 'active';
@@ -1585,6 +1602,7 @@ const TopologyPage: React.FC = () => {
               return updated;
             });
             delete departingTimersRef.current[key];
+            delete departingEdgesRef.current[key];
           }, 5000);
         }
       });
@@ -1604,13 +1622,15 @@ const TopologyPage: React.FC = () => {
     });
 
     previousEdgeKeysRef.current = newKeys;
-  }, [topologyData?.edges, isFrozen]);
+    prevVisibleEdgesRef.current = currentEdges;
+  }, [visibleEdges, isFrozen]);
 
   useEffect(() => {
     return () => {
       const timers = departingTimersRef.current;
       Object.values(timers).forEach((id) => window.clearTimeout(id));
       departingTimersRef.current = {};
+      departingEdgesRef.current = {};
     };
   }, []);
 
@@ -2893,10 +2913,21 @@ const TopologyPage: React.FC = () => {
         )
       : visibleEdges;
 
+    const ghostEdges: TopologyEdgeEntity[] = [];
+    if (!isFrozen) {
+      const visibleKeys = new Set(orderedEdges.map((e: TopologyEdgeEntity) => edgePairKey(e)));
+      for (const [key, edgeObj] of Object.entries(departingEdgesRef.current)) {
+        if (edgeLifecycle[key] === 'departing' && !visibleKeys.has(key)) {
+          ghostEdges.push(edgeObj);
+        }
+      }
+    }
+    const allOrderedEdges = ghostEdges.length > 0 ? [...orderedEdges, ...ghostEdges] : orderedEdges;
+
     const labelBoxes: EdgeLabelBox[] = [];
     const rendered: EdgeRenderDatum[] = [];
 
-    orderedEdges.forEach((edge: TopologyEdgeEntity, edgeIndex: number) => {
+    allOrderedEdges.forEach((edge: TopologyEdgeEntity, edgeIndex: number) => {
       const uid = edgeUidByRef.get(edge as object) || resolveEdgeUid(edge, edgeIndex);
       const meta = bundleMetaByUid.get(uid) || {
         key: edgePairKey(edge),
@@ -3061,6 +3092,7 @@ const TopologyPage: React.FC = () => {
     visibleEdges,
     zoom,
     edgeLifecycle,
+    isFrozen,
   ]);
 
   const interactiveEdgeData = useMemo(() => {
