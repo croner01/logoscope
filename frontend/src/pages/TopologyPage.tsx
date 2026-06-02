@@ -1043,7 +1043,7 @@ const TopologyPage: React.FC = () => {
   const [pathViewMode, setPathViewMode] = useState<PathViewMode>('all');
   const [selectedPathId, setSelectedPathId] = useState('');
   const [changeOverlayEvents, setChangeOverlayEvents] = useState<ChangeOverlayEvent[]>([]);
-  const [suppressWeakEdges, setSuppressWeakEdges] = useState(false);
+  const [suppressWeakEdges, setSuppressWeakEdges] = useState(true);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });

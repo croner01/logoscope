@@ -1742,7 +1742,9 @@ class HybridTopologyBuilder:
 
             message_text = row.get("message") or ""
             attrs: Dict[str, Any] = {}
-            request_id = self._extract_request_id({}, message=message_text)
+            local_request_id = self._extract_request_id({}, message=message_text)
+            global_request_id = hybrid_utils.extract_global_request_id(message=message_text)
+            request_id = global_request_id or local_request_id
             namespace_token = str(row.get("namespace") or "").strip().lower()
             needs_namespace_fallback = (
                 namespace_token in {"", "unknown", "none", "null", "-", "n/a"}
@@ -1759,7 +1761,9 @@ class HybridTopologyBuilder:
                 elif isinstance(raw_attrs, dict):
                     attrs = raw_attrs
                 if not request_id:
-                    request_id = self._extract_request_id(attrs, message=message_text)
+                    local_fallback = self._extract_request_id(attrs, message=message_text)
+                    global_fallback = hybrid_utils.extract_global_request_id(message=message_text) if not global_request_id else global_request_id
+                    request_id = global_fallback or local_fallback
 
             prepared.append({
                 "id": row.get("id"),

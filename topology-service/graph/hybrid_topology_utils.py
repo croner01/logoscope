@@ -156,6 +156,28 @@ def extract_request_id(attrs: Dict[str, Any], message: str = "") -> str:
     return ""
 
 
+def extract_global_request_id(message: str = "") -> str:
+    """Extract the global request ID from OpenStack-format log messages.
+
+    OpenStack log format inside brackets:
+        [req-<dashed-uuid> <32-hex-global-id> <32-hex-tenant-id> - ...]
+        [None req-<dashed-uuid> <32-hex-global-id> <32-hex-tenant-id> - ...]
+        [req-<dashed-uuid> - - - - -]                                    (no global id)
+
+    The first 32-char hex string (no dashes) inside the brackets is the
+    global_request_id shared across services. Returns "" if unavailable.
+    """
+    text = str(message or "")
+    bracket_match = re.search(r"\[([^\]]*)\]", text)
+    if not bracket_match:
+        return ""
+    bracket_content = bracket_match.group(1)
+    hex_matches = re.findall(r"\b([0-9a-fA-F]{32})\b", bracket_content)
+    if hex_matches:
+        return hex_matches[0].strip()
+    return ""
+
+
 def is_likely_outbound_message(text: str) -> bool:
     value = str(text or "").lower()
     if not value:
