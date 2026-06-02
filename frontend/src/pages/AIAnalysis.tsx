@@ -2912,25 +2912,102 @@ const AIAnalysis: React.FC = () => {
     return deduped;
   };
 
+  const extractMessageFingerprint = (message: string): string => {
+    return String(message || '')
+      .replace(/\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?/g, '')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '')
+      .replace(/\b[0-9a-f]{16,}\b/gi, '')
+      .replace(/0x[0-9a-f]+/gi, '')
+      .replace(/\d+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
   const prioritizeCrossPullEvents = (events: Event[]): Event[] => {
+    const totalLimit = CROSS_COMPONENT_PULL_LIMIT;
+
+    // 1. Sort by timestamp
     const sorted = [...events].sort((a, b) => {
       const left = new Date(String(a.timestamp || '')).getTime();
       const right = new Date(String(b.timestamp || '')).getTime();
       return left - right;
     });
-    const tracebackErrors = sorted.filter((event) => {
-      const level = String(event.level || '').toUpperCase();
-      return ['ERROR', 'FATAL'].includes(level) && TRACEBACK_HINT_REGEX.test(String(event.message || ''));
-    });
-    const otherErrors = sorted.filter((event) => {
-      const level = String(event.level || '').toUpperCase();
-      return ['ERROR', 'FATAL', 'WARN', 'WARNING'].includes(level) && !TRACEBACK_HINT_REGEX.test(String(event.message || ''));
-    });
-    const others = sorted.filter((event) => {
-      const level = String(event.level || '').toUpperCase();
-      return !['ERROR', 'FATAL', 'WARN', 'WARNING'].includes(level);
-    });
-    return [...tracebackErrors, ...otherErrors, ...others].slice(0, CROSS_COMPONENT_PULL_LIMIT);
+
+    // 2. Group by service_name
+    const byService = new Map<string, Event[]>();
+    for (const event of sorted) {
+      const svc = String(event.service_name || '').trim() || 'unknown';
+      if (!byService.has(svc)) {
+        byService.set(svc, []);
+      }
+      byService.get(svc)!.push(event);
+    }
+
+    // 3. Within each service: dedup by message fingerprint, max 2 per fingerprint
+    const dedupedByService = new Map<string, Event[]>();
+    for (const [svc, svcEvents] of byService) {
+      const byFingerprint = new Map<string, Event[]>();
+      for (const event of svcEvents) {
+        const fp = extractMessageFingerprint(String(event.message || ''));
+        if (!byFingerprint.has(fp)) {
+          byFingerprint.set(fp, []);
+        }
+        if (byFingerprint.get(fp)!.length < 2) {
+          byFingerprint.get(fp)!.push(event);
+        }
+      }
+      const deduped: Event[] = [];
+      for (const group of byFingerprint.values()) {
+        deduped.push(...group);
+      }
+      // Sort within service: ERROR/FATAL first, then WARN, then rest
+      deduped.sort((a, b) => {
+        const levelOrder = (l: string) => {
+          const u = l.toUpperCase();
+          if (u === 'ERROR' || u === 'FATAL') return 0;
+          if (u === 'WARN' || u === 'WARNING') return 1;
+          return 2;
+        };
+        return levelOrder(String(a.level || '')) - levelOrder(String(b.level || ''));
+      });
+      dedupedByService.set(svc, deduped);
+    }
+
+    // 4. Fair distribution: sort services by error count descending, allocate min + round-robin
+    const serviceEntries = Array.from(dedupedByService.entries())
+      .map(([svc, svcEvents]) => ({
+        svc,
+        events: svcEvents,
+        errorCount: svcEvents.filter((e) =>
+          ['ERROR', 'FATAL'].includes(String(e.level || '').toUpperCase()),
+        ).length,
+      }))
+      .sort((a, b) => b.errorCount - a.errorCount);
+
+    const result: Event[] = [];
+    const minPerService = Math.min(3, Math.floor(totalLimit / Math.max(serviceEntries.length, 1)));
+    let remaining = totalLimit;
+
+    // Min quota pass
+    for (const entry of serviceEntries) {
+      const take = Math.min(minPerService, entry.events.length, remaining);
+      result.push(...entry.events.slice(0, take));
+      remaining -= take;
+    }
+
+    // Round-robin remaining
+    const indexes = new Array(serviceEntries.length).fill(minPerService);
+    let i = 0;
+    while (remaining > 0 && serviceEntries.some((e, idx) => indexes[idx] < e.events.length)) {
+      if (indexes[i] < serviceEntries[i].events.length) {
+        result.push(serviceEntries[i].events[indexes[i]]);
+        indexes[i] += 1;
+        remaining -= 1;
+      }
+      i = (i + 1) % serviceEntries.length;
+    }
+
+    return result;
   };
 
   const formatLocalTime = (d: Date): string => {
@@ -3114,23 +3191,20 @@ const AIAnalysis: React.FC = () => {
       }
     });
 
-    // Phase 2: ID 查询结果只来自一个服务时，自动在相同时间窗口内扫描全部服务的 ERROR/FATAL 日志
+    // Phase 2: 补充拉取时间窗口内全部服务的 ERROR/FATAL 日志用于横向关联分析
     if (fetched.length > 0) {
-      const uniqueServices = new Set(fetched.map((e) => String(e.service_name || '').trim()).filter(Boolean));
-      if (uniqueServices.size <= 1) {
-        const expandResult = await api.getEvents({
-          levels: 'ERROR,FATAL',
-          start_time,
-          end_time,
-          limit: 240,
-          exclude_health_check: true,
-        }).catch(() => null);
-        if (expandResult && Array.isArray(expandResult.events)) {
-          const existingIds = new Set(fetched.map((e) => e.id));
-          for (const event of expandResult.events) {
-            if (!existingIds.has(event.id)) {
-              fetched.push(event);
-            }
+      const expandResult = await api.getEvents({
+        levels: 'ERROR,FATAL',
+        start_time,
+        end_time,
+        limit: 240,
+        exclude_health_check: true,
+      }).catch(() => null);
+      if (expandResult && Array.isArray(expandResult.events)) {
+        const existingIds = new Set(fetched.map((e) => e.id));
+        for (const event of expandResult.events) {
+          if (!existingIds.has(event.id)) {
+            fetched.push(event);
           }
         }
       }
