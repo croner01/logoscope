@@ -608,10 +608,10 @@ def _normalize_service_identity(
     if not candidate:
         return "unknown"
 
-    if re.match(r"^(.+)-[a-f0-9]{8,10}-[a-z0-9]{5,10}$", candidate):
-        candidate = re.sub(r"-[a-f0-9]{8,10}-[a-z0-9]{5,10}$", "", candidate)
-    elif re.match(r"^(.+)-[a-f0-9]{8,10}(-[a-f0-9]{4,8})?$", candidate):
-        candidate = re.sub(r"-[a-f0-9]{8,10}(-[a-f0-9]{4,8})?$", "", candidate)
+    if re.match(r"^(.+)-[a-f0-9]{5,14}-[a-z0-9]{5,10}$", candidate):
+        candidate = re.sub(r"-[a-f0-9]{5,14}-[a-z0-9]{5,10}$", "", candidate)
+    elif re.match(r"^(.+)-[a-f0-9]{5,14}(-[a-f0-9]{4,8})?$", candidate):
+        candidate = re.sub(r"-[a-f0-9]{5,14}(-[a-f0-9]{4,8})?$", "", candidate)
     elif re.match(r"^(.+)-[a-z0-9]{5}$", candidate):
         candidate = re.sub(r"-[a-z0-9]{5}$", "", candidate)
     elif re.match(r"^(.+)-\d+$", candidate):
@@ -639,10 +639,10 @@ def _build_normalized_service_sql(
     return (
         "multiIf("
         f"length({candidate}) = 0, 'unknown', "
-        f"match({candidate}, '^(.+)-[a-f0-9]{{8,10}}-[a-z0-9]{{5,10}}$'), "
-        f"replaceRegexpOne({candidate}, '-[a-f0-9]{{8,10}}-[a-z0-9]{{5,10}}$', ''), "
-        f"match({candidate}, '^(.+)-[a-f0-9]{{8,10}}(-[a-f0-9]{{4,8}})?$'), "
-        f"replaceRegexpOne({candidate}, '-[a-f0-9]{{8,10}}(-[a-f0-9]{{4,8}})?$', ''), "
+        f"match({candidate}, '^(.+)-[a-f0-9]{{5,14}}-[a-z0-9]{{5,10}}$'), "
+        f"replaceRegexpOne({candidate}, '-[a-f0-9]{{5,14}}-[a-z0-9]{{5,10}}$', ''), "
+        f"match({candidate}, '^(.+)-[a-f0-9]{{5,14}}(-[a-f0-9]{{4,8}})?$'), "
+        f"replaceRegexpOne({candidate}, '-[a-f0-9]{{5,14}}(-[a-f0-9]{{4,8}})?$', ''), "
         f"match({candidate}, '^(.+)-[a-z0-9]{{5}}$'), "
         f"replaceRegexpOne({candidate}, '-[a-z0-9]{{5}}$', ''), "
         f"match({candidate}, '^(.+)-\\\\d+$'), "
