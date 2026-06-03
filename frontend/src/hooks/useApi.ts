@@ -104,6 +104,12 @@ function createApiHook<T, P extends object | undefined>(
         setState(prev => ({ ...prev, loading: true, error: null }));
         const result = await apiFunc(paramsRef.current as P);
         if (requestSeq !== requestSeqRef.current) {
+          setState(prev => {
+            if (!prev.data) {
+              return { data: result, loading: prev.loading, error: null };
+            }
+            return prev;
+          });
           return;
         }
         setState({ data: result, loading: false, error: null });

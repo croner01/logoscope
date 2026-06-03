@@ -592,6 +592,7 @@ _LOGS_LIGHT_FIELDS = """
         span_id,
         labels,
         JSONExtractRaw(attributes_json, 'log_meta') AS log_meta,
+        attributes_json,
         host_ip
 """
 
@@ -1267,8 +1268,13 @@ def query_logs_facets(
                 f"timestamp > toDateTime64({{end_time:String}}, 9, 'UTC') - INTERVAL {fallback_time_window}"
             )
     if normalized_anchor_time:
-        base_prewhere_conditions.append("timestamp <= toDateTime64({anchor_time:String}, 9, 'UTC')")
-        base_params["anchor_time"] = convert_timestamp_fn(normalized_anchor_time)
+        effective_anchor_time = normalized_anchor_time
+    elif effective_end_time:
+        effective_anchor_time = str(effective_end_time)
+    else:
+        effective_anchor_time = datetime.now(timezone.utc).isoformat()
+    base_prewhere_conditions.append("timestamp <= toDateTime64({anchor_time:String}, 9, 'UTC')")
+    base_params["anchor_time"] = convert_timestamp_fn(effective_anchor_time)
     if exclude_health_check:
         append_health_check_exclusion_fn(base_where_conditions, base_params)
     effective_correlation_mode = _append_trace_request_correlation_filters(

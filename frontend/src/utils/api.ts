@@ -182,6 +182,7 @@ function ensureArray(data: LooseAny): LooseAny[] {
   if (data && typeof data === 'object' && Array.isArray(data.events)) {
     return data.events;
   }
+  console.error('[ensureArray] Unexpected response shape:', typeof data, data && typeof data === 'object' ? Object.keys(data).slice(0, 10) : String(data).slice(0, 200));
   return [];
 }
 
@@ -1057,19 +1058,19 @@ export class APIClient {
           value: String(item?.value || '').trim(),
           count: Number(item?.count || 0),
         }))
-        .filter((item: LogsFacetBucket) => Boolean(item.value)),
+        .filter((item: LogsFacetBucket) => item.value !== ''),
       namespaces: namespacesRaw
         .map((item: LooseAny) => ({
           value: String(item?.value || '').trim(),
           count: Number(item?.count || 0),
         }))
-        .filter((item: LogsFacetBucket) => Boolean(item.value)),
+        .filter((item: LogsFacetBucket) => item.value !== ''),
       levels: levelsRaw
         .map((item: LooseAny) => ({
           value: String(item?.value || '').trim().toUpperCase(),
           count: Number(item?.count || 0),
         }))
-        .filter((item: LogsFacetBucket) => Boolean(item.value)),
+        .filter((item: LogsFacetBucket) => item.value !== ''),
       context: response.data?.context || {},
       generated_at: response.data?.generated_at,
     };
@@ -1431,50 +1432,40 @@ export class APIClient {
    * 获取日志统计
    */
   async getLogsStats(params?: { time_window?: string }): Promise<LogsStatsResult> {
-    try {
-      const response = await this.getWithInflightDedupe(`${API_PREFIX}/logs/stats`, { params });
-      const byServiceRaw = response.data?.byService && typeof response.data.byService === 'object' ? response.data.byService : {};
-      const byLevelRaw = response.data?.byLevel && typeof response.data.byLevel === 'object' ? response.data.byLevel : {};
-      const byServiceErrorsRaw = response.data?.byServiceErrors && typeof response.data.byServiceErrors === 'object'
-        ? response.data.byServiceErrors
-        : {};
-      const byService = Object.entries(byServiceRaw).reduce((acc, [key, value]) => {
-        const name = String(key || '').trim();
-        if (!name) {
-          return acc;
-        }
-        acc[name] = Number(value || 0);
+    const response = await this.getWithInflightDedupe(`${API_PREFIX}/logs/stats`, { params });
+    const byServiceRaw = response.data?.byService && typeof response.data.byService === 'object' ? response.data.byService : {};
+    const byLevelRaw = response.data?.byLevel && typeof response.data.byLevel === 'object' ? response.data.byLevel : {};
+    const byServiceErrorsRaw = response.data?.byServiceErrors && typeof response.data.byServiceErrors === 'object'
+      ? response.data.byServiceErrors
+      : {};
+    const byService = Object.entries(byServiceRaw).reduce((acc, [key, value]) => {
+      const name = String(key || '').trim();
+      if (!name) {
         return acc;
-      }, {} as Record<string, number>);
-      const byServiceErrors = Object.entries(byServiceErrorsRaw).reduce((acc, [key, value]) => {
-        const name = String(key || '').trim();
-        if (!name) {
-          return acc;
-        }
-        acc[name] = Number(value || 0);
+      }
+      acc[name] = Number(value || 0);
+      return acc;
+    }, {} as Record<string, number>);
+    const byServiceErrors = Object.entries(byServiceErrorsRaw).reduce((acc, [key, value]) => {
+      const name = String(key || '').trim();
+      if (!name) {
         return acc;
-      }, {} as Record<string, number>);
-      const byLevel = Object.entries(byLevelRaw).reduce((acc, [key, value]) => {
-        const level = String(key || '').trim().toUpperCase() || 'OTHER';
-        acc[level] = Number(value || 0);
-        return acc;
-      }, {} as Record<string, number>);
+      }
+      acc[name] = Number(value || 0);
+      return acc;
+    }, {} as Record<string, number>);
+    const byLevel = Object.entries(byLevelRaw).reduce((acc, [key, value]) => {
+      const level = String(key || '').trim().toUpperCase() || 'OTHER';
+      acc[level] = Number(value || 0);
+      return acc;
+    }, {} as Record<string, number>);
 
-      return {
-        total: Number(response.data?.total || 0),
-        byService,
-        byServiceErrors,
-        byLevel,
-      };
-    } catch (error: LooseAny) {
-      console.warn('Logs stats API error, returning empty data:', error?.response?.data || error?.message);
-      return {
-        total: 0,
-        byService: {},
-        byServiceErrors: {},
-        byLevel: {},
-      };
-    }
+    return {
+      total: Number(response.data?.total || 0),
+      byService,
+      byServiceErrors,
+      byLevel,
+    };
   }
 
   /**

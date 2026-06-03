@@ -2671,8 +2671,12 @@ const LogsExplorer: React.FC = () => {
             {/* 实时模式按钮 */}
             <button
               onClick={() => {
-                setRealtimeMode(!realtimeMode);
-                if (!realtimeMode) {
+                if (realtimeMode) {
+                  setRealtimeMode(false);
+                  clearRealtimeLogs();
+                  refetch();
+                } else {
+                  setRealtimeMode(true);
                   clearRealtimeLogs();
                 }
               }}
