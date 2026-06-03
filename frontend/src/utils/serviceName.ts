@@ -27,7 +27,14 @@ export function looksLikePodName(value: unknown): boolean {
   if (!text) {
     return false;
   }
-  return POD_SUFFIX_PATTERNS.some((pattern) => pattern.test(text));
+  return POD_SUFFIX_PATTERNS.some((pattern) => {
+    const match = text.match(pattern);
+    if (!match?.[1]) {
+      return false;
+    }
+    const suffix = text.slice(match[1].length);
+    return /\d/.test(suffix);
+  });
 }
 
 export function deriveServiceNameFromPodName(podName: unknown): string {
@@ -39,7 +46,10 @@ export function deriveServiceNameFromPodName(podName: unknown): string {
   for (const pattern of POD_SUFFIX_PATTERNS) {
     const match = pod.match(pattern);
     if (match?.[1]) {
-      return match[1];
+      const suffix = pod.slice(match[1].length);
+      if (/\d/.test(suffix)) {
+        return match[1];
+      }
     }
   }
 

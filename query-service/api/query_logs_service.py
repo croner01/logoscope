@@ -608,11 +608,13 @@ def _normalize_service_identity(
     if not candidate:
         return "unknown"
 
-    if re.match(r"^(.+)-[a-f0-9]{5,14}-[a-z0-9]{5,10}$", candidate):
+    # Each hash group must contain at least one digit to avoid matching
+    # dictionary words (e.g. "golem", "beef") as K8s pod suffixes.
+    if re.match(r"^(.+)-(?=[a-f0-9]*\d)[a-f0-9]{5,14}-(?=[a-z0-9]*\d)[a-z0-9]{5,10}$", candidate):
         candidate = re.sub(r"-[a-f0-9]{5,14}-[a-z0-9]{5,10}$", "", candidate)
-    elif re.match(r"^(.+)-[a-f0-9]{5,14}(-[a-f0-9]{4,8})?$", candidate):
+    elif re.match(r"^(.+)-(?=[a-f0-9]*\d)[a-f0-9]{5,14}(?:-(?=[a-f0-9]*\d)[a-f0-9]{4,8})?$", candidate):
         candidate = re.sub(r"-[a-f0-9]{5,14}(-[a-f0-9]{4,8})?$", "", candidate)
-    elif re.match(r"^(.+)-[a-z0-9]{5}$", candidate):
+    elif re.match(r"^(.+)-(?=[a-z0-9]*\d)[a-z0-9]{5}$", candidate):
         candidate = re.sub(r"-[a-z0-9]{5}$", "", candidate)
     elif re.match(r"^(.+)-\d+$", candidate):
         candidate = re.sub(r"-\d+$", "", candidate)
@@ -639,11 +641,11 @@ def _build_normalized_service_sql(
     return (
         "multiIf("
         f"length({candidate}) = 0, 'unknown', "
-        f"match({candidate}, '^(.+)-[a-f0-9]{{5,14}}-[a-z0-9]{{5,10}}$'), "
+        f"match({candidate}, '^(.+)-[a-f0-9]{{5,14}}-[a-z0-9]{{5,10}}$') AND match({candidate}, '-[a-f0-9]*[0-9][a-f0-9]*-[a-z0-9]{{5,10}}$'), "
         f"replaceRegexpOne({candidate}, '-[a-f0-9]{{5,14}}-[a-z0-9]{{5,10}}$', ''), "
-        f"match({candidate}, '^(.+)-[a-f0-9]{{5,14}}(-[a-f0-9]{{4,8}})?$'), "
+        f"match({candidate}, '^(.+)-[a-f0-9]{{5,14}}(-[a-f0-9]{{4,8}})?$') AND match({candidate}, '-[a-f0-9]*[0-9][a-f0-9]*(?:-[a-f0-9]{{4,8}})?$'), "
         f"replaceRegexpOne({candidate}, '-[a-f0-9]{{5,14}}(-[a-f0-9]{{4,8}})?$', ''), "
-        f"match({candidate}, '^(.+)-[a-z0-9]{{5}}$'), "
+        f"match({candidate}, '^(.+)-[a-z0-9]{{5}}$') AND match({candidate}, '-[a-z0-9]*[0-9][a-z0-9]*$'), "
         f"replaceRegexpOne({candidate}, '-[a-z0-9]{{5}}$', ''), "
         f"match({candidate}, '^(.+)-\\\\d+$'), "
         f"replaceRegexpOne({candidate}, '-\\\\d+$', ''), "
