@@ -94,6 +94,15 @@ function createApiHook<T, P extends object | undefined>(
     const paramsKey = useMemo(() => stableSerialize(params), [params]);
 
     useEffect(() => {
+      const newParamsObj = (params && typeof params === 'object') ? params as Record<string, unknown> : null;
+      const ss = (newParamsObj && (newParamsObj as Record<string, unknown>).source_service) || '';
+      const ts = (newParamsObj && (newParamsObj as Record<string, unknown>).target_service) || '';
+      console.log(
+        '[diag:useApi] paramsRef updating',
+        `pk=${paramsKey}`,
+        `ss=${ss || '-'}`,
+        `ts=${ts || '-'}`,
+      );
       paramsRef.current = params;
     }, [params, paramsKey]);
 
@@ -102,7 +111,21 @@ function createApiHook<T, P extends object | undefined>(
 
       try {
         setState(prev => ({ ...prev, loading: true, error: null }));
-        const result = await apiFunc(paramsRef.current as P);
+        const currentParams = paramsRef.current as P;
+        const paramsObj = (currentParams && typeof currentParams === 'object') ? currentParams as Record<string, unknown> : null;
+        const ss = (paramsObj && (paramsObj as Record<string, unknown>).source_service) || '';
+        const ts = (paramsObj && (paramsObj as Record<string, unknown>).target_service) || '';
+        console.log(
+          '[diag:useApi] fetchData',
+          `seq=${requestSeq}`,
+          `source_service=${ss || '(none)'}`,
+          `target_service=${ts || '(none)'}`,
+          `edge_ctx=${!!(ss && ts)}`,
+          `namespace=${(paramsObj && (paramsObj as Record<string, unknown>).namespace) || '(none)'}`,
+          `time_window=${(paramsObj && (paramsObj as Record<string, unknown>).time_window) || '(none)'}`,
+          `has_start=${!!((paramsObj && (paramsObj as Record<string, unknown>).start_time))}`,
+        );
+        const result = await apiFunc(currentParams);
         if (requestSeq !== requestSeqRef.current) {
           setState(prev => {
             if (!prev.data) {

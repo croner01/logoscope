@@ -647,8 +647,8 @@ def _build_normalized_service_sql(
         f"replaceRegexpOne({candidate}, '-[a-f0-9]{{5,14}}(-[a-f0-9]{{4,8}})?$', ''), "
         f"match({candidate}, '^(.+)-[a-z0-9]{{5}}$') AND match({candidate}, '-[a-z0-9]*[0-9][a-z0-9]*$'), "
         f"replaceRegexpOne({candidate}, '-[a-z0-9]{{5}}$', ''), "
-        f"match({candidate}, '^(.+)-\\\\d+$'), "
-        f"replaceRegexpOne({candidate}, '-\\\\d+$', ''), "
+        f"match({candidate}, '^(.+)-\\d+$'), "
+        f"replaceRegexpOne({candidate}, '-\\d+$', ''), "
         f"{candidate}"
         ")"
     )
@@ -837,22 +837,24 @@ def query_logs(
     effective_correlation_mode = _normalize_correlation_mode(correlation_mode)
     max_threads = _resolve_query_logs_max_threads()
 
-    if edge_context_active:
-        _append_topology_edge_candidate_filter(
-            prewhere_conditions=prewhere_conditions,
-            params=params,
-            source_service=normalized_source_service,
-            target_service=normalized_target_service,
-            source_namespace=normalized_source_namespace,
-            target_namespace=normalized_target_namespace,
-        )
-    else:
-        _append_normalized_service_filter(
-            conditions=prewhere_conditions,
-            params=params,
-            values=requested_service_names,
-            param_prefix="service_name",
-        )
+    logger.info(
+        "[diag:query_logs] edge_context_active=%s source_service=%s target_service=%s "
+        "source_ns=%s target_ns=%s service_name=%s search=%s namespace=%s "
+        "time_window=%s start_time=%s end_time=%s",
+        edge_context_active,
+        normalized_source_service,
+        normalized_target_service,
+        normalized_source_namespace,
+        normalized_target_namespace,
+        explicit_service_name,
+        explicit_search,
+        namespace,
+        effective_time_window,
+        start_time,
+        end_time,
+    )
+
+    # ── Cheap filters first: namespace, level ──
     append_exact_match_filter_fn(
         conditions=prewhere_conditions,
         params=params,
@@ -874,6 +876,7 @@ def query_logs(
         values=requested_levels,
     )
 
+    # ── Timestamp bounds: high-selectivity prune before expensive expressions ──
     if effective_start_time and str(effective_start_time).startswith("__RELATIVE_INTERVAL__::"):
         relative_interval = str(effective_start_time).split("::", 1)[1]
         _append_relative_window_lower_bound(
@@ -905,6 +908,24 @@ def query_logs(
         effective_anchor_time = datetime.now(timezone.utc).isoformat()
     prewhere_conditions.append("timestamp <= toDateTime64({anchor_time:String}, 9, 'UTC')")
     params["anchor_time"] = convert_timestamp_fn(effective_anchor_time)
+
+    # ── Expensive expressions AFTER timestamp pruning ──
+    if edge_context_active:
+        _append_topology_edge_candidate_filter(
+            prewhere_conditions=prewhere_conditions,
+            params=params,
+            source_service=normalized_source_service,
+            target_service=normalized_target_service,
+            source_namespace=normalized_source_namespace,
+            target_namespace=normalized_target_namespace,
+        )
+    else:
+        _append_normalized_service_filter(
+            conditions=prewhere_conditions,
+            params=params,
+            values=requested_service_names,
+            param_prefix="service_name",
+        )
 
     if normalized_cursor:
         try:
@@ -961,6 +982,15 @@ def query_logs(
     LIMIT {{limit_plus_one:Int32}}
     SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
+
+    if edge_context_active:
+        logger.info(
+            "[diag:query_logs] SQL edge_query prewhere_conditions=%s where_conditions=%s params_keys=%s",
+            prewhere_conditions,
+            where_conditions,
+            sorted(params.keys()),
+        )
+
     params["limit_plus_one"] = limit + 1
     params["max_threads"] = max_threads
 

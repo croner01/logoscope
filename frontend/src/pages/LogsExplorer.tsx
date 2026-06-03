@@ -872,6 +872,14 @@ const LogsExplorer: React.FC = () => {
     setExcludeHealthCheck(shouldExcludeHealthCheck);
 
     if (sourceService || targetService || timeWindow || traceIds.length > 0 || requestIds.length > 0 || jumpAnchorTime) {
+      console.log(
+        '[diag:LogsExplorer] useEffect setting topologyJumpContext',
+        `sourceService=${sourceService || '-'}`,
+        `targetService=${targetService || '-'}`,
+        `sourceNamespace=${sourceNamespace || '-'}`,
+        `targetNamespace=${targetNamespace || '-'}`,
+        `timeWindow=${timeWindow || '-'}`,
+      );
       setTopologyJumpContext({
         sourceService,
         targetService,
@@ -961,6 +969,14 @@ const LogsExplorer: React.FC = () => {
     } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
+    console.log(
+      '[diag:LogsExplorer] apiParams',
+      `tjc=${topologyJumpContext ? 'SET' : 'null'}`,
+      `ss=${(params as Record<string, unknown>).source_service || '-'}`,
+      `ts=${(params as Record<string, unknown>).target_service || '-'}`,
+      `ns=${(params as Record<string, unknown>).namespace || '-'}`,
+      `tw=${(params as Record<string, unknown>).time_window || '-'}`,
+    );
     return params;
   }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
 
