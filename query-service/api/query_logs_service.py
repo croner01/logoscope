@@ -690,7 +690,6 @@ def _append_normalized_service_filter(
 def _append_topology_edge_candidate_filter(
     *,
     prewhere_conditions: List[str],
-    where_conditions: List[str],
     params: Dict[str, Any],
     source_service: Optional[str],
     target_service: Optional[str],
@@ -717,16 +716,12 @@ def _append_topology_edge_candidate_filter(
     normalized_service_expr = f"lowerUTF8({service_expr})"
     source_match = f"{normalized_service_expr} = lowerUTF8({{source_service:String}})"
     target_match = f"{normalized_service_expr} = lowerUTF8({{target_service:String}})"
-    prewhere_conditions.append(f"({source_match} OR {target_match})")
-    where_conditions.append(
-        "("
-        f"({source_match} AND (message ILIKE concat('%', {{target_service:String}}, '%') OR attributes_json ILIKE concat('%', {{target_service:String}}, '%'))) "
-        "OR "
-        f"({target_match} AND (message ILIKE concat('%', {{source_service:String}}, '%') OR attributes_json ILIKE concat('%', {{source_service:String}}, '%'))) "
-        "OR "
-        "((message ILIKE concat('%', {source_service:String}, '%') OR attributes_json ILIKE concat('%', {source_service:String}, '%')) "
-        "AND (message ILIKE concat('%', {target_service:String}, '%') OR attributes_json ILIKE concat('%', {target_service:String}, '%')))"
-        ")"
+    prewhere_conditions.append(
+        f"({source_match} OR {target_match} "
+        f"OR message ILIKE concat('%', {{source_service:String}}, '%') "
+        f"OR message ILIKE concat('%', {{target_service:String}}, '%') "
+        f"OR attributes_json ILIKE concat('%', {{source_service:String}}, '%') "
+        f"OR attributes_json ILIKE concat('%', {{target_service:String}}, '%'))"
     )
     return True
 
@@ -843,7 +838,6 @@ def query_logs(
     if edge_context_active:
         _append_topology_edge_candidate_filter(
             prewhere_conditions=prewhere_conditions,
-            where_conditions=where_conditions,
             params=params,
             source_service=normalized_source_service,
             target_service=normalized_target_service,
@@ -1287,7 +1281,6 @@ def query_logs_facets(
     if edge_context_active:
         _append_topology_edge_candidate_filter(
             prewhere_conditions=base_prewhere_conditions,
-            where_conditions=base_where_conditions,
             params=base_params,
             source_service=normalized_source_service,
             target_service=normalized_target_service,
@@ -1976,7 +1969,6 @@ def query_logs_aggregated(
     if edge_context_active:
         _append_topology_edge_candidate_filter(
             prewhere_conditions=prewhere_conditions,
-            where_conditions=where_conditions,
             params=params,
             source_service=normalized_source_service,
             target_service=normalized_target_service,
