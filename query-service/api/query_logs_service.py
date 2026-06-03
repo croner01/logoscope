@@ -809,8 +809,6 @@ def query_logs(
         and not explicit_service_name
         and not explicit_service_names
         and not explicit_search
-        and not requested_trace_ids
-        and not requested_request_ids
     )
 
     effective_service_name = None if edge_context_active else context.get("service_name")
@@ -1115,8 +1113,6 @@ def query_logs_facets(
         and not explicit_service_name
         and not explicit_service_names
         and not explicit_search
-        and not requested_trace_ids
-        and not requested_request_ids
     )
 
     effective_service_name = None if edge_context_active else context.get("service_name")
@@ -1945,8 +1941,6 @@ def query_logs_aggregated(
         and not explicit_service_name
         and not explicit_service_names
         and not explicit_search
-        and not requested_trace_ids
-        and not requested_request_ids
     )
 
     effective_service_name = None if edge_context_active else context.get("service_name")
