@@ -2698,6 +2698,22 @@ class StorageAdapter:
             if isinstance(value, datetime):
                 escaped_time = value.strftime("%Y-%m-%d %H:%M:%S.%f")
                 return f"'{escaped_time}'"
+            if isinstance(value, (list, tuple)):
+                # 生成 ClickHouse 数组字面量: ['a', 'b']
+                items = []
+                for item in value:
+                    if item is None:
+                        items.append("NULL")
+                    elif isinstance(item, bool):
+                        items.append("1" if item else "0")
+                    elif isinstance(item, (int, float)):
+                        items.append(str(item))
+                    else:
+                        escaped_item = str(item)
+                        escaped_item = escaped_item.replace("\\", "\\\\")
+                        escaped_item = escaped_item.replace("'", "\\'")
+                        items.append(f"'{escaped_item}'")
+                return f"[{', '.join(items)}]"
 
             escaped = str(value)
             escaped = escaped.replace("\\", "\\\\")
