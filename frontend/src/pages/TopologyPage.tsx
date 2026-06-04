@@ -2105,6 +2105,13 @@ const TopologyPage: React.FC = () => {
             laneLabel: '自由编排',
           };
         });
+        // 🔒 保留 lifecycle 节点位置（free 模式）
+        const lifecycleFree = nodeLifecycleRef.current;
+        for (const [nodeId, state] of Object.entries(lifecycleFree)) {
+          if ((state === 'departing' || state === 'ghost') && !next[nodeId] && prev[nodeId]) {
+            next[nodeId] = { ...prev[nodeId] };
+          }
+        }
         return next;
       });
       return;
@@ -2134,6 +2141,13 @@ const TopologyPage: React.FC = () => {
             laneLabel: 'Grid',
           };
         });
+        // 🔒 保留 lifecycle 节点位置（grid 模式）
+        const lifecycleGrid = nodeLifecycleRef.current;
+        for (const [nodeId, state] of Object.entries(lifecycleGrid)) {
+          if ((state === 'departing' || state === 'ghost') && !next[nodeId] && prev[nodeId]) {
+            next[nodeId] = { ...prev[nodeId] };
+          }
+        }
         return next;
       });
       return;
