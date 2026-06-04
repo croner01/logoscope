@@ -519,9 +519,14 @@ function resolveTimeWindowRange(timeWindow: string, anchorTime?: string): { star
   const anchorDate = parsedAnchorTime ? new Date(parsedAnchorTime) : new Date();
   const end = Number.isNaN(anchorDate.getTime()) ? new Date() : anchorDate;
   const start = new Date(end.getTime() - ms);
+  // JavaScript Date 只有毫秒精度，而 ClickHouse 时间戳有微秒精度。
+  // 当 anchor_time 来自单条日志时，toISOString() 会截断微秒部分，
+  // 导致 end_time 早于日志实际时间戳，<= 条件不成立。
+  // 给 end 加 1 秒缓冲，补偿精度损失。
+  const endWithBuffer = new Date(end.getTime() + 1000);
   return {
     start: start.toISOString(),
-    end: end.toISOString(),
+    end: endWithBuffer.toISOString(),
   };
 }
 
