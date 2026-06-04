@@ -6,6 +6,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  Ghost,
   GripHorizontal,
   LayoutGrid,
   Maximize2,
@@ -47,6 +48,13 @@ import { resolveCanonicalServiceName } from '../utils/serviceName';
 type LayoutMode = 'swimlane' | 'grid' | 'free';
 type EvidenceMode = 'all' | 'observed' | 'inferred';
 type EdgeLifecycleState = 'entering' | 'active' | 'departing';
+type NodeLifecycleState = 'entering' | 'active' | 'departing' | 'ghost';
+
+// 节点生命周期默认常量
+const NODE_ENTERING_DURATION_MS = 2000;   // entering → active
+const NODE_DEPARTING_DURATION_MS = 5000;   // departing → ghost
+const GHOST_CLEANUP_HOURS = 3;             // ghost 超时清理（小时）
+const GHOST_CLEANUP_MS = GHOST_CLEANUP_HOURS * 60 * 60 * 1000;
 type MessageTargetPattern = 'url' | 'kv' | 'proxy' | 'rpc';
 type InferenceMode = 'rule' | 'hybrid_score';
 type TopologyEntity = {
@@ -1051,12 +1059,20 @@ const TopologyPage: React.FC = () => {
   const [suppressWeakEdges, setSuppressWeakEdges] = useState(true);
   const [isFrozen, setIsFrozen] = useState(false);
   const [edgeLifecycle, setEdgeLifecycle] = useState<Record<string, EdgeLifecycleState>>({});
+  const [nodeLifecycle, setNodeLifecycle] = useState<Record<string, NodeLifecycleState>>({});
+  const [ghostNodeIds, setGhostNodeIds] = useState<Set<string>>(new Set());
+  const [showGhostZone, setShowGhostZone] = useState(true);
   const frozenTopologyRef = useRef<TopologyGraph | null>(null);
   const departingTimersRef = useRef<Record<string, number>>({});
   const departingEdgesRef = useRef<Record<string, TopologyEdgeEntity>>({});
   const previousEdgeKeysRef = useRef<Set<string>>(new Set());
   const prevVisibleEdgesRef = useRef<TopologyEdgeEntity[]>([]);
   const initializedEdgeKeysRef = useRef(false);
+  const nodeDepartTimersRef = useRef<Record<string, number>>({});
+  const departedNodesRef = useRef<Record<string, TopologyNodeEntity>>({});
+  const previousNodeIdsRef = useRef<Set<string>>(new Set());
+  const prevVisibleNodesRef = useRef<TopologyNodeEntity[]>([]);
+  const initializedNodeLifecycleRef = useRef(false);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1634,6 +1650,139 @@ const TopologyPage: React.FC = () => {
     };
   }, []);
 
+  // ── 节点生命周期：entering → active / active → departing(5s) → ghost ──
+  useEffect(() => {
+    if (isFrozen) return;
+    const currentNodes = visibleNodes || [];
+    const newNodeIds: Set<string> = new Set(currentNodes.map((n: TopologyNodeEntity) => n.id));
+
+    if (!initializedNodeLifecycleRef.current) {
+      previousNodeIdsRef.current = newNodeIds;
+      prevVisibleNodesRef.current = currentNodes;
+      initializedNodeLifecycleRef.current = true;
+      const initial: Record<string, NodeLifecycleState> = {};
+      newNodeIds.forEach((id: string) => { initial[id] = 'active'; });
+      setNodeLifecycle(initial);
+      return;
+    }
+
+    const prevIds = previousNodeIdsRef.current;
+    const enteringIds = new Set([...newNodeIds].filter((id: string) => !prevIds.has(id)));
+    const departingIds = new Set([...prevIds].filter((id: string) => !newNodeIds.has(id)));
+
+    // 暂存 departing 节点数据
+    if (departingIds.size > 0) {
+      const prevNodesById = new Map<string, TopologyNodeEntity>();
+      prevVisibleNodesRef.current.forEach((n: TopologyNodeEntity) => {
+        prevNodesById.set(n.id, n);
+      });
+      departingIds.forEach((id: string) => {
+        const nodeObj = prevNodesById.get(id);
+        if (nodeObj && !departedNodesRef.current[id]) {
+          departedNodesRef.current[id] = nodeObj;
+        }
+      });
+    }
+
+    setNodeLifecycle((prev) => {
+      const next: Record<string, NodeLifecycleState> = {};
+
+      newNodeIds.forEach((id: string) => {
+        const priorState = prev[id];
+        if (enteringIds.has(id)) {
+          next[id] = 'entering';
+        } else if (priorState === 'departing') {
+          // 重新出现：取消 departing 计时
+          if (nodeDepartTimersRef.current[id] !== undefined) {
+            window.clearTimeout(nodeDepartTimersRef.current[id]);
+            delete nodeDepartTimersRef.current[id];
+          }
+          delete departedNodesRef.current[id];
+          next[id] = 'active';
+        } else if (priorState === 'ghost') {
+          // 从 ghost 回归：取消清理计时，标记为 entering
+          if (nodeDepartTimersRef.current[id] !== undefined) {
+            window.clearTimeout(nodeDepartTimersRef.current[id]);
+            delete nodeDepartTimersRef.current[id];
+          }
+          // 从 ghost 列表中移除
+          setGhostNodeIds((prevGhost) => {
+            const updated = new Set(prevGhost);
+            updated.delete(id);
+            return updated;
+          });
+          next[id] = 'entering';
+        } else {
+          next[id] = 'active';
+        }
+      });
+
+      departingIds.forEach((id: string) => {
+        const priorState = prev[id];
+        if (priorState === 'ghost') {
+          // 已经 ghost 的节点再次消失：不需要重复处理
+          return;
+        }
+        next[id] = 'departing';
+        if (nodeDepartTimersRef.current[id] === undefined) {
+          nodeDepartTimersRef.current[id] = window.setTimeout(() => {
+            // departing → ghost
+            setNodeLifecycle((currentLifecycle) => {
+              const state = currentLifecycle[id];
+              if (!state || state !== 'departing') {
+                return currentLifecycle;
+              }
+              return { ...currentLifecycle, [id]: 'ghost' };
+            });
+            setGhostNodeIds((prevGhost) => {
+              const updated = new Set(prevGhost);
+              updated.add(id);
+              return updated;
+            });
+            delete nodeDepartTimersRef.current[id];
+            // ghost 超时清理（3h 后自动移除）
+            nodeDepartTimersRef.current[`${id}_cleanup`] = window.setTimeout(() => {
+              setGhostNodeIds((prevGhost) => {
+                const updated = new Set(prevGhost);
+                updated.delete(id);
+                return updated;
+              });
+              delete departedNodesRef.current[id];
+              delete nodeDepartTimersRef.current[`${id}_cleanup`];
+            }, GHOST_CLEANUP_MS);
+          }, NODE_DEPARTING_DURATION_MS);
+        }
+      });
+
+      return next;
+    });
+
+    // entering → active (2s 后)
+    enteringIds.forEach((id: string) => {
+      window.setTimeout(() => {
+        setNodeLifecycle((currentState) => {
+          if (currentState[id] === 'entering') {
+            return { ...currentState, [id]: 'active' };
+          }
+          return currentState;
+        });
+      }, NODE_ENTERING_DURATION_MS);
+    });
+
+    previousNodeIdsRef.current = newNodeIds;
+    prevVisibleNodesRef.current = currentNodes;
+  }, [visibleNodes, isFrozen]);
+
+  // 清理节点生命周期定时器
+  useEffect(() => {
+    return () => {
+      const timers = nodeDepartTimersRef.current;
+      Object.values(timers).forEach((id) => window.clearTimeout(id));
+      nodeDepartTimersRef.current = {};
+      departedNodesRef.current = {};
+    };
+  }, []);
+
   const nodeLabelById = useMemo(() => {
     const mapping = new Map<string, string>();
     (topologyData?.nodes || []).forEach((node: TopologyNodeEntity) => {
@@ -1932,63 +2081,122 @@ const TopologyPage: React.FC = () => {
     }
 
     if (layoutMode === 'grid') {
-      const next: Record<string, NodePosition> = {};
-      visibleNodes.forEach((node: TopologyNodeEntity, index: number) => {
-        const col = index % LAYOUT.gridCols;
-        const row = Math.floor(index / LAYOUT.gridCols);
-        next[node.id] = {
-          x: 120 + col * LAYOUT.gridGapX,
-          y: 110 + row * LAYOUT.gridGapY,
-          laneKey: 'grid',
-          laneLabel: 'Grid',
-        };
+      setNodePositions((prev) => {
+        const next: Record<string, NodePosition> = {};
+        // 保持已有节点的位置不变
+        const existing = visibleNodes.filter(
+          (node: TopologyNodeEntity) => prev[node.id] && prev[node.id].laneKey === 'grid',
+        );
+        existing.forEach((node: TopologyNodeEntity) => {
+          next[node.id] = { ...prev[node.id] };
+        });
+        // 新节点追加到网格末尾
+        const newcomers = visibleNodes.filter((node: TopologyNodeEntity) => !next[node.id]);
+        const startIndex = existing.length;
+        newcomers.forEach((node: TopologyNodeEntity, offset: number) => {
+          const index = startIndex + offset;
+          const col = index % LAYOUT.gridCols;
+          const row = Math.floor(index / LAYOUT.gridCols);
+          next[node.id] = {
+            x: 120 + col * LAYOUT.gridGapX,
+            y: 110 + row * LAYOUT.gridGapY,
+            laneKey: 'grid',
+            laneLabel: 'Grid',
+          };
+        });
+        return next;
       });
-      setNodePositions(next);
       return;
     }
 
-    const groups = new Map<string, { label: string; nodes: TopologyNodeEntity[] }>();
-    visibleNodes.forEach((node: TopologyNodeEntity) => {
-      const lane = resolveLane(node);
-      if (!groups.has(lane.key)) {
-        groups.set(lane.key, { label: lane.label, nodes: [] });
-      }
-      groups.get(lane.key)?.nodes.push(node);
-    });
+    // ── swimlane 模式：稳定相对排序 + 新节点追加到 lane 末尾 ──
+    setNodePositions((prev) => {
+      const groups = new Map<string, { label: string; nodes: TopologyNodeEntity[] }>();
+      visibleNodes.forEach((node: TopologyNodeEntity) => {
+        const lane = resolveLane(node);
+        if (!groups.has(lane.key)) {
+          groups.set(lane.key, { label: lane.label, nodes: [] });
+        }
+        groups.get(lane.key)?.nodes.push(node);
+      });
 
-    const laneEntries = Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-    const next: Record<string, NodePosition> = {};
+      const laneEntries = Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+      const next: Record<string, NodePosition> = {};
 
-    let laneCursorY = LAYOUT.laneStartY;
-    laneEntries.forEach(([laneKey, lane]) => {
-      const ordered = [...lane.nodes].sort((a, b) => resolveServiceName(a).localeCompare(resolveServiceName(b)));
-      const laneRows = Math.max(1, Math.ceil(ordered.length / LAYOUT.laneColsPerRow));
-      ordered.forEach((node, index) => {
-        const col = index % LAYOUT.laneColsPerRow;
-        const row = Math.floor(index / LAYOUT.laneColsPerRow);
+      let laneCursorY = LAYOUT.laneStartY;
+
+      laneEntries.forEach(([laneKey, lane]) => {
+        // 分离已有节点（同一 lane）和新节点（全新、或从其他 lane 移入）
+        const existing: TopologyNodeEntity[] = [];
+        const newcomers: TopologyNodeEntity[] = [];
+        lane.nodes.forEach((node: TopologyNodeEntity) => {
+          const existingPos = prev[node.id];
+          if (existingPos && existingPos.laneKey === laneKey) {
+            existing.push(node);
+          } else {
+            newcomers.push(node);
+          }
+        });
+
+        // 已有节点按先前位置排序（先按 Y/行，再按 X/列），保持相对顺序不变
+        const sortedExisting = [...existing].sort((a, b) => {
+          const pa = prev[a.id];
+          const pb = prev[b.id];
+          if (!pa || !pb) return 0;
+          const rowDiff = Math.round(pa.y) - Math.round(pb.y);
+          if (Math.abs(rowDiff) > 10) return rowDiff;
+          return Math.round(pa.x) - Math.round(pb.x);
+        });
+
+        // 新节点按服务名字母排序
+        const sortedNew = [...newcomers].sort((a, b) =>
+          resolveServiceName(a).localeCompare(resolveServiceName(b)),
+        );
+
+        // 统一布局：已有节点在前保持相对顺序，新节点追加到末尾
+        const ordered = [...sortedExisting, ...sortedNew];
+        const laneRows = Math.max(1, Math.ceil(ordered.length / LAYOUT.laneColsPerRow));
+
+        ordered.forEach((node: TopologyNodeEntity, index: number) => {
+          const col = index % LAYOUT.laneColsPerRow;
+          const row = Math.floor(index / LAYOUT.laneColsPerRow);
+          next[node.id] = {
+            x: LAYOUT.laneStartX + col * LAYOUT.laneColGapX,
+            y: laneCursorY + LAYOUT.laneRowPaddingTop + row * LAYOUT.laneRowGapY,
+            laneKey,
+            laneLabel: lane.label,
+          };
+        });
+
+        laneCursorY +=
+          laneRows * LAYOUT.laneRowGapY +
+          LAYOUT.laneRowPaddingTop +
+          LAYOUT.laneRowPaddingBottom +
+          LAYOUT.laneBlockGapY;
+      });
+
+      // 兜底：未分配到任何 lane 的节点
+      const missing = visibleNodes.filter((node: TopologyNodeEntity) => !next[node.id]);
+      missing.forEach((node: TopologyNodeEntity, index: number) => {
         next[node.id] = {
-          x: LAYOUT.laneStartX + col * LAYOUT.laneColGapX,
-          y: laneCursorY + LAYOUT.laneRowPaddingTop + row * LAYOUT.laneRowGapY,
-          laneKey,
-          laneLabel: lane.label,
+          x: 120 + index * 180,
+          y: 120,
+          laneKey: 'fallback',
+          laneLabel: 'Fallback',
         };
       });
-      laneCursorY +=
-        laneRows * LAYOUT.laneRowGapY + LAYOUT.laneRowPaddingTop + LAYOUT.laneRowPaddingBottom + LAYOUT.laneBlockGapY;
-    });
 
-    const missing = visibleNodes.filter((node: TopologyNodeEntity) => !next[node.id]);
-    missing.forEach((node: TopologyNodeEntity, index: number) => {
-      next[node.id] = {
-        x: 120 + index * 180,
-        y: 120,
-        laneKey: 'fallback',
-        laneLabel: 'Fallback',
-      };
-    });
+      // 🔒 P1: 保留生命周期中（departing/ghost）节点的位置，防止布局跳动
+      // 这些节点不在 visibleNodes 中，但需要在 5s 缓冲期保持原位
+      for (const [nodeId, state] of Object.entries(nodeLifecycle)) {
+        if ((state === 'departing' || state === 'ghost') && !next[nodeId] && prev[nodeId]) {
+          next[nodeId] = { ...prev[nodeId] };
+        }
+      }
 
-    setNodePositions(next);
-  }, [layoutMode, savedFreeLayoutPositions, visibleNodes]);
+      return next;
+    });
+  }, [layoutMode, savedFreeLayoutPositions, visibleNodes, nodeLifecycle]);
 
   useEffect(() => {
     if (layoutMode !== 'free' || visibleNodes.length === 0 || !!draggingNode || isPanning) {
@@ -3647,6 +3855,18 @@ const TopologyPage: React.FC = () => {
               {isFrozen ? <PinOff className="mr-1 inline h-3.5 w-3.5" /> : <Pin className="mr-1 inline h-3.5 w-3.5" />}
               {isFrozen ? '已冻结' : '冻结'}
             </button>
+            <button
+              onClick={() => setShowGhostZone((prev) => !prev)}
+              className={`rounded-lg border px-3 py-1.5 text-xs ${
+                showGhostZone
+                  ? 'border-violet-400 bg-violet-500/20 text-violet-100'
+                  : 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
+              }`}
+              title={showGhostZone ? '点击隐藏历史节点' : '点击显示历史节点'}
+            >
+              <Ghost className="mr-1 inline h-3.5 w-3.5" />
+              孤岛 {showGhostZone ? 'ON' : 'OFF'}
+            </button>
             <button onClick={toggleFullscreen} className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-200 hover:bg-slate-800">
               {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
@@ -3852,59 +4072,187 @@ const TopologyPage: React.FC = () => {
                 })}
               </svg>
 
-              {visibleNodes.map((node: TopologyNodeEntity) => {
-                const pos = getNodePosition(node.id);
-                const palette = getNodePalette(node, timeWindow);
-                const isSelected = selectedNode?.id === node.id;
-                const isHighlighted = !!highlightedService
-                  && (
-                    node.id === highlightedService
-                    || node.label === highlightedService
-                    || resolveServiceName(node) === highlightedService
+              {(() => {
+                // departing 节点不在 visibleNodes 中，需要单独从 departedNodesRef 获取并渲染
+                const departingRenderNodes: Array<{ node: TopologyNodeEntity; lifecycleState: NodeLifecycleState }> = [];
+                for (const [id, state] of Object.entries(nodeLifecycle)) {
+                  if (state === 'departing' && !visibleNodes.some((n) => n.id === id)) {
+                    const nodeData = departedNodesRef.current[id];
+                    if (nodeData) {
+                      departingRenderNodes.push({ node: nodeData, lifecycleState: 'departing' as NodeLifecycleState });
+                    }
+                  }
+                }
+
+                const allRenderCards: Array<{ node: TopologyNodeEntity; lifecycleState: NodeLifecycleState }> = [
+                  ...visibleNodes.map((n) => ({ node: n, lifecycleState: (nodeLifecycle[n.id] || 'active') as NodeLifecycleState })),
+                  ...departingRenderNodes,
+                ];
+
+                return allRenderCards.map(({ node, lifecycleState }) => {
+                  const pos = getNodePosition(node.id);
+                  const palette = getNodePalette(node, timeWindow);
+                  const isSelected = selectedNode?.id === node.id;
+                  const isHighlighted = !!highlightedService
+                    && (
+                      node.id === highlightedService
+                      || node.label === highlightedService
+                      || resolveServiceName(node) === highlightedService
+                    );
+                  const isPathNode = selectedPathNodeIds.has(node.id);
+                  const status = getNodeStatus(node);
+                  const dimByPath = !!selectedPathId && !isPathNode;
+
+                  // 生命周期视觉
+                  let nodeOpacity = dimByPath ? 0.36 : 1;
+                  let extraRing = '';
+                  let lifecycleTag: string | null = null;
+                  if (lifecycleState === 'entering') {
+                    nodeOpacity = 0.85;
+                    extraRing = 'ring-2 ring-cyan-400/70';
+                    lifecycleTag = 'NEW';
+                  } else if (lifecycleState === 'departing') {
+                    nodeOpacity = 0.35;
+                    extraRing = 'ring-1 ring-rose-400/50';
+                    lifecycleTag = '消失中';
+                  } else if (lifecycleState === 'ghost') {
+                    nodeOpacity = 0.15;
+                    extraRing = 'ring-1 ring-slate-500/30';
+                  }
+
+                  return (
+                    <div
+                      key={node.id}
+                      onMouseDown={(e) => lifecycleState === 'active' || lifecycleState === 'entering' ? handleNodeMouseDown(e, node) : null}
+                      onMouseEnter={(e) => lifecycleState === 'active' || lifecycleState === 'entering' ? (showNodeHoverCard(e, node), null) : null}
+                      onMouseMove={(e) => lifecycleState === 'active' || lifecycleState === 'entering' ? (showNodeHoverCard(e, node), null) : null}
+                      onMouseLeave={lifecycleState === 'active' || lifecycleState === 'entering' ? scheduleHoverCardHide : undefined}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (lifecycleState === 'active' || lifecycleState === 'entering') {
+                          handleNodeClick(node);
+                        }
+                      }}
+                      className={`absolute rounded-2xl px-3 py-2 text-slate-100 transition-[left,top] duration-[400ms] ease-out motion-reduce:duration-0 ${palette.ring} ${
+                        isSelected ? 'scale-[1.04] ring-2 ring-cyan-300' : 'hover:scale-[1.02]'
+                      } ${isHighlighted && !isSelected ? 'ring-2 ring-emerald-300' : ''} ${isPathNode && !isSelected ? 'ring-2 ring-violet-300' : ''} ${extraRing}`}
+                      style={{
+                        left: pos.x,
+                        top: pos.y,
+                        width: LAYOUT.nodeWidth,
+                        height: LAYOUT.nodeHeight,
+                        background: lifecycleState === 'departing'
+                          ? 'linear-gradient(135deg, rgba(190,18,60,0.25) 0%, rgba(136,19,55,0.15) 100%)'
+                          : lifecycleState === 'ghost'
+                            ? 'linear-gradient(135deg, rgba(71,85,105,0.15) 0%, rgba(51,65,85,0.10) 100%)'
+                            : `linear-gradient(135deg, ${palette.from} 0%, ${palette.to} 100%)`,
+                        opacity: nodeOpacity,
+                        willChange: draggingNode?.id === node.id ? 'left, top' : undefined,
+                        pointerEvents: lifecycleState === 'departing' || lifecycleState === 'ghost' ? 'none' as const : undefined,
+                        filter: lifecycleState === 'ghost' ? 'grayscale(0.8)' : undefined,
+                        transition: lifecycleState === 'departing'
+                          ? 'all 5000ms ease-out'
+                          : lifecycleState === 'entering'
+                            ? 'all 2000ms ease-out'
+                            : 'left 400ms ease-out, top 400ms ease-out',
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold tracking-wide">{resolveServiceName(node)}</div>
+                          <div className="truncate text-[10px] text-slate-200/80">
+                            {resolveLane(node).label}
+                            {lifecycleTag ? <span className="ml-1.5 rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">{lifecycleTag}</span> : null}
+                          </div>
+                        </div>
+                        {lifecycleState !== 'ghost' && (
+                          <span className={`mt-0.5 inline-block h-2.5 w-2.5 rounded-full ${palette.statusDot} ${status !== 'normal' ? 'animate-pulse' : ''}`} />
+                        )}
+                      </div>
+                      {lifecycleState === 'active' || lifecycleState === 'entering' ? (
+                        <div className="mt-2 grid grid-cols-3 gap-1 text-[10px]">
+                          <div className="rounded bg-slate-950/35 px-1.5 py-1 text-center">log {node?.metrics?.log_count ?? 0}</div>
+                          <div className="rounded bg-slate-950/35 px-1.5 py-1 text-center">err {node?.metrics?.error_count ?? 0}</div>
+                          <div className="rounded bg-slate-950/35 px-1.5 py-1 text-center">cov {Math.round(Number(node?.coverage ?? node?.metrics?.coverage ?? 0) * 100)}%</div>
+                        </div>
+                      ) : lifecycleState === 'departing' ? (
+                        <div className="mt-2 text-center text-[9px] text-rose-300/60">即将移除</div>
+                      ) : null}
+                    </div>
                   );
-                const isPathNode = selectedPathNodeIds.has(node.id);
-                const status = getNodeStatus(node);
-                const dimByPath = !!selectedPathId && !isPathNode;
+                });
+              })()}
+
+              {/* ── P1: 孤岛节点区 ── */}
+              {(() => {
+                if (!showGhostZone) return null;
+                // 收集 ghost 节点数据
+                const ghostEntries: Array<{ node: TopologyNodeEntity; state: NodeLifecycleState; departedAt: number }> = [];
+                const now = Date.now();
+                for (const [id, state] of Object.entries(nodeLifecycle)) {
+                  if (state === 'ghost' && ghostNodeIds.has(id)) {
+                    const nodeData = departedNodesRef.current[id];
+                    if (nodeData) {
+                      // 估算 departedAt：从 timer 创建时间推断（无法精确，用清理 timer 倒推）
+                      ghostEntries.push({ node: nodeData, state: 'ghost', departedAt: now - GHOST_CLEANUP_MS });
+                    }
+                  }
+                }
+                if (ghostEntries.length === 0) return null;
+
+                // 计算孤岛区位置：在所有 lane 下方
+                const ghostZoneY = laneBands.length > 0
+                  ? Math.max(...laneBands.map((l) => l.y + l.height)) + 60
+                  : LAYOUT.laneStartY + 60;
+                const ghostZoneX = LAYOUT.laneStartX;
+                const cardWidth = 140;
+                const cardHeight = 52;
+                const cardGap = 10;
+                const cardsPerRow = Math.max(1, Math.floor((canvasSize.width - ghostZoneX - 40) / (cardWidth + cardGap)));
+
+                const ghostZoneHeight = Math.ceil(Math.min(ghostEntries.length, 30) / cardsPerRow) * (cardHeight + cardGap) + 48;
 
                 return (
                   <div
-                    key={node.id}
-                    onMouseDown={(e) => handleNodeMouseDown(e, node)}
-                    onMouseEnter={(e) => showNodeHoverCard(e, node)}
-                    onMouseMove={(e) => showNodeHoverCard(e, node)}
-                    onMouseLeave={scheduleHoverCardHide}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleNodeClick(node);
-                    }}
-                    className={`absolute rounded-2xl px-3 py-2 text-slate-100 transition-transform duration-150 ${palette.ring} ${
-                      isSelected ? 'scale-[1.04] ring-2 ring-cyan-300' : 'hover:scale-[1.02]'
-                    } ${isHighlighted && !isSelected ? 'ring-2 ring-emerald-300' : ''} ${isPathNode && !isSelected ? 'ring-2 ring-violet-300' : ''}`}
+                    className="absolute"
                     style={{
-                      left: pos.x,
-                      top: pos.y,
-                      width: LAYOUT.nodeWidth,
-                      height: LAYOUT.nodeHeight,
-                      background: `linear-gradient(135deg, ${palette.from} 0%, ${palette.to} 100%)`,
-                      opacity: dimByPath ? 0.36 : 1,
-                      willChange: draggingNode?.id === node.id ? 'left, top' : undefined,
+                      left: ghostZoneX - 12,
+                      top: ghostZoneY,
+                      width: canvasSize.width - ghostZoneX - 30,
+                      height: ghostZoneHeight,
                     }}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold tracking-wide">{resolveServiceName(node)}</div>
-                        <div className="truncate text-[10px] text-slate-200/80">{resolveLane(node).label}</div>
+                    <div
+                      className="h-full rounded-2xl border border-dashed border-slate-600/30 bg-slate-900/40 p-3"
+                    >
+                      <div className="mb-2 text-[10px] font-semibold text-slate-500">
+                        历史节点（孤岛） {ghostEntries.length} 个 · 无活跃边的服务，3h 后自动清理
                       </div>
-                      <span className={`mt-0.5 inline-block h-2.5 w-2.5 rounded-full ${palette.statusDot} ${status !== 'normal' ? 'animate-pulse' : ''}`} />
-                    </div>
-                    <div className="mt-2 grid grid-cols-3 gap-1 text-[10px]">
-                      <div className="rounded bg-slate-950/35 px-1.5 py-1 text-center">log {node?.metrics?.log_count ?? 0}</div>
-                      <div className="rounded bg-slate-950/35 px-1.5 py-1 text-center">err {node?.metrics?.error_count ?? 0}</div>
-                      <div className="rounded bg-slate-950/35 px-1.5 py-1 text-center">cov {Math.round(Number(node?.coverage ?? node?.metrics?.coverage ?? 0) * 100)}%</div>
+                      <div className="flex flex-wrap gap-2">
+                        {ghostEntries.slice(0, 30).map((entry) => {
+                          const serviceName = resolveServiceName(entry.node);
+                          return (
+                            <div
+                              key={`ghost-${entry.node.id}`}
+                              onClick={() => goToEffectiveLogs({ serviceName })}
+                              className="cursor-pointer rounded-xl border border-slate-700/30 bg-slate-950/60 px-3 py-2 text-center text-[9px] text-slate-500 hover:border-slate-500/50 hover:text-slate-300"
+                              style={{ filter: 'grayscale(0.85)' }}
+                              title={`点击查看 ${serviceName} 的日志`}
+                            >
+                              <span className="truncate">{serviceName}</span>
+                            </div>
+                          );
+                        })}
+                        {ghostEntries.length > 30 && (
+                          <div className="flex items-center px-2 text-[9px] text-slate-600">
+                            ...还有 {ghostEntries.length - 30} 个
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
-              })}
+              })()}
             </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center">
