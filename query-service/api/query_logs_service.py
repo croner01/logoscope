@@ -819,6 +819,19 @@ def query_logs(
     requested_namespaces = normalize_optional_str_list_fn(namespaces)
     if namespace:
         requested_namespaces = normalize_optional_str_list_fn([namespace, *requested_namespaces])
+
+    # When edge context is active, broaden the namespace filter to include both
+    # source and target namespaces.  Otherwise the caller's single `namespace`
+    # (typically effectiveTopologyNamespace) AND-ed with the edge namespace IN
+    # filter would silently exclude logs from the "other" side of the edge.
+    if edge_context_active and not same_edge_endpoints:
+        edge_ns_values = normalize_optional_str_list_fn([
+            normalized_source_namespace,
+            normalized_target_namespace,
+        ])
+        if edge_ns_values:
+            requested_namespaces = edge_ns_values
+
     requested_container_name = normalize_optional_str_fn(container_name)
     effective_search = None if edge_context_active else context.get("search")
     if same_edge_endpoints and not explicit_search:
