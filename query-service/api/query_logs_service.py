@@ -455,6 +455,13 @@ def _append_request_id_values_filter(
             f"JSONExtractString(attributes_json, 'trace', 'request_id') IN {{{param_name}:Array(String)}}",
         ]
     )
+    # Also search in message text — request_ids are often embedded in log messages
+    # (e.g. "[req-<uuid>]" prefix in OpenStack logs) but not present as structured
+    # attributes_json fields.
+    for idx, value in enumerate(unique_values):
+        msg_key = f"rid_msg_{idx}"
+        clauses.append(f"message ILIKE concat('%', {{{msg_key}:String}}, '%')")
+        params[msg_key] = value
     where_conditions.append(f"({' OR '.join(clauses)})")
     params[param_name] = unique_values
 
