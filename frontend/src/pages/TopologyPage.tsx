@@ -2164,7 +2164,19 @@ const TopologyPage: React.FC = () => {
 
         // 统一布局：已有节点在前保持相对顺序，新节点追加到末尾
         const ordered = [...sortedExisting, ...sortedNew];
-        const laneRows = Math.max(1, Math.ceil(ordered.length / LAYOUT.laneColsPerRow));
+        // 🔒 泳道高度需计入 departing/ghost 节点的虚拟行，否则下一个泳道上移
+        const lifecycleForLane = nodeLifecycleRef.current;
+        let lifecycleRowCount = 0;
+        for (const [nodeId, state] of Object.entries(lifecycleForLane)) {
+          if ((state === 'departing' || state === 'ghost') && !next[nodeId]) {
+            const existingPos = prev[nodeId];
+            if (existingPos && existingPos.laneKey === laneKey) {
+              lifecycleRowCount += 1;
+            }
+          }
+        }
+        const virtualLength = ordered.length + lifecycleRowCount;
+        const laneRows = Math.max(1, Math.ceil(virtualLength / LAYOUT.laneColsPerRow));
 
         ordered.forEach((node: TopologyNodeEntity, index: number) => {
           const col = index % LAYOUT.laneColsPerRow;
