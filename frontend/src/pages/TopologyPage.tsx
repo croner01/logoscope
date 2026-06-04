@@ -1062,6 +1062,9 @@ const TopologyPage: React.FC = () => {
   const [nodeLifecycle, setNodeLifecycle] = useState<Record<string, NodeLifecycleState>>({});
   const [ghostNodeIds, setGhostNodeIds] = useState<Set<string>>(new Set());
   const [showGhostZone, setShowGhostZone] = useState(true);
+  // ⚡ ref 桥接：生命周期 effect 同步写入，布局 effect 同步读取
+  // 避免同一 render 中 state 批处理导致的时序差
+  const nodeLifecycleRef = useRef<Record<string, NodeLifecycleState>>({});
   const frozenTopologyRef = useRef<TopologyGraph | null>(null);
   const departingTimersRef = useRef<Record<string, number>>({});
   const departingEdgesRef = useRef<Record<string, TopologyEdgeEntity>>({});
@@ -1662,6 +1665,7 @@ const TopologyPage: React.FC = () => {
       initializedNodeLifecycleRef.current = true;
       const initial: Record<string, NodeLifecycleState> = {};
       newNodeIds.forEach((id: string) => { initial[id] = 'active'; });
+      nodeLifecycleRef.current = initial;
       setNodeLifecycle(initial);
       return;
     }
@@ -1733,7 +1737,9 @@ const TopologyPage: React.FC = () => {
               if (!state || state !== 'departing') {
                 return currentLifecycle;
               }
-              return { ...currentLifecycle, [id]: 'ghost' };
+              const updated: Record<string, NodeLifecycleState> = { ...currentLifecycle, [id]: 'ghost' as const };
+              nodeLifecycleRef.current = updated;
+              return updated;
             });
             setGhostNodeIds((prevGhost) => {
               const updated = new Set(prevGhost);
@@ -1755,6 +1761,8 @@ const TopologyPage: React.FC = () => {
         }
       });
 
+      // ⚡ 同步 ref，确保同一 render 中 layout effect 读到正确生命周期值
+      nodeLifecycleRef.current = next;
       return next;
     });
 
@@ -2188,8 +2196,9 @@ const TopologyPage: React.FC = () => {
       });
 
       // 🔒 P1: 保留生命周期中（departing/ghost）节点的位置，防止布局跳动
-      // 这些节点不在 visibleNodes 中，但需要在 5s 缓冲期保持原位
-      for (const [nodeId, state] of Object.entries(nodeLifecycle)) {
+      // 从 nodeLifecycleRef 读取而非 nodeLifecycle state，避免同一 render 中 state 批处理导致的时序差
+      const lifecycleForLayout = nodeLifecycleRef.current;
+      for (const [nodeId, state] of Object.entries(lifecycleForLayout)) {
         if ((state === 'departing' || state === 'ghost') && !next[nodeId] && prev[nodeId]) {
           next[nodeId] = { ...prev[nodeId] };
         }
