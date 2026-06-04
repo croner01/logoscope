@@ -1076,6 +1076,8 @@ const TopologyPage: React.FC = () => {
   const previousNodeIdsRef = useRef<Set<string>>(new Set());
   const prevVisibleNodesRef = useRef<TopologyNodeEntity[]>([]);
   const initializedNodeLifecycleRef = useRef(false);
+  // ⚡ 渲染期节点缓存：解决 node 消失第一帧 lifecycle state 未更新导致的渲染缺失
+  const renderNodeCacheRef = useRef<Record<string, TopologyNodeEntity>>({});
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1652,6 +1654,25 @@ const TopologyPage: React.FC = () => {
       departingEdgesRef.current = {};
     };
   }, []);
+
+  // ── 渲染期节点缓存：当前 render 中新消失的节点从这里检测（避免等 lifecycle effect 滞后一帧） ──
+  const initialNodeLifecycleDone = initializedNodeLifecycleRef.current;
+  const newlyDepartingFromCache: Record<string, TopologyNodeEntity> = {};
+  const currentVisibleIds = new Set(visibleNodes.map((n) => n.id));
+  if (initialNodeLifecycleDone) {
+    for (const [prevId, prevNode] of Object.entries(renderNodeCacheRef.current)) {
+      if (!currentVisibleIds.has(prevId) && !ghostNodeIds.has(prevId)) {
+        newlyDepartingFromCache[prevId] = prevNode;
+      }
+    }
+  }
+  // 更新缓存供下一 render 使用
+  const newCache: Record<string, TopologyNodeEntity> = {};
+  for (const node of visibleNodes) {
+    newCache[node.id] = node;
+  }
+  renderNodeCacheRef.current = newCache;
+  const currentVisibleNodeIds = currentVisibleIds;
 
   // ── 节点生命周期：entering → active / active → departing(5s) → ghost ──
   useEffect(() => {
@@ -4095,14 +4116,25 @@ const TopologyPage: React.FC = () => {
               </svg>
 
               {(() => {
-                // departing 节点不在 visibleNodes 中，需要单独从 departedNodesRef 获取并渲染
+                // departing 节点不在 visibleNodes 中，需要单独从 departedNodesRef / renderNodeCacheRef 获取并渲染
+                // 注意：nodeLifecycle state 在 first render 时还来不及更新（lifecycle effect 滞后一帧），
+                // 需要用 newlyDepartingFromCache（渲染期检测）来桥接
                 const departingRenderNodes: Array<{ node: TopologyNodeEntity; lifecycleState: NodeLifecycleState }> = [];
+                const processedDeparting = new Set<string>();
+                // 检查 lifecycle state 中已标记为 departing 的节点
                 for (const [id, state] of Object.entries(nodeLifecycle)) {
-                  if (state === 'departing' && !visibleNodes.some((n) => n.id === id)) {
+                  if (state === 'departing' && !currentVisibleNodeIds.has(id)) {
                     const nodeData = departedNodesRef.current[id];
                     if (nodeData) {
                       departingRenderNodes.push({ node: nodeData, lifecycleState: 'departing' as NodeLifecycleState });
+                      processedDeparting.add(id);
                     }
+                  }
+                }
+                // 🔄 桥接：渲染期检测到的新消失节点（lifecycle state 尚未更新到 departing）
+                for (const [id, nodeData] of Object.entries(newlyDepartingFromCache)) {
+                  if (!processedDeparting.has(id) && !currentVisibleNodeIds.has(id)) {
+                    departingRenderNodes.push({ node: nodeData, lifecycleState: 'departing' as NodeLifecycleState });
                   }
                 }
 
