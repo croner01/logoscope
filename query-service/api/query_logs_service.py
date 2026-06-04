@@ -858,23 +858,6 @@ def query_logs(
     effective_correlation_mode = _normalize_correlation_mode(correlation_mode)
     max_threads = _resolve_query_logs_max_threads()
 
-    logger.info(
-        "[diag:query_logs] edge_context_active=%s source_service=%s target_service=%s "
-        "source_ns=%s target_ns=%s service_name=%s search=%s namespace=%s "
-        "time_window=%s start_time=%s end_time=%s",
-        edge_context_active,
-        normalized_source_service,
-        normalized_target_service,
-        normalized_source_namespace,
-        normalized_target_namespace,
-        explicit_service_name,
-        explicit_search,
-        namespace,
-        effective_time_window,
-        start_time,
-        end_time,
-    )
-
     # ── Cheap filters first: namespace, level ──
     append_exact_match_filter_fn(
         conditions=prewhere_conditions,
@@ -1004,14 +987,6 @@ def query_logs(
     SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """
 
-    if edge_context_active:
-        logger.info(
-            "[diag:query_logs] SQL edge_query prewhere_conditions=%s where_conditions=%s params_keys=%s",
-            prewhere_conditions,
-            where_conditions,
-            sorted(params.keys()),
-        )
-
     params["limit_plus_one"] = limit + 1
     params["max_threads"] = max_threads
 
@@ -1020,11 +995,6 @@ def query_logs(
     page_results = results[:limit]
     if edge_context_active:
         _annotate_edge_candidate_rows(page_results, normalized_source_service, normalized_target_service)
-        logger.info(
-            "[diag:query_logs] edge_query result count=%d has_request_ids=%s",
-            len(page_results),
-            bool(requested_request_ids),
-        )
     _decode_log_payload_fields(page_results)
 
     next_cursor = None
