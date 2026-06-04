@@ -496,3 +496,273 @@ ClickHouse timestamp   → "2026-06-04 03:33:36.492501"
 | `frontend/src/pages/LogsExplorer.tsx` | resolveTimeWindowRange + TopologyJumpContext |
 | `frontend/src/hooks/useApi.ts` | useHybridTopology / useRealtimeTopology / useTopologyEdgeLogPreview |
 | `frontend/src/hooks/useNavigation.ts` | goToLogs — URL 构造与导航 |
+
+---
+
+## 附录 B: 页面数据字典
+
+> 按页面区域逐一说明每个数据的含义、来源（哪个 API / 哪个字段 / 前端如何计算）。
+
+---
+
+### B.1 顶部工具栏状态栏
+
+| 显示内容 | 含义 | 来源 |
+|---------|------|------|
+| **来源: 实时推送/查询快照** | 当前渲染的拓扑数据是从 WebSocket 实时推送还是 REST 快照 | 前端 `topologyRenderSource` memo：优先使用 `realtimeTopology`（参数匹配时），否则 fallback 到 `useHybridTopology` 的 `data` |
+| **WS: 已连接/未连接** | 与 `/ws/topology` 的 WebSocket 连接状态 | `useRealtimeTopology` 返回的 `isConnected` |
+| **新鲜度: ...·...** | 拓扑数据的"新鲜程度" | `topologyFreshness` memo：用 `effectiveTopologyAnchorTime`（即 `metadata.generated_at`）与当前时间对比计算。`statusLabel` = 实时(≤2min) / 新鲜(≤10min) / 稍旧(≤30min) / 陈旧(>30min)；`ageLabel` = 具体分钟数 |
+| **时间窗: 15M/30M/...** | 当前查询的时间窗口 | `effectiveTopologyTimeWindow`：优先取 `topologyData.metadata.time_window`，fallback 到 UI 下拉框选择的 `timeWindow` |
+| **锚点: ...** | 拓扑快照的生成时间 | `effectiveTopologyAnchorTime` = `topologyData.metadata.generated_at`（后端 `datetime.now(timezone.utc).isoformat()`） |
+| **推断: rule/hybrid_score** | 推理模式 | `topologyInferenceModeLabel` memo：优先取 `metadata.inference_quality.inference_mode`，fallback 到 `inferenceMode` 状态 |
+| **命名空间: ...** | 当前命名空间过滤 | `effectiveTopologyNamespace`：优先 URL `?namespace=`，fallback 到 topology metadata |
+
+### B.2 拓扑态势面板——统计数据
+
+| 显示内容 | 含义 | 来源 |
+|---------|------|------|
+| **节点 / N** | 当前过滤后可见的节点数 | `filteredTopology.nodes.length`（经过 evidence/weak/focus depth 等过滤器处理后） |
+| **边 / N** | 当前过滤后可见的边数 | `filteredTopology.edges.length` |
+| **泳道 / N** | 泳道数量 | `laneBands.length`（仅在 swimlane 模式下 > 0；按 namespace 分 lane） |
+| **状态: 在线/离线** | WebSocket 实时连接状态 | `realtimeConnected` |
+| **过滤耗时: Nms** | 前端过滤器链的总耗时 | `filteredTopology.costMs`（filterByEvidenceMode + filterGraphByFocusDepth + filterWeakEvidenceEdges 的耗时合计） |
+| **问题节点/链路: N/N** | 有问题的节点和边数量 | `issueSummary.unhealthyNodes / unhealthyEdges`（来自 `resolveIssueSummary` → 后端 `metadata.issue_summary` 或前端客户端计算） |
+| **全量视图: N节点/N边** | 过滤前的原始拓扑规模 | `filteredTopology.baseNodeCount / baseEdgeCount` |
+| **当前视图: N节点/N边** | 过滤后实际渲染的规模 | `visibleNodes.length / visibleEdges.length` |
+
+### B.3 拓扑态势面板——连线图例
+
+| 颜色 | 含义 | 判定逻辑 |
+|------|------|---------|
+| **青色线** | 正常观测链路 | `evidence_type = "observed"` 且 riskLevel = "低风险" |
+| **紫色线** | 推断链路 | `evidence_type = "inferred"`（来自 M2 推断，无 traces 验证） |
+| **琥珀色线** | 预警链路 | riskLevel = "中风险"：错误率 > 3% 或超时率 > 2% 或 P99 > 650ms 或质量分 < 80 |
+| **红色线** | 高风险链路 | riskLevel = "高风险"：错误率 > 8% 或超时率 > 5% 或 P99 > 1200ms 或质量分 < 60 |
+
+### B.4 画布节点卡片
+
+每个节点是一个绝对定位的 `<div>`，展示 3 个指标：
+
+| 显示内容 | 含义 | 数据来源 |
+|---------|------|---------|
+| **服务名称** | 服务名 | `resolveServiceName(node)`：优先级 `node.service.name` → `node.metrics.service_name` → `node.label` → `node.id` |
+| **泳道标签** | 所属 namespace | `resolveLane(node).label`：优先 `node.namespace`，fallback 到 `node.metrics.namespace`，最终 "默认" |
+| **状态圆点** | 健康状态 | `getNodeStatus(node)`：`"error"`（错误率>5%且错误数>2 或大量日志且高错误率） / `"warning"`（错误率>0 或错误数>0） / `"normal"` |
+| **节点颜色** | 按时间窗着色 | `getNodePalette(node, timeWindow)`：根据 `TIME_WINDOW_NODE_THEMES` 按时间窗给 service/database/cache 不同类型不同渐变色 |
+| **log N** | 该服务日志总数 | `node.metrics.log_count` ← ClickHouse `COUNT(*)` GROUP BY service_name |
+| **err N** | 该服务错误数 | `node.metrics.error_count` ← ClickHouse `SUM(CASE WHEN level IN ('error','fatal') THEN 1 ELSE 0 END)` |
+| **cov N%** | 覆盖率 | `node.coverage ?? node.metrics.coverage` ← `apply_node_contract()` 中计算：`min(data_source_count / 3, 1.0)` |
+
+### B.5 画布边渲染
+
+| 显示内容 | 含义 | 数据来源 |
+|---------|------|---------|
+| **边颜色** | 风险等级语义 | `getEdgeColor(edge)`：根据 `riskLevel` + `error_rate` + `timeout_rate` + `evidence_type` 决定：红色(高风险) / 琥珀(预警) / 紫色(推断) / 青色(观测) |
+| **边粗细** | 流量大小 | `min(6.8, max(2.2, log10(rps+10)*1.75))`：流量越高线越粗 |
+| **透明度** | 聚焦状态 | 选中0.98 / 聚焦0.86 / 有高亮存在0.18 / 正常0.72 |
+| **虚线** | 生命周期状态 | `entering`(青色虚线) / `departing`(红色虚线) / `active`(实线) |
+| **流动小圆点** | 数据流向 | `<circle>` + `<animateMotion>` 沿贝塞尔曲线运动，duration 按路径长度 + index 交错 |
+| **边标签** | 关系类型+指标 | 显示: `{relation.label}` (如 "HTTP调用") / `err {error_rate%}` / `p99 {p99ms}` / `qos {quality_score}` / `score {issueScore}` |
+| **捆束标签** | 多条同向边聚合 | 未展开时中间那条标签显示 `"calls ×N"` |
+| **箭头标记** | 调用方向+风险 | 5 种 SVG marker: `arrow-observed`(青) / `arrow-inferred`(紫) / `arrow-warning`(琥珀) / `arrow-danger`(红) / `arrow-entering`(青虚线) |
+
+### B.6 节点 Hover 卡片
+
+| 显示内容 | 含义 | 数据来源 |
+|---------|------|---------|
+| **服务名称** | 服务名 | `resolveServiceName(hoverCard.node)` |
+| **Namespace \| Lane** | 命名空间和泳道 | `resolveNamespaceLabel(node)` + `resolveLane(node).label` |
+| **异常/预警/正常** | 健康状态徽章 | `getNodeStatus(node)` |
+| **日志 N** | 日志总数 | `node.metrics.log_count` |
+| **错误 N** | 错误数 | `node.metrics.error_count` |
+| **覆盖率 N%** | 数据覆盖率 | `node.coverage ?? node.metrics.coverage` → `Math.round(* 100)%` |
+| **质量分 N** | 综合质量评分 | `node.quality_score ?? node.metrics.quality_score` ← `apply_node_contract()` 中计算 |
+
+### B.7 边 Hover 卡片
+
+| 显示内容 | 含义 | 数据来源 |
+|---------|------|---------|
+| **source → target** | 边端点 | `edge.source` / `edge.target`（node_id 格式） |
+| **高风险/中风险/低风险** | 风险等级徽章 | `getRiskLevel(errorRate, timeoutRate, p99, qualityScore)` |
+| **关系类型 · evidence** | 调用类型+证据级别 | `getRelationshipLabel(reason).label` + `evidence_type`（observed/inferred） |
+| **错误率 N%** | 调用错误率 | `edge.metrics.error_rate` |
+| **超时率 N%** | 调用超时率 | `edge.metrics.timeout_rate` |
+| **P95/P99 N/Nms** | 延迟分位值 | `edge.metrics.p95` / `edge.metrics.p99` |
+| **质量分 N** | 综合质量评分 | `edge.metrics.quality_score` ← `apply_edge_contract()` 中计算 |
+
+### B.8 链路情报看板（Issues Panel）
+
+展示 Top 10（最多显示前 7 条）问题边，按排序模式排序：
+
+| 显示内容 | 含义 | 数据来源 |
+|---------|------|---------|
+| **source → target** | 边端点 | `edge.source` / `edge.target` |
+| **err N%** | 错误率 | `edge.metrics.error_rate` |
+| **p99 Nms** | P99 延迟 | `edge.metrics.p99 ?? edge.p99` |
+| **to N%** | 超时率 | `edge.metrics.timeout_rate` |
+| **score N** | 问题评分 | `resolveEdgeIssueScore(edge)` ← `resolveEdgeProblemSummary(edge).issueScore` |
+
+排序模式 (`edgeSortMode`):
+- **综合** (`anomaly`): `sortEdgesByIssueScore()` — 按 issueScore 降序
+- **错误率**: 按 `error_rate` 降序
+- **超时率**: 按 `timeout_rate` 降序
+- **P99**: 按 `p99` 降序
+
+**Issue Score 计算** (`resolveEdgeProblemSummary`，当后端未返回 `problem_summary` 时前端计算):
+
+```
+latencyScore  = min((p95 + p99) / 2500, 1) * 30
+qualityPenalty = max(0, (70 - qualityScore) / 70) * 30
+timeoutScore  = min(timeoutRate * 100, 1) * 25
+errorScore    = min(errorRate * 100, 1) * 50
+evidencePenalty = evidence === 'inferred' ? 3 : 0
+issueScore    = round(errorScore + timeoutScore + latencyScore + qualityPenalty + evidencePenalty)
+riskLevel     = issueScore >= 70 ? '高风险' : issueScore >= 35 ? '中风险' : '低风险'
+```
+
+### B.9 节点详情面板
+
+| 区域 | 显示内容 | 含义 | 数据来源 |
+|------|---------|------|---------|
+| 头部 | 服务名称 | 服务名 | `resolveServiceName(selectedNode)` |
+| 头部 | Namespace + Lane | 命名空间和泳道 | `resolveNamespaceLabel(selectedNode)` + `resolveLane(selectedNode).label` |
+| 问题摘要 | **TS-02 节点问题摘要** | 风险等级+评分+标题+建议 | `resolveNodeProblemSummary(selectedNode)`：优先取后端 `node.problem_summary`，否则前端计算 |
+| 问题摘要 | score N · headline | 问题评分+简要描述 | 后端注入的 `problem_summary.headline`，或前端留空 |
+| 问题摘要 | 建议: ... | 修复建议 | 后端注入的 `problem_summary.suggestion` |
+| 指标网格 | 日志数 | 日志总数 | `selectedNode.metrics.log_count` |
+| 指标网格 | 错误数 | 错误总数 | `selectedNode.metrics.error_count` |
+| 指标网格 | 覆盖率 | 数据源覆盖率 | `selectedNode.coverage ?? selectedNode.metrics.coverage` |
+| 指标网格 | 质量分 | 综合质量评分 | `selectedNode.quality_score ?? selectedNode.metrics.quality_score` |
+| 路径分析 | 上游/下游路径 | BFS 展开的上下游路径 | `focusPathSummaries` → `enumerateDirectionalPaths()` 在 `visibleEdges` 上 BFS 深度遍历 |
+| 路径分析 | req/err/to/P99/qos/risk/hop | 路径聚合指标 | 路径上所有边的 `rps`(求和)、`error_rate`(max)、`timeout_rate`(max)、`P95/P99`(max)、`quality_score`(min)、`riskLevel`(综合) |
+| 当前路径 | 路径解释文字 | 自然语言路径描述 | `selectedPath.explanation` |
+| 导航按钮 | 查看服务日志 | 跳转到 LogsExplorer | `goToEffectiveLogs({ serviceName, namespace })` |
+| 导航按钮 | 查看服务告警 | 跳转到 Alerts | `goToEffectiveAlerts({ scope: 'service', ... })` |
+| 导航按钮 | AI 分析 | 跳转到 AI 对话 | `navigation.goToAIAnalysis({ logData: buildNodeAiPayload(node) })` |
+
+**Node Issue Score 计算** (`resolveNodeProblemSummary`，当后端未返回时):
+
+```
+issueScore = min(errorCount, 8) * 4
+           + min(errorRate * 100, 1) * 40
+           + min(timeoutRate * 100, 1) * 20
+           + max(0, (85 - qualityScore) / 85) * 25
+riskLevel  = issueScore >= 70 ? '高风险' : issueScore >= 35 ? '中风险' : '低风险'
+```
+
+### B.10 边详情面板
+
+| 区域 | 显示内容 | 含义 | 数据来源 |
+|------|---------|------|---------|
+| 头部 | source → target | 边端点 | `resolveEdgeEndpointService(edge, 'source')` → `resolveEdgeEndpointService(edge, 'target')` |
+| 头部 | 关系类型 / evidence | 调用分类+证据级别 | `getRelationshipLabel(reason).label` / `evidence_type` |
+| 头部 | 风险等级徽章 | high/medium/low | `edgeProblemSummary.riskLevel` |
+| 问题摘要 | score N · headline | 问题评分+一句话描述 | `resolveEdgeProblemSummary(selectedEdge)` |
+| 问题摘要 | 建议: ... | 修复建议 | `edgeProblemSummary.suggestion` |
+| 链路描述 | **标准化链路描述** | 可读模板 | `formatEdgeDescription(edge)` = `"SRC → DST \| protocol \| N rpm \| 错误率 N% \| 超时率 N% \| P95 Nms / P99 Nms \| 质量分 N \| 证据 observed/inferred \| riskLevel（描述）"` |
+| 指标网格 | **RPS(近似)** | 每秒请求数近似 | `edge.metrics.rps ?? edge.metrics.call_count` ← 后端 `call_count / window_seconds` |
+| 指标网格 | **错误率** | 调用错误率 | `edge.metrics.error_rate` |
+| 指标网格 | **P95 / P99** | 延迟分位值 | `edge.metrics.p95` / `edge.metrics.p99` |
+| 指标网格 | **超时率** | 调用超时率 | `edge.metrics.timeout_rate` |
+| 指标网格 | **覆盖率** | 边覆盖率 | `edge.coverage ?? edge.metrics.coverage` ← `apply_edge_contract()` 计算 |
+| 指标网格 | **质量分** | 综合质量评分 | `edge.quality_score ?? edge.metrics.quality_score` ← `apply_edge_contract()` 计算 |
+| Direction | **Direction 一致性贡献** | 有向性一致性指标 | `resolveDirectionalContribution(edge)`：从 `edge.metrics.directional_consistency` 读取，拆分为 confidence 贡献(+0.24×value) 和 evidence 贡献(+2.0×value) |
+| 日志预览 | **链路问题日志预览(QS-01)** | 最多 6 条关联日志 | `edgeLogPreviewData` ← `useTopologyEdgeLogPreview(edgePreviewParams)` → `GET /api/v1/logs/preview/topology-edge` |
+| 日志预览 | seed_count / expanded_count | 种子日志数 / 扩展日志数 | `edgeLogPreviewData.context` |
+| 日志预览 | trace_id/request_id count | 关联 ID 数量 | `edgeLogPreviewData.context.trace_id_count / request_id_count` |
+| 日志预览 | 每条日志条目 | 时间戳+级别+消息片段+边方向+匹配类型+关联精度 | 后端返回的 `data[]` 条目 |
+| RED 指标 | **M1-04: Edge RED** | 边级 RED( Rate/Error/Duration) 聚合 | 后端 `_apply_edge_red_aggregation()` 注入 `edge.metrics.red_*` 字段 |
+| 导航按钮 | 查看 Trace-Lite 片段 | 跳转 Traces | 使用 `edgePreviewCorrelationFilters.traceIds` |
+| 导航按钮 | 查看边关联日志 | 跳转 LogsExplorer | 使用 `source_service + target_service + time_window` |
+| 导航按钮 | 查看边告警 | 跳转 Alerts | `goToEffectiveAlerts({ scope: 'edge', ... })` |
+| 导航按钮 | AI 分析 | 跳转 AI 对话 | `navigation.goToAIAnalysis({ logData: buildEdgeAiPayload(edge) })` |
+
+### B.11 日志预览条目详情
+
+每条边日志预览中的日志条目，点击可跳转到 LogsExplorer：
+
+| 显示内容 | 含义 | 数据来源 |
+|---------|------|---------|
+| **服务名 + 边方向徽章** | source/target/correlated | 后端日志匹配结果中的 `edge_side` 字段 |
+| **匹配类型徽章** | request_id/trace_id/message_target/time_window | 后端日志匹配结果中的 `match_kind` 字段 |
+| **关联精度徽章** | trace_id/request_id 匹配精度 | 与 edge context 的 trace_ids/request_ids 交叉比对 |
+| **级别徽章** | 日志级别 | 红色(ERROR/FATAL)、琥珀(WARN)、灰色(其他) |
+| **时间戳** | 日志时间 | `log.timestamp`（ClickHouse 原生，微秒精度） |
+| **message（高亮）** | 带高亮的日志内容 | source_service 和 target_service 名称用 cyan 高亮 |
+| **关联类型** | seed/expanded/candidate | 后端日志扩展时的分类 |
+| **匹配描述** | 匹配原因的简短文字 | 后端返回 |
+
+### B.12 完整数据溯源：从 ClickHouse 到页面
+
+```
+ClickHouse 原始字段                    → 后端处理                              → 前端展示
+─────────────────────────────────────────────────────────────────────────────────────
+
+logs.logs.service_name                → node.metrics.service_name               → resolveServiceName(node)
+logs.logs.namespace                   → node.namespace                          → resolveNamespace(node)
+logs.logs.timestamp                   → node.metrics.last_seen                  → topologyFreshness
+COUNT(*)                             → node.metrics.log_count                   → 节点卡片 "log N"
+SUM(error)                           → node.metrics.error_count                 → 节点卡片 "err N"
+error_count / log_count              → node.metrics.error_rate                  → 节点状态判定
+log_count / window_seconds           → node.metrics.rps                         → (未直接在节点展示)
+
+logs.traces.service_name             → node (from traces)                      → 合并到同节点
+logs.traces.parent_span_id           → edge (from traces)                      → observed edge
+logs.traces.duration_ms              → edge.metrics.p95/p99                    → 边指标
+
+M2 推理 (request_id/trace_id/mt)     → edge (from logs inference)              → inferred edge
+  accumulated count                  → edge.metrics.call_count                  → "RPS(近似)"
+  weighted_score                     → edge.metrics.confidence                  → confidence_threshold 过滤
+  evidence_chain                     → edge.metrics.evidence_chain              → (debug only)
+
+confidence_calculator                → edge.metrics.confidence (recalculated)  → 置信度
+  time_decay × error_penalty + boost
+
+topology_contract                    → node.node_key / edge.edge_key           → 稳定标识
+  coverage                           → node.coverage                           → "cov N%"
+  quality_score                      → node/edge.quality_score                 → "质量分"
+  evidence_type                      → node/edge.evidence_type                 → "observed"/"inferred"
+  protocol                           → edge.metrics.protocol                   → 链路描述
+  endpoint_pattern                   → edge.metrics.endpoint_pattern           → 链路描述
+
+_apply_edge_red_aggregation          → edge.metrics.red_{rate,error,duration}  → RED 指标面板
+
+build_topology() metadata
+  generated_at (now())               → metadata.generated_at                   → anchor_time / 锚点 / 新鲜度
+  time_window                        → metadata.time_window                    → 时间窗参数
+  inference_quality.*                → metadata.inference_quality               → 推断统计 / 状态栏
+  issue_summary                      → metadata.issue_summary                   → 问题节点/链路统计
+  source_breakdown                   → metadata.source_breakdown               → (debug only)
+  avg_confidence                     → metadata.avg_confidence                 → (debug only)
+```
+
+### B.13 状态汇总
+
+| 字段 | 后端来源 | 前端类型 | 说明 |
+|------|---------|---------|------|
+| `id` | `_build_node_id()` / `_build_edge_id()` | `string` | 拓扑范围内唯一标识 |
+| `node_key` | `topology_contract.build_node_key()` | `string` | 全局唯一节点主键 `ns:name:env` |
+| `edge_key` | `topology_contract.build_edge_key()` | `string` | 全局唯一边主键 |
+| `label` | `service_name` / `operation_name` | `string` | 显示名称 |
+| `type` | 硬编码 `"service"` / `"database"` 等 | `string` | 节点/边类型 |
+| `metrics.log_count` | `COUNT(*)` | `number` | 窗口内总日志数 |
+| `metrics.error_count` | `SUM(CASE error)` | `number` | 窗口内错误日志数 |
+| `metrics.error_rate` | `error_count / log_count` | `number` | 错误率 (0-1) |
+| `metrics.rps` | `log_count / window_seconds` | `number` | 近似每秒请求数 |
+| `metrics.p95` / `metrics.p99` | `quantile(duration)` | `number` | 延迟分位值 (ms) |
+| `metrics.timeout_rate` | 超时占比 | `number` | 超时率 (0-1) |
+| `metrics.confidence` | `ConfidenceCalculator` 计算 | `number` | 置信度 (0-1) |
+| `metrics.data_source` | `"traces"/"logs"/"metrics"/"inferred"` | `string` | 主要数据来源 |
+| `metrics.data_sources` | `["traces", "logs", ...]` | `string[]` | 所有数据来源 |
+| `metrics.evidence_type` | `apply_*_contract()` | `string` | `"observed"` / `"inferred"` |
+| `metrics.evidence_chain` | 推理累积 | `object[]` | 推理证据链 (最多 8 条) |
+| `metrics.inference_method` | 主导推理方法 | `string` | `"request_id"/"trace_id"/"message_target"/"time_window"` |
+| `metrics.reason` | 推理原因标签 | `string` | 如 `"trace_id_correlation"` |
+| `coverage` | `apply_*_contract()` | `number` | 数据源覆盖度 (0-1) |
+| `quality_score` | `apply_*_contract()` | `number` | 综合质量分 (0-100) |
+| `evidence_type` | `apply_*_contract()` | `string` | `"observed"` / `"inferred"` |
+| `problem_summary` | 后端注入（可选） | `object` | 预计算的问题摘要 |
+| `metadata.generated_at` | `datetime.now(utc).isoformat()` | `string` | 快照生成时间 |
+| `metadata.time_window` | 实际使用的窗口 | `string` | 如 `"15 MINUTE"` |
+| `metadata.inference_quality` | 推理统计 | `object` | 各方法边数/推断率/假阳性率等 |
+| `metadata.issue_summary` | 问题汇总 | `object` | unhealthy_nodes, unhealthy_edges, risk 分布 |
