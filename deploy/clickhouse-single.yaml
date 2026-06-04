@@ -39,6 +39,8 @@ metadata:
   labels:
     app: clickhouse
 spec:
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
@@ -82,7 +84,7 @@ spec:
           value: "9000"
         resources:
           limits:
-            memory: 2Gi
+            memory: 8Gi
             cpu: 6
           requests:
             cpu: 500m

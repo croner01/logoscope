@@ -393,6 +393,7 @@ def _append_text_search_filter(
 
 
 _REQUEST_ID_ATTRIBUTE_KEYS = (
+    "correlation_request_id",
     "request_id",
     "request.id",
     "requestId",
@@ -999,6 +1000,11 @@ def query_logs(
     page_results = results[:limit]
     if edge_context_active:
         _annotate_edge_candidate_rows(page_results, normalized_source_service, normalized_target_service)
+        logger.info(
+            "[diag:query_logs] edge_query result count=%d has_request_ids=%s",
+            len(page_results),
+            bool(requested_request_ids),
+        )
     _decode_log_payload_fields(page_results)
 
     next_cursor = None
