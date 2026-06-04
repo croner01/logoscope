@@ -1700,10 +1700,11 @@ const TopologyPage: React.FC = () => {
           delete departedNodesRef.current[id];
           next[id] = 'active';
         } else if (priorState === 'ghost') {
-          // 从 ghost 回归：取消清理计时，标记为 entering
-          if (nodeDepartTimersRef.current[id] !== undefined) {
-            window.clearTimeout(nodeDepartTimersRef.current[id]);
-            delete nodeDepartTimersRef.current[id];
+          // 从 ghost 回归：取消清理计时器（清理 timer 的 key 是 `${id}_cleanup`）
+          const cleanupKey = `${id}_cleanup`;
+          if (nodeDepartTimersRef.current[cleanupKey] !== undefined) {
+            window.clearTimeout(nodeDepartTimersRef.current[cleanupKey]);
+            delete nodeDepartTimersRef.current[cleanupKey];
           }
           // 从 ghost 列表中移除
           setGhostNodeIds((prevGhost) => {
@@ -4120,19 +4121,19 @@ const TopologyPage: React.FC = () => {
                     extraRing = 'ring-1 ring-slate-500/30';
                   }
 
+                  const isInteractive = lifecycleState === 'active' || lifecycleState === 'entering';
+
                   return (
                     <div
                       key={node.id}
-                      onMouseDown={(e) => lifecycleState === 'active' || lifecycleState === 'entering' ? handleNodeMouseDown(e, node) : null}
-                      onMouseEnter={(e) => lifecycleState === 'active' || lifecycleState === 'entering' ? (showNodeHoverCard(e, node), null) : null}
-                      onMouseMove={(e) => lifecycleState === 'active' || lifecycleState === 'entering' ? (showNodeHoverCard(e, node), null) : null}
-                      onMouseLeave={lifecycleState === 'active' || lifecycleState === 'entering' ? scheduleHoverCardHide : undefined}
-                      onClick={(e) => {
+                      onMouseDown={isInteractive ? (e) => handleNodeMouseDown(e, node) : undefined}
+                      onMouseEnter={isInteractive ? (e) => { showNodeHoverCard(e, node); } : undefined}
+                      onMouseMove={isInteractive ? (e) => { showNodeHoverCard(e, node); } : undefined}
+                      onMouseLeave={isInteractive ? scheduleHoverCardHide : undefined}
+                      onClick={isInteractive ? (e) => {
                         e.stopPropagation();
-                        if (lifecycleState === 'active' || lifecycleState === 'entering') {
-                          handleNodeClick(node);
-                        }
-                      }}
+                        handleNodeClick(node);
+                      } : undefined}
                       className={`absolute rounded-2xl px-3 py-2 text-slate-100 transition-[left,top] duration-[400ms] ease-out motion-reduce:duration-0 ${palette.ring} ${
                         isSelected ? 'scale-[1.04] ring-2 ring-cyan-300' : 'hover:scale-[1.02]'
                       } ${isHighlighted && !isSelected ? 'ring-2 ring-emerald-300' : ''} ${isPathNode && !isSelected ? 'ring-2 ring-violet-300' : ''} ${extraRing}`}
@@ -4187,23 +4188,21 @@ const TopologyPage: React.FC = () => {
               {(() => {
                 if (!showGhostZone) return null;
                 // 收集 ghost 节点数据
-                const ghostEntries: Array<{ node: TopologyNodeEntity; state: NodeLifecycleState; departedAt: number }> = [];
-                const now = Date.now();
+                const ghostEntries: Array<{ node: TopologyNodeEntity }> = [];
                 for (const [id, state] of Object.entries(nodeLifecycle)) {
                   if (state === 'ghost' && ghostNodeIds.has(id)) {
                     const nodeData = departedNodesRef.current[id];
                     if (nodeData) {
-                      // 估算 departedAt：从 timer 创建时间推断（无法精确，用清理 timer 倒推）
-                      ghostEntries.push({ node: nodeData, state: 'ghost', departedAt: now - GHOST_CLEANUP_MS });
+                      ghostEntries.push({ node: nodeData });
                     }
                   }
                 }
                 if (ghostEntries.length === 0) return null;
 
-                // 计算孤岛区位置：在所有 lane 下方
-                const ghostZoneY = laneBands.length > 0
-                  ? Math.max(...laneBands.map((l) => l.y + l.height)) + 60
-                  : LAYOUT.laneStartY + 60;
+                // 计算孤岛区位置：基于当前所有 nodePositions 的最大 Y（适用于所有布局模式）
+                const nodePosValues = Object.values(nodePositions);
+                const maxNodeY = nodePosValues.length > 0 ? Math.max(...nodePosValues.map((p) => p.y)) : LAYOUT.laneStartY;
+                const ghostZoneY = Math.max(maxNodeY + LAYOUT.nodeHeight + 60, LAYOUT.laneStartY + 100);
                 const ghostZoneX = LAYOUT.laneStartX;
                 const cardWidth = 140;
                 const cardHeight = 52;
