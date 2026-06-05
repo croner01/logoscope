@@ -37,6 +37,64 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _parse_llm_json_response(raw: str) -> list:
+    """Parse LLM JSON response into action dicts. Handles common shapes."""
+    text = _as_str(raw).strip()
+    if not text:
+        return []
+
+    # Try direct JSON parse
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        # Try extracting JSON from markdown code fence
+        import re
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if m:
+            try:
+                parsed = json.loads(m.group(1).strip())
+            except json.JSONDecodeError:
+                return []
+        else:
+            return []
+
+    # Normalize to list of action dicts
+    if isinstance(parsed, list):
+        candidates = parsed
+    elif isinstance(parsed, dict):
+        # Common shapes: {"actions": [...]}, {"tool_calls": [...]}, single action
+        candidates = (
+            parsed.get("actions")
+            or parsed.get("tool_calls")
+            or parsed.get("steps")
+            or [parsed]
+        )
+        if not isinstance(candidates, list):
+            candidates = [parsed]
+    else:
+        return []
+
+    # Filter to valid action dicts (must have 'command' or 'tool')
+    actions = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        # Extract from function call shape
+        fn = item.get("function") or item
+        args = fn.get("arguments", {}) if isinstance(fn, dict) else {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        if isinstance(args, dict) and (args.get("command") or args.get("tool")):
+            item = args
+        if item.get("command") or item.get("tool"):
+            actions.append(item)
+
+    return actions
+
+
 def _is_unified_engine_enabled() -> bool:
     return _as_str(os.getenv("AI_RUNTIME_UNIFIED_ENGINE_ENABLED", "")).strip().lower() in (
         "1", "true", "yes", "on",
@@ -63,6 +121,7 @@ async def unified_diagnosis_bridge(
     # ── new engine params ────────────────────────────────────────────────
     llm_call: Any = None,
     llm_chat_fn: Any = None,
+    llm_service: Any = None,
 ) -> Dict[str, Any]:
     """Drop-in replacement for _run_followup_auto_exec_react_loop.
 
@@ -114,64 +173,46 @@ async def unified_diagnosis_bridge(
 
         # Background task would relay events — for simplicity, emit directly
 
-    # Build LLM plan function using the provided llm_chat_fn
+    # Build LLM plan function — calls LLMService.chat() with JSON response_format
     async def _llm_plan(system_prompt, task_prompt, tool_schema, st, mem, lc):
-        if llm_chat_fn is None:
+        svc = llm_service or llm_chat_fn
+        if svc is None:
             return LlmPlanResult(actions=[], summary="no LLM configured")
 
+        # Build a single message combining system + tool schema + task
+        tool_instruction = json.dumps(tool_schema, ensure_ascii=False, indent=2) if tool_schema else ""
+        combined_message = (
+            f"{system_prompt}\n\n"
+            f"## Tool Schema (output JSON matching this schema)\n"
+            f"```json\n{tool_instruction}\n```\n\n"
+            f"{task_prompt}"
+        )
+
         try:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task_prompt},
-            ]
-            raw = await llm_chat_fn(messages, tools=[tool_schema] if tool_schema else None)
+            raw: str = ""
+            # Try chat method (LLMService interface: message + context + response_format)
+            chat_fn = getattr(svc, "chat", None)
+            if callable(chat_fn):
+                raw = await chat_fn(
+                    message=combined_message,
+                    context=None,
+                    response_format={"type": "json_object"},
+                )
+            elif callable(svc):
+                raw = await svc(combined_message)
+            else:
+                return LlmPlanResult(actions=[], summary="LLM service has no chat method")
+
+            if not isinstance(raw, str):
+                raw = str(raw)
         except Exception as exc:
             if logger:
                 logger.warning("LLM plan call failed: %s", exc)
             return LlmPlanResult(actions=[], summary=f"LLM error: {exc}")
 
-        # Parse LLM response — handle various output shapes
-        actions_out = []
-        if isinstance(raw, dict):
-            # Tool call response
-            tool_calls = raw.get("tool_calls") or raw.get("actions") or []
-            if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if isinstance(tc, dict):
-                        fn = tc.get("function") or tc
-                        args = fn.get("arguments", {}) if isinstance(fn, dict) else {}
-                        if isinstance(args, str):
-                            try:
-                                args = json.loads(args)
-                            except json.JSONDecodeError:
-                                args = {}
-                        if isinstance(args, dict) and args.get("command"):
-                            actions_out.append(args)
-            # Direct action
-            if not actions_out and raw.get("command"):
-                actions_out.append(raw)
-            # Content field
-            content = raw.get("content") or raw.get("message", "")
-            if isinstance(content, str) and content:
-                try:
-                    parsed = json.loads(content)
-                    if isinstance(parsed, dict):
-                        actions_out.append(parsed)
-                    elif isinstance(parsed, list):
-                        actions_out.extend(parsed)
-                except json.JSONDecodeError:
-                    pass
-        elif isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    actions_out.append(parsed)
-                elif isinstance(parsed, list):
-                    actions_out.extend(parsed)
-            except json.JSONDecodeError:
-                pass
-
-        return LlmPlanResult(actions=actions_out, raw_response=str(raw)[:2000])
+        # Parse JSON response
+        actions_out = _parse_llm_json_response(raw)
+        return LlmPlanResult(actions=actions_out, raw_response=raw[:2000])
 
     # Build tools adapter
     tools = ToolAdapter()

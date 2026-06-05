@@ -6528,7 +6528,7 @@ async def _run_follow_up_analysis_core(
             event_callback=event_callback,
             logger=logger,
             llm_replan_callback=_llm_replan_callback,
-            llm_chat_fn=llm_service.chat if llm_service else None,
+            llm_service=llm_service,
         )
     else:
         react_exec_bundle = await _run_followup_auto_exec_react_loop(
