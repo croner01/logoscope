@@ -18,7 +18,9 @@ export interface LogData {
   pod_name?: string;
   namespace?: string;
   node_name?: string;
+  host_ip?: string;
   container_name?: string;
+  labels?: Record<string, string>;
   trace_id?: string;
   span_id?: string;
   attributes?: Record<string, unknown>;
