@@ -152,26 +152,25 @@ async def unified_diagnosis_bridge(
     memory = SessionMemory()
     emitter = EventEmitter()
 
-    # Wire event_callback to emitter
-    run_id = session_id
+    # Wire event_callback to emitter via background relay task
     if event_callback:
-        queue = emitter.subscribe(run_id)
+        queue = emitter.subscribe(session_id)
 
         async def _relay_events():
             while True:
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
-                    if event_callback:
-                        try:
-                            event_callback(event.get("type", ""), event.get("payload", {}))
-                        except Exception:
-                            pass
+                    event = await asyncio.wait_for(queue.get(), timeout=0.5)
+                    try:
+                        event_callback(event.get("type", ""), event.get("payload", {}))
+                    except Exception:
+                        pass
                 except asyncio.TimeoutError:
                     continue
                 except Exception:
                     break
 
-        # Background task would relay events — for simplicity, emit directly
+        # Start relay in background (non-blocking)
+        asyncio.create_task(_relay_events())
 
     # Build LLM plan function — calls LLMService.chat() with JSON response_format
     async def _llm_plan(system_prompt, task_prompt, tool_schema, st, mem, lc):
@@ -193,11 +192,13 @@ async def unified_diagnosis_bridge(
             # Try chat method (LLMService interface: message + context + response_format)
             chat_fn = getattr(svc, "chat", None)
             if callable(chat_fn):
-                raw = await chat_fn(
-                    message=combined_message,
-                    context=None,
-                    response_format={"type": "json_object"},
-                )
+                # response_format only for OpenAI-compatible providers (deepseek, openai, local)
+                provider = _as_str(getattr(getattr(svc, "config", None), "provider", "")).lower()
+                supports_json_format = provider in ("deepseek", "openai", "local")
+                kwargs: dict = {"message": combined_message, "context": None}
+                if supports_json_format:
+                    kwargs["response_format"] = {"type": "json_object"}
+                raw = await chat_fn(**kwargs)
             elif callable(svc):
                 raw = await svc(combined_message)
             else:
@@ -220,6 +221,40 @@ async def unified_diagnosis_bridge(
     # Build prompt builder
     prompt_builder = PromptBuilder()
 
+    # Wire legacy replan callback as engine's on_iteration hook
+    async def _on_iteration(iteration: int, st: RuntimeState, mem: SessionMemory) -> None:
+        if llm_replan_callback and callable(llm_replan_callback):
+            try:
+                # Build a minimal replan context from observations
+                replan_context = {
+                    "iteration": iteration,
+                    "observations": [
+                        {"action_id": o.action_id, "status": o.status, "exit_code": o.exit_code,
+                         "stdout": o.stdout[:500], "stderr": o.stderr[:200]}
+                        for o in st.observations[-5:]
+                    ],
+                    "evidence_slots": {
+                        k: s.status for k, s in st.evidence_slots.items()
+                    },
+                }
+                new_actions = await llm_replan_callback(replan_context)
+                if new_actions and isinstance(new_actions, list):
+                    for i, raw in enumerate(new_actions):
+                        if isinstance(raw, dict):
+                            try:
+                                spec = normalize_command_spec(raw, source_target=st.source_target)
+                                act = Action(
+                                    action_id=f"replan{iteration}-act{i}",
+                                    command_spec=spec,
+                                    purpose=spec.purpose or f"replan step {i+1}",
+                                    status="pending",
+                                )
+                                st.actions.append(act)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
     # Run the unified engine
     result = await run_diagnosis(
         state=state,
@@ -229,6 +264,7 @@ async def unified_diagnosis_bridge(
         event_emitter=emitter,
         llm_plan=_llm_plan,
         llm_call=llm_chat_fn,
+        on_iteration=_on_iteration,
     )
 
     # Convert to legacy format

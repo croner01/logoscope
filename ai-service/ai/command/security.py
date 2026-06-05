@@ -5,6 +5,7 @@ are allowed, how they are classified, and whether they need approval.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -62,12 +63,19 @@ class SecurityDecision:
     risk_level: RiskLevel = RiskLevel.LOW
 
 
+def _default_session_command_limit() -> int:
+    try:
+        return int(os.getenv("AI_RUNTIME_SESSION_COMMAND_LIMIT", "10"))
+    except (ValueError, TypeError):
+        return 10
+
+
 @dataclass
 class SessionCostState:
     commands_executed: int = 0
     estimated_rows_scanned: int = 0
     targets_touched: set = field(default_factory=set)
-    session_command_limit: int = 10
+    session_command_limit: int = field(default_factory=_default_session_command_limit)
 
 
 # ── Main entry point ──────────────────────────────────────────────────────

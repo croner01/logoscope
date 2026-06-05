@@ -43,8 +43,14 @@ to identify the root cause.
 
 ## Observations So Far
 {observations}
+{replan_hint}
 
 Plan the next diagnostic action. Output a tool call with command_spec."""
+
+    REPLAN_HINT = """## ⚠️ Replan Required
+Previous actions did not resolve all evidence gaps. Review the observations above
+and propose NEW diagnostic actions targeting the remaining unknowns.
+Do NOT repeat commands that have already been executed."""
 
     def build_system(self, state: RuntimeState, memory: SessionMemory) -> str:
         return self.SYSTEM_TEMPLATE.format(
@@ -60,10 +66,16 @@ Plan the next diagnostic action. Output a tool call with command_spec."""
                 f"  {status} [{obs.action_id}] exit={obs.exit_code} "
                 f"stdout={obs.stdout[:200]} stderr={obs.stderr[:100]}"
             )
+        observations_text = "\n".join(obs_lines) or "(none yet)"
+        # Add replan hint when there are prior observations but evidence is still insufficient
+        replan_hint = ""
+        if state.observations and state.iteration >= 2:
+            replan_hint = self.REPLAN_HINT
         return self.TASK_TEMPLATE.format(
             question=state.question,
             context=str(state.analysis_context)[:2000],
-            observations="\n".join(obs_lines) or "(none yet)",
+            observations=observations_text,
+            replan_hint=replan_hint,
         )
 
     def build_tool_schema(self) -> Dict[str, Any]:

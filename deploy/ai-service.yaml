@@ -36,6 +36,7 @@ data:
   EXEC_SERVICE_BASE_URL: "http://exec-service:8095"
   QUERY_SERVICE_BASE_URL: "http://query-service:8002"
   AI_RUNTIME_UNIFIED_ENGINE_ENABLED: "false"
+  AI_RUNTIME_SESSION_COMMAND_LIMIT: "10"
   LLM_PROVIDER: "deepseek"
   LLM_API_BASE: ""
   LOCAL_MODEL_API_BASE: ""
