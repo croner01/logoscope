@@ -32,14 +32,13 @@ class SessionMemory:
     def fingerprint(self, spec: CommandSpec) -> str:
         """Compute stable fingerprint from a CommandSpec.
 
-        Hash of (tool, command, target_kind, target_identity).
-        Same algorithm for store AND lookup — fixes audit C1.
+        Hash of (tool, normalized command text) only.
+        target_kind and target_identity are routing hints that may vary
+        between LLM iterations — they do not change the command's identity.
         """
         payload = {
             "tool": str(spec.tool.value),
             "command": " ".join(_as_str(spec.command).split()),
-            "target_kind": _as_str(spec.target_kind),
-            "target_identity": _as_str(spec.target_identity),
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
