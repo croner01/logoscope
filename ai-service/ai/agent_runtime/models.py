@@ -65,6 +65,23 @@ class AgentRun:
             "ended_at": self.ended_at,
         }
 
+    def get_execution_journal_entries(self) -> list:
+        """Return execution journal entries from summary_json."""
+        entries = self.summary_json.get("execution_journal") if isinstance(self.summary_json, dict) else None
+        return entries if isinstance(entries, list) else []
+
+    def get_cost_tracker(self) -> dict:
+        """Return cost tracker from summary_json."""
+        tracker = self.summary_json.get("cost_tracker") if isinstance(self.summary_json, dict) else None
+        if isinstance(tracker, dict):
+            return tracker
+        return {
+            "commands_executed": 0,
+            "estimated_rows_scanned": 0,
+            "targets_touched": {"pod": 0, "node": 0},
+            "session_command_limit": 10,
+        }
+
 
 @dataclass
 class RunEvent:

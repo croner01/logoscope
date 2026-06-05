@@ -73,6 +73,15 @@ export function buildRuntimeFollowUpContext(params: {
   followupRelatedLogs?: unknown[] | null;
   followupRelatedLogCount?: number | null;
   followupRelatedMeta?: Record<string, unknown> | null;
+  sourceTarget?: {
+    pod_name?: string | null;
+    namespace?: string | null;
+    node_name?: string | null;
+    host_ip?: string | null;
+    container_name?: string | null;
+    labels?: Record<string, string> | null;
+    service_name?: string | null;
+  } | null;
 }): Record<string, unknown> {
   const followupRelatedMeta = compactRecord(asRecord(params.followupRelatedMeta));
   const resultRecord = compactRecord(asRecord(params.result));
@@ -167,6 +176,21 @@ export function buildRuntimeFollowUpContext(params: {
     request_flow_window_start: requestFlowWindowStart || undefined,
     request_flow_window_end: requestFlowWindowEnd || undefined,
     request_id: canonicalRequestId || undefined,
+    source_target: params.sourceTarget && (
+      params.sourceTarget.pod_name
+      || params.sourceTarget.namespace
+      || params.sourceTarget.node_name
+    ) ? compactRecord({
+      pod_name: firstText(params.sourceTarget.pod_name),
+      namespace: firstText(params.sourceTarget.namespace),
+      node_name: firstText(params.sourceTarget.node_name),
+      host_ip: firstText(params.sourceTarget.host_ip),
+      container_name: firstText(params.sourceTarget.container_name),
+      labels: params.sourceTarget.labels && typeof params.sourceTarget.labels === 'object'
+        ? params.sourceTarget.labels
+        : undefined,
+      service_name: firstText(params.sourceTarget.service_name),
+    }) : undefined,
   };
 
   if (Array.isArray(params.followupRelatedLogs) && params.followupRelatedLogs.length > 0) {

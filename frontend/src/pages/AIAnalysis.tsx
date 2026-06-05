@@ -173,6 +173,10 @@ interface LocationState {
     pod_name?: string;
     namespace?: string;
     trace_id?: string;
+    node_name?: string;
+    host_ip?: string;
+    container_name?: string;
+    labels?: Record<string, string>;
     attributes?: Record<string, unknown>;
   };
   traceId?: string;
@@ -5352,6 +5356,15 @@ const AIAnalysis: React.FC = () => {
         followupRelatedLogs: options?.followupRelatedLogs,
         followupRelatedLogCount: options?.followupRelatedLogCount,
         followupRelatedMeta: options?.followupRelatedMeta,
+        sourceTarget: sourceLogData ? {
+          pod_name: sourceLogData.pod_name,
+          namespace: sourceLogData.namespace,
+          node_name: sourceLogData.node_name,
+          host_ip: sourceLogData.host_ip,
+          container_name: sourceLogData.container_name,
+          labels: sourceLogData.labels,
+          service_name: sourceLogData.service_name,
+        } : null,
       });
 
       const requestPayload = {

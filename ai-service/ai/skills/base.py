@@ -60,6 +60,9 @@ class SkillContext:
     evidence_window_start: str = ""
     evidence_window_end: str = ""
 
+    # ── Execution target from source log metadata ────────────────────────────
+    source_target: Dict[str, Any] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SkillContext":
         """Build from analysis_context dict."""
@@ -99,11 +102,30 @@ class SkillContext:
             data_flow=_as_list(safe.get("data_flow")),
             evidence_window_start=_as_str(safe.get("evidence_window_start", "")),
             evidence_window_end=_as_str(safe.get("evidence_window_end", "")),
+            source_target=(
+                safe.get("source_target")
+                if isinstance(safe.get("source_target"), dict)
+                else {}
+            ),
         )
 
     def combined_text(self) -> str:
         """All searchable text merged for pattern matching."""
         parts = [self.question, self.log_content, self.service_name, self.component_type]
+        return " ".join(p for p in parts if p)
+
+    def source_target_text(self) -> str:
+        """Render source_target as searchable text for pattern matching."""
+        st = self.source_target if isinstance(self.source_target, dict) else {}
+        parts = [
+            _as_str(st.get("pod_name")),
+            _as_str(st.get("namespace")),
+            _as_str(st.get("node_name")),
+            _as_str(st.get("service_name")),
+        ]
+        labels = st.get("labels")
+        if isinstance(labels, dict):
+            parts.extend(_as_str(v) for v in labels.values())
         return " ".join(p for p in parts if p)
 
 
