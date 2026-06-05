@@ -52,8 +52,8 @@ type NodeLifecycleState = 'entering' | 'active' | 'departing' | 'ghost';
 
 // 节点生命周期默认常量
 const NODE_ENTERING_DURATION_MS = 2000;   // entering → active
-const NODE_DEPARTING_DURATION_MS = 5000;   // departing → ghost
-const GHOST_CLEANUP_HOURS = 3;             // ghost 超时清理（小时）
+const NODE_DEPARTING_DURATION_MS = 900000;  // departing → ghost（15 分钟）
+const GHOST_CLEANUP_HOURS = 0.25;           // ghost 超时清理（小时）
 const GHOST_CLEANUP_MS = GHOST_CLEANUP_HOURS * 60 * 60 * 1000;
 type MessageTargetPattern = 'url' | 'kv' | 'proxy' | 'rpc';
 type InferenceMode = 'rule' | 'hybrid_score';
@@ -1768,7 +1768,7 @@ const TopologyPage: React.FC = () => {
               return updated;
             });
             delete nodeDepartTimersRef.current[id];
-            // ghost 超时清理（3h 后自动移除）
+            // ghost 超时清理（15m 后自动移除）
             nodeDepartTimersRef.current[`${id}_cleanup`] = window.setTimeout(() => {
               setGhostNodeIds((prevGhost) => {
                 const updated = new Set(prevGhost);
@@ -1781,6 +1781,14 @@ const TopologyPage: React.FC = () => {
           }, NODE_DEPARTING_DURATION_MS);
         }
       });
+
+      // 🔒 继承上一帧中仍在转态（departing/ghost）但不在当前 visibleNodes 中的节点
+      // 防止 WebSocket 连续刷新时生命周期状态被丢弃
+      for (const [id, state] of Object.entries(prev)) {
+        if (!next[id] && (state === 'departing' || state === 'ghost')) {
+          next[id] = state;
+        }
+      }
 
       // ⚡ 同步 ref，确保同一 render 中 layout effect 读到正确生命周期值
       nodeLifecycleRef.current = next;
@@ -2127,9 +2135,19 @@ const TopologyPage: React.FC = () => {
         existing.forEach((node: TopologyNodeEntity) => {
           next[node.id] = { ...prev[node.id] };
         });
-        // 新节点追加到网格末尾
+        // 新节点追加到网格末尾（从已有占位之后开始）
         const newcomers = visibleNodes.filter((node: TopologyNodeEntity) => !next[node.id]);
-        const startIndex = existing.length;
+        let maxSlotIndex = -1;
+        for (const [, p] of Object.entries(prev)) {
+          if (p.laneKey === 'grid') {
+            const col = Math.round((p.x - 120) / LAYOUT.gridGapX);
+            const row = Math.round((p.y - 110) / LAYOUT.gridGapY);
+            if (row >= 0 && col >= 0) {
+              maxSlotIndex = Math.max(maxSlotIndex, row * LAYOUT.gridCols + col);
+            }
+          }
+        }
+        const startIndex = maxSlotIndex + 1;
         newcomers.forEach((node: TopologyNodeEntity, offset: number) => {
           const index = startIndex + offset;
           const col = index % LAYOUT.gridCols;
@@ -2197,32 +2215,44 @@ const TopologyPage: React.FC = () => {
           resolveServiceName(a).localeCompare(resolveServiceName(b)),
         );
 
-        // 统一布局：已有节点在前保持相对顺序，新节点追加到末尾
-        const ordered = [...sortedExisting, ...sortedNew];
-        // 🔒 泳道高度需计入 departing/ghost 节点的虚拟行，否则下一个泳道上移
-        const lifecycleForLane = nodeLifecycleRef.current;
-        let lifecycleRowCount = 0;
-        for (const [nodeId, state] of Object.entries(lifecycleForLane)) {
-          if ((state === 'departing' || state === 'ghost') && !next[nodeId]) {
-            const existingPos = prev[nodeId];
-            if (existingPos && existingPos.laneKey === laneKey) {
-              lifecycleRowCount += 1;
+        // 🔒 节点锚定：已有节点保留精确位置，不因同 lane 节点增减而重排
+        sortedExisting.forEach((node: TopologyNodeEntity) => {
+          const p = prev[node.id];
+          if (p && p.laneKey === laneKey) {
+            next[node.id] = { ...p };
+          }
+        });
+
+        // 计算本 lane 中最大占位的 slot index（含生命周期节点，来自 prev）
+        let maxSlotIndex = -1;
+        for (const nid of Object.keys(prev)) {
+          const p = prev[nid];
+          if (p && p.laneKey === laneKey) {
+            const col = Math.round((p.x - LAYOUT.laneStartX) / LAYOUT.laneColGapX);
+            const row = Math.round((p.y - laneCursorY - LAYOUT.laneRowPaddingTop) / LAYOUT.laneRowGapY);
+            if (row >= 0 && col >= 0 && col < LAYOUT.laneColsPerRow) {
+              maxSlotIndex = Math.max(maxSlotIndex, row * LAYOUT.laneColsPerRow + col);
             }
           }
         }
-        const virtualLength = ordered.length + lifecycleRowCount;
-        const laneRows = Math.max(1, Math.ceil(virtualLength / LAYOUT.laneColsPerRow));
 
-        ordered.forEach((node: TopologyNodeEntity, index: number) => {
-          const col = index % LAYOUT.laneColsPerRow;
-          const row = Math.floor(index / LAYOUT.laneColsPerRow);
+        // 新节点放置于已有占位之后（可选地从下一行开始）
+        let slotCursor = maxSlotIndex + 1;
+        sortedNew.forEach((node: TopologyNodeEntity) => {
+          const col = slotCursor % LAYOUT.laneColsPerRow;
+          const row = Math.floor(slotCursor / LAYOUT.laneColsPerRow);
           next[node.id] = {
             x: LAYOUT.laneStartX + col * LAYOUT.laneColGapX,
             y: laneCursorY + LAYOUT.laneRowPaddingTop + row * LAYOUT.laneRowGapY,
             laneKey,
             laneLabel: lane.label,
           };
+          slotCursor++;
         });
+
+        // 泳道高度基于实际最大占位（已有节点 + 新节点），生命周期节点通过 prev 已计入
+        const totalSlots = Math.max(maxSlotIndex + 1, slotCursor);
+        const laneRows = Math.max(1, Math.ceil(totalSlots / LAYOUT.laneColsPerRow));
 
         laneCursorY +=
           laneRows * LAYOUT.laneRowGapY +
@@ -3342,6 +3372,10 @@ const TopologyPage: React.FC = () => {
       });
     });
 
+    // 精简模式（showGhostZone=true）隐藏离开的边，与节点视觉一致
+    if (showGhostZone) {
+      return rendered.filter((item) => item.lifecycleStage !== 'departing');
+    }
     return rendered;
   }, [
     activeFocusNodeId,
@@ -3358,6 +3392,7 @@ const TopologyPage: React.FC = () => {
     zoom,
     edgeLifecycle,
     isFrozen,
+    showGhostZone,
   ]);
 
   const interactiveEdgeData = useMemo(() => {
@@ -3919,10 +3954,10 @@ const TopologyPage: React.FC = () => {
                   ? 'border-violet-400 bg-violet-500/20 text-violet-100'
                   : 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
               }`}
-              title={showGhostZone ? '点击隐藏历史节点' : '点击显示历史节点'}
+              title={showGhostZone ? '精简模式：隐藏离线节点，仅显示活跃服务' : '完整模式：显示离线节点原位保留'}
             >
               <Ghost className="mr-1 inline h-3.5 w-3.5" />
-              孤岛 {showGhostZone ? 'ON' : 'OFF'}
+              精简 {showGhostZone ? 'ON' : 'OFF'}
             </button>
             <button onClick={toggleFullscreen} className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-200 hover:bg-slate-800">
               {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
@@ -3976,7 +4011,7 @@ const TopologyPage: React.FC = () => {
             backgroundSize: 'auto, auto, 24px 24px, 24px 24px',
           }}
         >
-          {visibleNodes.length > 0 ? (
+          {visibleNodes.length > 0 && Object.keys(nodePositions).length > 0 ? (
             <div
               className="relative"
               style={{
@@ -4154,7 +4189,8 @@ const TopologyPage: React.FC = () => {
 
                 const allRenderCards: Array<{ node: TopologyNodeEntity; lifecycleState: NodeLifecycleState }> = [
                   ...visibleNodes.map((n) => ({ node: n, lifecycleState: (nodeLifecycle[n.id] || 'active') as NodeLifecycleState })),
-                  ...departingRenderNodes,
+                  // 精简模式（showGhostZone=true）隐藏离线卡片，仅显示活跃服务
+                  ...(showGhostZone ? [] : departingRenderNodes),
                 ];
 
                 return allRenderCards.map(({ node, lifecycleState }) => {
@@ -4180,9 +4216,9 @@ const TopologyPage: React.FC = () => {
                     extraRing = 'ring-2 ring-cyan-400/70';
                     lifecycleTag = 'NEW';
                   } else if (lifecycleState === 'departing') {
-                    nodeOpacity = 0.35;
+                    nodeOpacity = 0.6;
                     extraRing = 'ring-1 ring-rose-400/50';
-                    lifecycleTag = '消失中';
+                    lifecycleTag = '已离线';
                   } else if (lifecycleState === 'ghost') {
                     nodeOpacity = 0.15;
                     extraRing = 'ring-1 ring-slate-500/30';
@@ -4219,7 +4255,7 @@ const TopologyPage: React.FC = () => {
                         pointerEvents: lifecycleState === 'departing' || lifecycleState === 'ghost' ? 'none' as const : undefined,
                         filter: lifecycleState === 'ghost' ? 'grayscale(0.8)' : undefined,
                         transition: lifecycleState === 'departing'
-                          ? 'all 5000ms ease-out'
+                          ? 'opacity 2000ms ease-out, background 2000ms ease-out'
                           : lifecycleState === 'entering'
                             ? 'all 2000ms ease-out'
                             : 'left 400ms ease-out, top 400ms ease-out',
@@ -4253,7 +4289,8 @@ const TopologyPage: React.FC = () => {
 
               {/* ── P1: 孤岛节点区 ── */}
               {(() => {
-                if (!showGhostZone) return null;
+                // 精简模式（ON）隐藏孤岛区；完整模式（OFF）显示
+                if (showGhostZone) return null;
                 // 收集 ghost 节点数据
                 const ghostEntries: Array<{ node: TopologyNodeEntity }> = [];
                 for (const [id, state] of Object.entries(nodeLifecycle)) {
@@ -4292,7 +4329,7 @@ const TopologyPage: React.FC = () => {
                       className="h-full rounded-2xl border border-dashed border-slate-600/30 bg-slate-900/40 p-3"
                     >
                       <div className="mb-2 text-[10px] font-semibold text-slate-500">
-                        历史节点（孤岛） {ghostEntries.length} 个 · 无活跃边的服务，3h 后自动清理
+                        历史节点（孤岛） {ghostEntries.length} 个 · 无活跃边的服务，15m 后自动清理
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {ghostEntries.slice(0, 30).map((entry) => {
@@ -4319,6 +4356,11 @@ const TopologyPage: React.FC = () => {
                   </div>
                 );
               })()}
+            </div>
+          ) : visibleNodes.length > 0 ? (
+            <div className="flex h-full flex-col items-center justify-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-600 border-t-cyan-400" />
+              <p className="mt-2 text-xs text-slate-500">布局计算中...</p>
             </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center">

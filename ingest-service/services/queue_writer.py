@@ -444,6 +444,9 @@ def transform_single_otlp_log(resource_dict: dict, log_record: dict, metadata: D
     except (TypeError, ValueError):
         normalized_flags = 0
 
+    # 提取 source_cluster（由 fluent-bit-relay 的 modify filter 注入 OTLP attributes）
+    source_cluster = str(log_attrs_dict.get("relay_name", "") or resource_dict.get("relay_name", "") or "").strip()
+
     trace_id_source = "otlp" if trace_id else "missing"
     log_attrs_dict.setdefault("trace_id_source", trace_id_source)
     if trace_id:
@@ -458,6 +461,7 @@ def transform_single_otlp_log(resource_dict: dict, log_record: dict, metadata: D
         "timestamp": log_record.get("timeUnixNano", ""),
         "severity": log_record.get("severityText", ""),
         "service.name": service_name,
+        "source_cluster": source_cluster,
         "trace_id": trace_id,
         "span_id": span_id,
         "flags": normalized_flags,
@@ -509,6 +513,14 @@ def transform_fluent_bit_json(payload_dict: dict, metadata: Dict[str, Any]) -> D
     container_image = None
     k8s_labels = {}
 
+    # 提取 source_cluster（由 fluent-bit-relay 的 modify filter 注入）
+    source_cluster = ""
+    relay_name_val = payload_dict.get("relay_name", "")
+    if not relay_name_val:
+        relay_name_val = payload_dict.get("attributes", {}).get("relay_name", "")
+    if relay_name_val and isinstance(relay_name_val, str):
+        source_cluster = relay_name_val.strip()
+
     # 从 attributes 提取
     attrs = payload_dict.get("attributes", {})
     for key, value in attrs.items():
@@ -538,6 +550,7 @@ def transform_fluent_bit_json(payload_dict: dict, metadata: Dict[str, Any]) -> D
         "timestamp": timestamp,
         "severity": severity,
         "service.name": service_name,
+        "source_cluster": source_cluster,
         "attributes": payload_dict,
         "resource": {},
         "kubernetes": {
@@ -571,6 +584,7 @@ def _build_log_queue_messages(
             "timestamp": "",
             "severity": "",
             "service.name": "",
+            "source_cluster": "",
             "attributes": {"raw_payload": payload},
             "resource": {},
             "kubernetes": {
@@ -610,6 +624,7 @@ def _build_log_queue_messages(
             "timestamp": "",
             "severity": "",
             "service.name": "",
+            "source_cluster": "",
             "attributes": {"raw_payload": payload},
             "resource": {},
             "kubernetes": {

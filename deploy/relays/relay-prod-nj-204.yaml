@@ -1,0 +1,253 @@
+# ==============================================================================
+# Fluent Bit Relay 模板 — 每个远端集群部署一个实例
+#
+# 使用方式:
+#   export CLUSTER_NAME=prod-beijing
+#   export MULTILINE_PARSERS="multiline_openstack_traceback,multiline_openstack_ts_boundary"
+#   sed -e "s/\prod-nj-204/prod-nj-204/g" \
+#       -e "s/\multiline_openstack_traceback,multiline_openstack_ts_boundary/multiline_openstack_traceback,multiline_openstack_ts_boundary/g" \
+#       -e "s/\fluent/fluent-bit:3.1.3/localhost:5000\/logoscope\/fluent-bit:3.1.3/g" \
+#       deploy/templates/fluent-bit-relay-template.yaml > deploy/relays/relay-prod-nj-204.yaml
+#
+# 或使用 scripts/deploy-relay.sh 自动化脚本
+#
+# 必填变量:
+#   prod-nj-204        — 集群唯一标识（DNS-1123 规范, 如 prod-beijing）
+#   multiline_openstack_traceback,multiline_openstack_ts_boundary   — multiline parser 列表（逗号分隔, 如 "multiline_trace_stack,multiline_java_stack"）
+#
+# 选填变量（有默认值）:
+#   fluent/fluent-bit:3.1.3    — Fluent Bit 镜像地址
+#   islap     — 部署命名空间（默认: islap）
+#   otel-collector.islap.svc.cluster.local   — OTel Collector 地址
+#   100m       — CPU 请求
+#   256Mi       — 内存请求
+#   1000m     — CPU 上限
+#   1Gi     — 内存上限
+#   1      — 副本数（默认: 1）
+# ==============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-relay-prod-nj-204-config
+  namespace: islap
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush                     1
+        Daemon                    off
+        Log_Level                 info
+        Parsers_File              parsers.conf
+        HTTP_Server               On
+        HTTP_Listen               0.0.0.0
+        HTTP_Port                 2020
+        storage.path              /buffers/
+        storage.sync              normal
+        storage.backlog.mem_limit 256MB
+
+    # ── 输入：接收远端 Fluent Bit Forward 协议 ──────────────────────
+    [INPUT]
+        Name                      forward
+        Listen                    0.0.0.0
+        Port                      24224
+        storage.type              filesystem
+
+    # ── 多行堆栈合并 ────────────────────────────────────────────────
+    [FILTER]
+        Name                      multiline
+        Match                     *
+        multiline.parser          multiline_openstack_traceback,multiline_openstack_ts_boundary
+        multiline.key_content     log
+        buffer                    on
+        flush_ms                  4000
+
+    # ── 添加来源标识 ────────────────────────────────────────────────
+    [FILTER]
+        Name                      modify
+        Match                     *
+        Add                       relay_name prod-nj-204
+        Add                       relay_type remote
+        Add                       relay_namespace islap
+
+    # ── 将 kubernetes 嵌套字段提升为顶层 k8s_ 字段（Ingest Service 通过 k8s_ 前缀提取） ──
+    [FILTER]
+        Name                      nest
+        Match                     *
+        Operation                 lift
+        Nested_under              kubernetes
+        Add_prefix                k8s_
+
+    # ── 转发到 OTel Collector ───────────────────────────────────────
+    [OUTPUT]
+        Name                      opentelemetry
+        Match                     *
+        Host                      otel-collector.islap.svc.cluster.local
+        Port                      4318
+        Logs_uri                  /v1/logs
+        tls                       off
+        Logs_body_key_attributes  true
+        Retry_Limit               False
+
+  parsers.conf: |
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Strict Off
+        Time_Keep   On
+
+    # ── multiline_trace_stack: 通用堆栈（Python Traceback / Java / Go panic） ──
+    [MULTILINE_PARSER]
+        name          multiline_trace_stack
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?\s+.*(?:ERROR|FATAL|Exception|Traceback)|Traceback \(most recent call last\):|Exception in thread \".*\"|panic: .*)$/" "cont"
+        rule          "cont"        "/^(\s+at\s+.*|\s*Caused by:.*|\s*Suppressed:.*|\s*\.\.\. \d+ more|\s+File \".*\", line \d+, in .*|During handling of the above exception, another exception occurred:|[A-Za-z_][A-Za-z0-9_\.]*?(Error|Exception):.*|\s+.*)$/" "cont"
+
+    # ── multiline_java_stack: Java 异常堆栈 ────────────────────────────
+    [MULTILINE_PARSER]
+        name          multiline_java_stack
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2500
+        rule          "start_state" "/^((?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?\s+.*(?:ERROR|FATAL).*)|(?:Exception in thread \".*\".*)|(?:[A-Za-z_][A-Za-z0-9_\.]*(?:Exception|Error):.*)|(?:Traceback \(most recent call last\):)|(?:panic: .*))$/" "cont"
+        rule          "cont"        "/^((?:\s+at\s+.*)|(?:\s*Caused by:.*)|(?:\s*Suppressed:.*)|(?:\s*\.\.\. \d+ more)|(?:\s*File \".*\", line \d+, in .*)|(?:During handling of the above exception, another exception occurred:)|(?:[A-Za-z_][A-Za-z0-9_\.]*(?:Exception|Error):.*)|(?:\s*))$/" "cont"
+
+    # ── multiline_openstack_traceback: OpenStack 专有 traceback ────────
+    [MULTILINE_PARSER]
+        name          multiline_openstack_traceback
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 4000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? (?!Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s{2,}|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):|urllib3\.exceptions\.[A-Za-z_]+:|requests\.exceptions\.[A-Za-z_]+:|socket\.gaierror:|$).*)$/" "cont"
+        rule          "cont"        "/^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? )?(?:Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*|)$/" "cont"
+
+    # ── multiline_openstack_ts_boundary: OpenStack 时间戳边界切分 ────
+    [MULTILINE_PARSER]
+        name          multiline_openstack_ts_boundary
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 4000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRITICAL|FATAL)\s+.*)$/" "cont"
+        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRITICAL|FATAL)\s+).*$/" "cont"
+
+    # ── multiline_otel_stack: OTel Collector Go 堆栈 ──────────────────
+    [MULTILINE_PARSER]
+        name          multiline_otel_stack
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 2000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+error\s+.*)$/" "cont"
+        rule          "cont"        "/^(go\.[A-Za-z0-9_\/\.\-\(\)\*\[\]]+.*|\s+.*)$/" "cont"
+
+    # ── multiline_query_sql: 多行 SQL 查询 ─────────────────────────────
+    [MULTILINE_PARSER]
+        name          multiline_query_sql
+        type          regex
+        parser        docker
+        key_content   log
+        flush_timeout 1500
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s+-\s+[^-]+\s+-\s+(?:INFO|DEBUG)\s+-\s+Executing query:\s*)$/" "cont"
+        rule          "cont"        "/^(\s+.*)$/" "cont"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-relay-prod-nj-204
+  namespace: islap
+  labels:
+    app: fluent-bit-relay
+    relay: prod-nj-204
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluent-bit-relay
+      relay: prod-nj-204
+  template:
+    metadata:
+      labels:
+        app: fluent-bit-relay
+        relay: prod-nj-204
+    spec:
+      containers:
+      - name: fluent-bit
+        image: fluent/fluent-bit:3.1.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: forward
+          containerPort: 24224
+          protocol: TCP
+        - name: http
+          containerPort: 2020
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /fluent-bit/etc/fluent-bit.conf
+          subPath: fluent-bit.conf
+        - name: config
+          mountPath: /fluent-bit/etc/parsers.conf
+          subPath: parsers.conf
+        - name: buffers
+          mountPath: /buffers
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: fluent-bit-relay-prod-nj-204-config
+      - name: buffers
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit-relay-prod-nj-204
+  namespace: islap
+  labels:
+    app: fluent-bit-relay
+    relay: prod-nj-204
+spec:
+  type: ClusterIP
+  selector:
+    app: fluent-bit-relay
+    relay: prod-nj-204
+  ports:
+  - name: forward
+    port: 24224
+    targetPort: 24224
+    protocol: TCP
+  - name: http
+    port: 2020
+    targetPort: 2020
+    protocol: TCP

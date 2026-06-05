@@ -869,6 +869,9 @@ class LogWorker:
         raw_attributes["log_meta"] = log_meta
         normalized["_raw_attributes"] = raw_attributes
 
+        # ⭐ 传递 source_cluster（由 fluent-bit-relay 注入，经 Ingest Service 透传）
+        normalized["source_cluster"] = _candidate_text(log_data.get("source_cluster", ""))
+
         logger.debug("Normalized data preview=%s", json.dumps(normalized, indent=2)[:1000])
         return normalized
 

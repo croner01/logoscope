@@ -10,7 +10,8 @@ import logging
 import json
 import asyncio
 import os
-from typing import Set, Dict, Any, Optional
+import time
+from typing import Set, Dict, Any, Optional, Tuple
 from fastapi import WebSocket, WebSocketDisconnect
 from datetime import datetime, timezone
 import hashlib
@@ -20,6 +21,14 @@ from api.topology_build_coordinator import build_hybrid_topology_coalesced
 logger = logging.getLogger(__name__)
 WS_BROADCAST_BATCH_SIZE = max(1, int(os.getenv("WS_BROADCAST_BATCH_SIZE", "32")))
 WS_SEND_TIMEOUT_SECONDS = max(0.1, float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "1.0")))
+
+# ── 拓扑推送稳定性控制 ──
+# 同一订阅两次推送之间的最小间隔（秒），减少推送频率避免前端频繁重绘
+TOPOLOGY_WS_MIN_PUSH_INTERVAL = max(5.0, float(os.getenv("TOPOLOGY_WS_MIN_PUSH_INTERVAL_SECONDS", "15.0")))
+# 新节点必须连续出现 N 次后才纳入推送，防止瞬时噪音导致拓扑抖动
+TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT = max(1, int(os.getenv("TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT", "2")))
+# 节点变化数（新增+移除）至少达到此值才触发推送，避免 metrics 波动导致的无效推送
+TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH = max(1, int(os.getenv("TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH", "1")))
 
 
 def _utc_now_iso() -> str:
@@ -35,6 +44,12 @@ class TopologyConnectionManager:
         self._subscriptions: Dict[WebSocket, Dict[str, Any]] = {}
         self._last_topology_hash_by_key: Dict[str, str] = {}
         self._last_topology_data_by_key: Dict[str, Dict[str, Any]] = {}
+        # 推送节流：记录每个订阅的上次推送时间戳（monotonic seconds）
+        self._last_push_time_by_key: Dict[str, float] = {}
+        # 新节点缓冲：{subscription_key: {node_id: consecutive_appearance_count}}
+        self._new_node_candidates_by_key: Dict[str, Dict[str, int]] = {}
+        # 上次已推送的拓扑（仅在实际推送时更新，作为变化检测的基线）
+        self._last_pushed_topology_by_key: Dict[str, Dict[str, Any]] = {}
 
     def _normalize_subscription(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = params or {}
@@ -120,6 +135,9 @@ class TopologyConnectionManager:
         for key in stale_keys:
             self._last_topology_hash_by_key.pop(key, None)
             self._last_topology_data_by_key.pop(key, None)
+            self._last_push_time_by_key.pop(key, None)
+            self._last_pushed_topology_by_key.pop(key, None)
+            self._new_node_candidates_by_key.pop(key, None)
 
     async def connect(self, websocket: WebSocket):
         """接受新的 WebSocket 连接"""
@@ -185,7 +203,13 @@ class TopologyConnectionManager:
         if websocket in self._subscriptions:
             current = self._subscriptions.get(websocket) or self._normalize_subscription()
             merged = {**current, **(params or {})}
-            self._subscriptions[websocket] = self._normalize_subscription(merged)
+            new_sub = self._normalize_subscription(merged)
+            # 参数变更时重置推送节流，使新订阅的首次推送立即生效
+            old_key = self._subscription_key(current)
+            new_key = self._subscription_key(new_sub)
+            if old_key != new_key:
+                self.reset_push_state(new_key)
+            self._subscriptions[websocket] = new_sub
             self._cleanup_stale_topology_cache_keys()
 
     def get_subscription(self, websocket: WebSocket) -> Dict[str, Any]:
@@ -215,25 +239,129 @@ class TopologyConnectionManager:
     def get_subscription_key(self, websocket: WebSocket) -> str:
         return self._subscription_key(self.get_subscription(websocket))
 
-    def has_topology_changed(self, subscription_key: str, topology_data: Dict[str, Any]) -> bool:
-        """检查指定订阅下的拓扑是否发生变化"""
+    def _extract_node_ids(self, topology_data: Dict[str, Any]) -> Set[str]:
+        """从拓扑数据中提取节点 ID 集合"""
+        ids: Set[str] = set()
+        for node in (topology_data.get("nodes") or []):
+            node_id = node.get("id") or node.get("node_key", "")
+            if node_id:
+                ids.add(node_id)
+        return ids
+
+    def should_push_topology(
+        self,
+        subscription_key: str,
+        topology_data: Dict[str, Any],
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        判断是否应该推送拓扑更新，执行以下稳定性控制：
+
+        1. 最小推送间隔检查 — 同一订阅两次推送间隔不低于 TOPOLOGY_WS_MIN_PUSH_INTERVAL
+        2. 新节点缓冲确认 — 新出现的节点必须连续出现 TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT 次后才纳入
+        3. 变化显著性检查 — 节点变化数（新增+移除）达到 TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH 才推送
+
+        Returns:
+            (should_push, filtered_topology_or_none)
+        """
         if not topology_data:
-            return False
+            return False, None
 
-        topology_str = json.dumps(topology_data, sort_keys=True, default=str)
-        current_hash = hashlib.md5(topology_str.encode()).hexdigest()
-        previous_hash = self._last_topology_hash_by_key.get(subscription_key)
-        if current_hash != previous_hash:
-            self._last_topology_hash_by_key[subscription_key] = current_hash
-            self._last_topology_data_by_key[subscription_key] = topology_data
-            return True
+        now = time.monotonic()
+        # 对比基线是上次推送的拓扑（而非上次缓存的），确保缓冲节点在连续出现后能被正确确认
+        prev_topology = self._last_pushed_topology_by_key.get(subscription_key)
 
-        return False
+        # 首次拓扑：无条件推送
+        if not prev_topology:
+            self._update_push_state(subscription_key, topology_data, now)
+            return True, topology_data
 
-    def cache_topology(self, subscription_key: str, topology_data: Dict[str, Any]) -> None:
+        # ── 1. 最小推送间隔 ──
+        last_push = self._last_push_time_by_key.get(subscription_key, 0.0)
+        elapsed = now - last_push
+        if elapsed < TOPOLOGY_WS_MIN_PUSH_INTERVAL:
+            # 缓存最新数据但不推送，下次推送时会用最新的
+            self._cache_latest_topology(subscription_key, topology_data)
+            return False, None
+
+        # ── 2. 计算节点变化 ──
+        current_node_ids = self._extract_node_ids(topology_data)
+        prev_node_ids = self._extract_node_ids(prev_topology)
+
+        raw_new_node_ids = current_node_ids - prev_node_ids
+        removed_node_ids = prev_node_ids - current_node_ids
+
+        # ── 3. 新节点缓冲 ──
+        buffer = self._new_node_candidates_by_key.setdefault(subscription_key, {})
+        confirmed_new_node_ids: Set[str] = set()
+
+        for node_id in raw_new_node_ids:
+            count = buffer.get(node_id, 0) + 1
+            buffer[node_id] = count
+            if count >= TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT:
+                confirmed_new_node_ids.add(node_id)
+
+        # 清理不再出现的缓冲节点
+        stale_ids = [nid for nid in buffer if nid not in raw_new_node_ids and nid not in current_node_ids]
+        for nid in stale_ids:
+            del buffer[nid]
+
+        total_node_change = len(confirmed_new_node_ids) + len(removed_node_ids)
+
+        # ── 4. 变化显著性检查 ──
+        if total_node_change < TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH:
+            self._cache_latest_topology(subscription_key, topology_data)
+            return False, None
+
+        # ── 5. 构建过滤后的拓扑（移除未确认的新节点） ──
+        if raw_new_node_ids != confirmed_new_node_ids:
+            unconfirmed_ids = raw_new_node_ids - confirmed_new_node_ids
+            filtered_nodes = [
+                node for node in (topology_data.get("nodes") or [])
+                if (node.get("id") or node.get("node_key", "")) not in unconfirmed_ids
+            ]
+            # 过滤涉及未确认节点的边
+            filtered_edges = [
+                edge for edge in (topology_data.get("edges") or [])
+                if (edge.get("source") or edge.get("source_node_key", "")) not in unconfirmed_ids
+                and (edge.get("target") or edge.get("target_node_key", "")) not in unconfirmed_ids
+            ]
+            filtered_topology = {**topology_data, "nodes": filtered_nodes, "edges": filtered_edges}
+            logger.info(
+                "Topology push for %s: buffering %d new node(s), pushing %d confirmed, %d removed",
+                subscription_key, len(unconfirmed_ids), len(confirmed_new_node_ids), len(removed_node_ids),
+            )
+        else:
+            filtered_topology = topology_data
+
+        self._update_push_state(subscription_key, filtered_topology, now)
+        return True, filtered_topology
+
+    def _cache_latest_topology(self, subscription_key: str, topology_data: Dict[str, Any]) -> None:
+        """缓存最新拓扑数据但不标记为已推送（保留推送时间不变）"""
         topology_str = json.dumps(topology_data, sort_keys=True, default=str)
         self._last_topology_hash_by_key[subscription_key] = hashlib.md5(topology_str.encode()).hexdigest()
         self._last_topology_data_by_key[subscription_key] = topology_data
+
+    def _update_push_state(self, subscription_key: str, topology_data: Dict[str, Any], push_time: float) -> None:
+        """更新推送状态：缓存拓扑 + 记录推送时间 + 更新推送基线"""
+        topology_str = json.dumps(topology_data, sort_keys=True, default=str)
+        self._last_topology_hash_by_key[subscription_key] = hashlib.md5(topology_str.encode()).hexdigest()
+        self._last_topology_data_by_key[subscription_key] = topology_data
+        self._last_pushed_topology_by_key[subscription_key] = topology_data
+        self._last_push_time_by_key[subscription_key] = push_time
+
+    def reset_push_state(self, subscription_key: str) -> None:
+        """重置订阅的推送状态（订阅参数变更时调用，使首次推送立即生效）"""
+        self._last_push_time_by_key.pop(subscription_key, None)
+        self._last_pushed_topology_by_key.pop(subscription_key, None)
+        self._new_node_candidates_by_key.pop(subscription_key, None)
+
+    def cache_topology(self, subscription_key: str, topology_data: Dict[str, Any]) -> None:
+        """缓存拓扑数据（subscribe/get 等即时推送后调用，同步更新推送基线防止 poller 重复推送）"""
+        topology_str = json.dumps(topology_data, sort_keys=True, default=str)
+        self._last_topology_hash_by_key[subscription_key] = hashlib.md5(topology_str.encode()).hexdigest()
+        self._last_topology_data_by_key[subscription_key] = topology_data
+        self._last_pushed_topology_by_key[subscription_key] = topology_data
 
     def get_last_topology(self, subscription_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """获取最后一次拓扑数据（可按订阅键）"""
@@ -249,13 +377,19 @@ topology_manager = TopologyConnectionManager()
 
 async def topology_poller(hybrid_builder, interval: float = 5.0):
     """
-    定时轮询拓扑变化并推送
+    定时轮询拓扑变化并推送（带稳定性控制）
+
+    稳定性策略：
+    - 最小推送间隔：避免高频推送
+    - 新节点缓冲：瞬态节点不立即推送
+    - 变化显著性：仅节点数变化超过阈值才推送
 
     Args:
         hybrid_builder: 混合拓扑构建器
         interval: 轮询间隔（秒）
     """
-    logger.info("Topology poller started")
+    logger.info("Topology poller started (stability: min_push=%.0fs, new_node_buffer=%d, min_change=%d)",
+                TOPOLOGY_WS_MIN_PUSH_INTERVAL, TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT, TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH)
 
     while True:
         try:
@@ -278,17 +412,21 @@ async def topology_poller(hybrid_builder, interval: float = 5.0):
                         message_target_min_support=params.get("message_target_min_support"),
                         message_target_max_per_log=params.get("message_target_max_per_log"),
                     )
-                    if not topology_manager.has_topology_changed(subscription_key, topology):
+
+                    should_push, filtered_topology = topology_manager.should_push_topology(
+                        subscription_key, topology,
+                    )
+                    if not should_push or filtered_topology is None:
                         continue
 
                     message = {
                         "type": "topology_update",
-                        "data": topology,
+                        "data": filtered_topology,
                         "subscription": params,
                         "timestamp": _utc_now_iso(),
                     }
                     await topology_manager.broadcast_to(connections, message)
-                    logger.debug("Topology change detected and sent for subscription %s", subscription_key)
+                    logger.debug("Topology change sent for subscription %s", subscription_key)
 
             await asyncio.sleep(interval)
 

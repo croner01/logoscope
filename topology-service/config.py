@@ -60,6 +60,22 @@ class Config(BaseServiceConfig):
             2,
             min_value=1,
         )
+        # ── 拓扑推送稳定性控制 ──
+        self.TOPOLOGY_WS_MIN_PUSH_INTERVAL_SECONDS = self.parse_int_env(
+            "TOPOLOGY_WS_MIN_PUSH_INTERVAL_SECONDS",
+            15,
+            min_value=5,
+        )
+        self.TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT = self.parse_int_env(
+            "TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT",
+            2,
+            min_value=1,
+        )
+        self.TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH = self.parse_int_env(
+            "TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH",
+            1,
+            min_value=1,
+        )
         process_python = os.getenv("TOPOLOGY_BUILD_PROCESS_PYTHON", "")
         process_python = process_python.strip()
         self.TOPOLOGY_BUILD_PROCESS_PYTHON = process_python or None

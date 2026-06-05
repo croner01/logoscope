@@ -1037,12 +1037,16 @@ class StorageAdapter:
             if not host_ip and host in node_ip_map:
                 host_ip = node_ip_map[host]
 
+            # ⭐ 提取 source_cluster（由 fluent-bit-relay 注入）
+            source_cluster = str(event.get('source_cluster', '') or '').strip() or ''
+
             # 构建 INSERT 查询（使用 SQL 格式）
             query = f"""
                 INSERT INTO logs.logs (
                     id, timestamp, service_name, pod_name, namespace,
                     node_name, level, message, trace_id, span_id, labels, host_ip,
-                    cpu_limit, cpu_request, memory_limit, memory_request
+                    cpu_limit, cpu_request, memory_limit, memory_request,
+                    source_cluster
                 ) SETTINGS async_insert = 1, wait_for_async_insert = 0 FORMAT JSONEachRow
             """
 
@@ -1067,7 +1071,8 @@ class StorageAdapter:
                 'cpu_limit': resources.get('cpu_limit', ''),
                 'cpu_request': resources.get('cpu_request', ''),
                 'memory_limit': resources.get('memory_limit', ''),
-                'memory_request': resources.get('memory_request', '')
+                'memory_request': resources.get('memory_request', ''),
+                'source_cluster': source_cluster
             }
 
             # 执行 HTTP 请求
@@ -1173,6 +1178,9 @@ class StorageAdapter:
             memory_limit = resources.get('memory_limit', '')
             memory_request = resources.get('memory_request', '')
 
+            # ⭐ 提取 source_cluster（由 fluent-bit-relay 注入）
+            source_cluster = str(event.get('source_cluster', '') or '').strip() or ''
+
             # 准备数据（按照新表结构顺序）
             # ⭐ 调试：打印准备插入的 labels 值
             labels_to_insert = json.dumps(k8s_context.get('labels', {}) or {}, ensure_ascii=False)
@@ -1202,13 +1210,14 @@ class StorageAdapter:
                 cpu_limit,                                          # ⭐ P1: cpu_limit
                 cpu_request,                                        # ⭐ P1: cpu_request
                 memory_limit,                                       # ⭐ P1: memory_limit
-                memory_request                                      # ⭐ P1: memory_request
+                memory_request,                                     # ⭐ P1: memory_request
+                source_cluster                                      # ⭐ source_cluster
             ]]
 
             # 执行 INSERT（更新列名以匹配新表结构）
             try:
                 self.ch_client.execute(
-                    'INSERT INTO logs.logs (id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name, pod_id, container_name, container_id, container_image, level, severity_number, message, trace_id, span_id, flags, labels, attributes_json, host_ip, cpu_limit, cpu_request, memory_limit, memory_request) VALUES',
+                    'INSERT INTO logs.logs (id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name, pod_id, container_name, container_id, container_image, level, severity_number, message, trace_id, span_id, flags, labels, attributes_json, host_ip, cpu_limit, cpu_request, memory_limit, memory_request, source_cluster) VALUES',
                     data,
                     settings=_CH_ASYNC_INSERT_SETTINGS,
                 )

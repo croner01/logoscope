@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS logs.logs (
     container_name String,
     container_id String,
     container_image String,
+    source_cluster String,
     level String,
     level_norm LowCardinality(String) MATERIALIZED multiIf(
         length(trim(BOTH ' ' FROM ifNull(level, ''))) = 0, 'OTHER',

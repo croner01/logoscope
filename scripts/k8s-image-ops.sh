@@ -12,7 +12,7 @@ REGISTRY_PREFIX="${REGISTRY_PREFIX:-localhost:5000/logoscope}"
 DEFAULT_TAG="${DEFAULT_TAG:-latest}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SERVICES=(semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend ssh-gateway)
+SERVICES=(semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend ssh-gateway fluent-bit)
 
 usage() {
   cat <<'EOF'
@@ -28,12 +28,14 @@ Usage:
   scripts/k8s-image-ops.sh rollout-status <service|all>
 
 Service list:
-  semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend ssh-gateway
+  semantic-engine ai-service exec-service toolbox-gateway ingest-service query-service topology-service frontend ssh-gateway fluent-bit
 
 Notes:
   1) semantic-engine image update also updates semantic-engine-worker deployment.
-  2) Tag defaults to "latest" if omitted.
-  3) release 动作: build -> push -> set-image -> rollout-status -> gate（trace smoke + ai contract + query contract + sql safety + backend pytest + p0p1 regression + perf baseline，失败阻断）
+  2) "fluent-bit" manages the base Fluent Bit image used by relay deployments and local DaemonSet.
+     Use scripts/deploy-relay.sh for per-cluster relay YAML generation and deployment.
+  3) Tag defaults to "latest" if omitted.
+  4) release 动作: build -> push -> set-image -> rollout-status -> gate（trace smoke + ai contract + query contract + sql safety + backend pytest + p0p1 regression + perf baseline，失败阻断）
 EOF
 }
 
@@ -86,6 +88,13 @@ build_one() {
   echo "[INFO] docker build ${image} (${service}/)"
 
   case "$service" in
+    fluent-bit)
+      # Fluent Bit uses a pre-built upstream image; pull and retag for our registry.
+      UPSTREAM_IMAGE="${FLUENT_BIT_UPSTREAM_IMAGE:-crpi-69dqzledzukvkhrd.cn-beijing.personal.cr.aliyuncs.com/logoscope/fluent-bit:3.1.3}"
+      echo "[INFO] fluent-bit: pulling upstream image ${UPSTREAM_IMAGE}"
+      docker pull "$UPSTREAM_IMAGE"
+      docker tag "$UPSTREAM_IMAGE" "$image"
+      ;;
     ssh-gateway)
       # ssh-gateway has a self-contained Dockerfile that expects build context within the service dir
       cd "$PROJECT_ROOT/${service}" && docker build -t "$image" -f Dockerfile .
@@ -141,6 +150,14 @@ set_image_one() {
     frontend)
       kubectl -n "$NAMESPACE" set image deployment/frontend frontend="$image"
       ;;
+    fluent-bit)
+      # Update ALL fluent-bit-relay-* deployments and the main fluent-bit DaemonSet
+      echo "[INFO] fluent-bit: updating all relay deployments..."
+      for deploy in $(kubectl -n "$NAMESPACE" get deployment -l app=fluent-bit-relay -o name 2>/dev/null); do
+        kubectl -n "$NAMESPACE" set image "${deploy}" fluent-bit="$image"
+      done
+      kubectl -n "$NAMESPACE" set image daemonset/fluent-bit fluent-bit="$image" 2>/dev/null || true
+      ;;
     *)
       echo "[ERROR] unsupported service for set-image: $service" >&2
       exit 1
@@ -180,6 +197,18 @@ apply_one() {
     frontend)
       kubectl apply -f "${PROJECT_ROOT}/deploy/frontend.yaml"
       ;;
+    fluent-bit)
+      # Apply main fluent-bit DaemonSet + all generated relay configs
+      echo "[INFO] fluent-bit: applying DaemonSet..."
+      kubectl apply -f "${PROJECT_ROOT}/deploy/fluent-bit.yaml"
+      if ls "${PROJECT_ROOT}/deploy/relays/relay-"*.yaml >/dev/null 2>&1; then
+        echo "[INFO] fluent-bit: applying relay configurations..."
+        for relay_yaml in "${PROJECT_ROOT}/deploy/relays/relay-"*.yaml; do
+          echo "  + $(basename "${relay_yaml}")"
+          kubectl apply -f "${relay_yaml}"
+        done
+      fi
+      ;;
     *)
       echo "[ERROR] unsupported service for apply: $service" >&2
       exit 1
@@ -197,6 +226,13 @@ restart_one() {
     ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend|ssh-gateway)
       kubectl -n "$NAMESPACE" rollout restart "deployment/${service}"
       ;;
+    fluent-bit)
+      echo "[INFO] fluent-bit: restarting all relay deployments..."
+      for deploy in $(kubectl -n "$NAMESPACE" get deployment -l app=fluent-bit-relay -o name 2>/dev/null); do
+        kubectl -n "$NAMESPACE" rollout restart "${deploy}"
+      done
+      kubectl -n "$NAMESPACE" rollout restart daemonset/fluent-bit 2>/dev/null || true
+      ;;
     *)
       echo "[ERROR] unsupported service for restart: $service" >&2
       exit 1
@@ -213,6 +249,14 @@ rollout_status_one() {
       ;;
     ai-service|exec-service|toolbox-gateway|ingest-service|query-service|topology-service|frontend|ssh-gateway)
       kubectl -n "$NAMESPACE" rollout status "deployment/${service}"
+      ;;
+    fluent-bit)
+      echo "[INFO] fluent-bit: checking DaemonSet..."
+      kubectl -n "$NAMESPACE" rollout status daemonset/fluent-bit 2>/dev/null || true
+      echo "[INFO] fluent-bit: checking all relay deployments..."
+      for deploy in $(kubectl -n "$NAMESPACE" get deployment -l app=fluent-bit-relay -o name 2>/dev/null); do
+        kubectl -n "$NAMESPACE" rollout status "${deploy}" --timeout=30s 2>/dev/null || true
+      done
       ;;
     *)
       echo "[ERROR] unsupported service for rollout-status: $service" >&2
