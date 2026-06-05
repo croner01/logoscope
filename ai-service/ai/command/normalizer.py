@@ -87,6 +87,10 @@ def normalize_command_spec(
     if not target_identity and source_target:
         target_identity = _build_target_identity(source_target)
 
+    # Backward-compat aliases
+    _TOOL_ALIASES = {"kubectl_clickhouse_query": "clickhouse_query", "k8s_clickhouse_query": "clickhouse_query"}
+    tool_str = _TOOL_ALIASES.get(tool_str, tool_str)
+
     try:
         tool = ToolType(tool_str) if tool_str else ToolType.GENERIC_EXEC
     except ValueError:
