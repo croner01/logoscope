@@ -92,10 +92,11 @@ Do NOT repeat commands that have already been executed."""
     # ── public API ──────────────────────────────────────────────────────────
 
     def build_system(self, state: RuntimeState, memory: SessionMemory) -> str:
-        return self.SYSTEM_TEMPLATE.format(
-            known_target=self._build_known_target(state),
-            tool_schema=self.build_tool_schema(),
-            journal_context=memory.context_for_llm() or "(no commands executed yet)",
+        return (
+            self.SYSTEM_TEMPLATE
+            .replace("{known_target}", self._build_known_target(state))
+            .replace("{tool_schema}", str(self.build_tool_schema()))
+            .replace("{journal_context}", memory.context_for_llm() or "(no commands executed yet)")
         )
 
     def build_task(self, state: RuntimeState) -> str:
@@ -110,12 +111,13 @@ Do NOT repeat commands that have already been executed."""
         replan_hint = ""
         if state.observations and state.iteration >= 2:
             replan_hint = self.REPLAN_HINT
-        return self.TASK_TEMPLATE.format(
-            question=state.question,
-            source_metadata=self._build_source_metadata(state),
-            context=str(state.analysis_context)[:2000],
-            observations=observations_text,
-            replan_hint=replan_hint,
+        return (
+            self.TASK_TEMPLATE
+            .replace("{question}", state.question)
+            .replace("{source_metadata}", self._build_source_metadata(state))
+            .replace("{context}", str(state.analysis_context)[:2000])
+            .replace("{observations}", observations_text)
+            .replace("{replan_hint}", replan_hint)
         )
 
     def build_tool_schema(self) -> Dict[str, Any]:
