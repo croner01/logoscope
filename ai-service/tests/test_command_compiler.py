@@ -62,3 +62,61 @@ class TestCompileCommand:
         compiled = compile_command(spec)
         assert compiled.route == ""
         assert not compiled.shell_command
+
+    def test_auto_wraps_pod_command_with_kubectl_exec(self):
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="ls -la /etc/config",
+            target_kind="k8s_cluster",
+            target_identity="pod:thanos-ruler-ecms-0/namespace:openstack",
+            purpose="check config",
+        )
+        compiled = compile_command(spec)
+        assert "kubectl exec thanos-ruler-ecms-0 -n openstack -- ls -la /etc/config" in compiled.shell_command
+        assert compiled.route == "remote"
+        assert compiled.executor_profile == "toolbox-k8s-readonly"
+
+    def test_routes_host_command_to_ssh_gateway(self):
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="systemctl status kubelet",
+            target_kind="host_node",
+            target_identity="host:node-3",
+            purpose="check kubelet",
+        )
+        compiled = compile_command(spec)
+        assert compiled.executor_profile == "host-ssh-readonly"
+        assert compiled.shell_command == "systemctl status kubelet"  # not wrapped
+
+    def test_pod_command_without_target_goes_to_busybox(self):
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="ls /tmp",
+            purpose="list temp",
+        )
+        compiled = compile_command(spec)
+        assert compiled.executor_profile == "busybox-readonly"
+        assert "kubectl exec" not in compiled.shell_command
+
+    def test_unknown_command_with_pod_gets_kubectl_exec_wrap(self):
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="python3 --version",
+            target_kind="k8s_cluster",
+            target_identity="pod:my-pod/namespace:islap",
+            purpose="check python",
+        )
+        compiled = compile_command(spec)
+        assert "kubectl exec my-pod -n islap -- python3 --version" in compiled.shell_command
+
+    def test_kubectl_command_passes_through_unchanged(self):
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="kubectl describe pod my-pod -n islap",
+            target_kind="k8s_cluster",
+            target_identity="pod:my-pod/namespace:islap",
+            purpose="describe pod",
+        )
+        compiled = compile_command(spec)
+        assert compiled.shell_command == "kubectl describe pod my-pod -n islap"
+        assert compiled.executor_profile == "toolbox-k8s-readonly"
