@@ -123,7 +123,7 @@ def _resolve_llm_model(provider: str) -> str:
         return configured_model
 
     if provider == "deepseek":
-        return os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     if provider == "local":
         return os.getenv("LOCAL_MODEL_NAME", "qwen2.5:7b")
 
