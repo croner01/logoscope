@@ -29,62 +29,60 @@ class PromptBuilder:
     - project_knowledge_pack.py
     """
 
-    SYSTEM_TEMPLATE = """You are a senior SRE diagnosing issues in a Kubernetes-based observability platform (Logoscope).
+    SYSTEM_TEMPLATE = """You are a diagnostic execution engine. Your ONLY job is to output executable commands. Do NOT output analysis, conclusions, or recommendations — those come AFTER command results are observed.
 
-## Known Target (do NOT rediscover)
-The log entry under investigation already identifies the source:
+## CRITICAL: Output Format — JSON ONLY, NO analysis text
+You MUST output a JSON object containing diagnostic commands. The system will EXECUTE your commands and return results. You will then see the results and can plan the next step.
+
+**Correct output (do this):**
+```json
+{"actions":[{"tool":"clickhouse_query","command":"SELECT * FROM logs.events WHERE pod_name='thanos-ruler-ecms' AND level='ERROR' LIMIT 20","target_kind":"clickhouse_cluster","target_identity":"database:logs","purpose":"check error patterns around the YAML failure"}]}
+```
+
+**WRONG output (NEVER do this):**
+- "Based on the log, the YAML syntax error at line 154..."
+- "The root cause appears to be..."
+- Any text before or after the JSON
+- JSON objects without "command" or "tool" fields
+
 {known_target}
 
-**Critical rules about the known target:**
-- The pod name, namespace, node, and labels above are FACTS from the log metadata. Do NOT run `kubectl get pods -A` or `kubectl get pods -l ...` to "discover" or "find" the pod — you already know it.
-- Do NOT use `kubectl logs <pod>` — logs are queried through ClickHouse (see below), not via kubectl.
+**Core rules:**
+- The pod/namespace above are FACTS. Do NOT rediscover them.
+- Do NOT use `kubectl logs` — query logs through ClickHouse.
+- Do NOT use `kubectl get pods -A` — you already know the target.
+- Start with clickhouse_query to explore logs. Only escalate to generic_exec if log evidence is insufficient.
 
-## How to Query Logs (ALWAYS use this — never kubectl logs)
-Use the **clickhouse_query** tool to search logs directly in ClickHouse:
-- Filter by the known `service_name`, `pod_name`, `namespace`, or `trace_id` above.
-- Example: `SELECT * FROM logs.events WHERE pod_name='<known_pod>' AND level='ERROR' ORDER BY timestamp DESC LIMIT 50`
-- This queries ALL logs from the service, not just the single log entry.
-- Simple SELECT queries on logs.events are executed locally via query-service (fast).
-
-## How to Check System State (ONLY when log evidence is insufficient)
-Use the **generic_exec** tool for commands that MUST run on the target pod/node:
-- Pod-level: `kubectl exec <known_pod> -n <known_ns> -- cat /etc/config.yaml`
-- Pod-level: `kubectl exec <known_pod> -n <known_ns> -- ps aux`
-- Pod-level: `kubectl exec <known_pod> -n <known_ns> -- df -h`
-- Node-level: `kubectl describe node <known_node>`
-- Always use the exact pod/namespace/node from the known target above.
-- These commands are executed remotely via exec-service.
-
-## Available Tools
+## Tools
 {tool_schema}
 
-## Previous Diagnostic Commands
+## Previously Executed Commands (DO NOT repeat)
 {journal_context}
 
 ## Rules
-1. Only propose read-only diagnostic commands.
-2. Use the known target metadata — pod, namespace, node, labels, service_name are already known.
-3. Start with clickhouse_query to explore logs; only escalate to generic_exec if logs are insufficient.
-4. NEVER run `kubectl get pods -A` or `kubectl get pods -l` — you already know the pod.
-5. NEVER use `kubectl logs` — query logs through ClickHouse instead.
-6. Check the journal above — do not repeat commands already executed.
-7. Stop and summarize when evidence is sufficient.
+1. Output ONLY a JSON object with an "actions" array. No analysis text.
+2. Each action MUST have: tool, command, purpose. Include target_kind and target_identity.
+3. clickhouse_query FIRST — search logs with known pod_name/namespace/service_name.
+4. generic_exec ONLY when logs insufficient — use exact pod/namespace from known target.
+5. NEVER run kubectl get pods -A, kubectl get pods -l, or kubectl logs.
+6. Check the journal above — do not repeat already-executed commands.
+7. If the question is about config/setup (not runtime errors), use generic_exec to check the config file.
 """
 
     TASK_TEMPLATE = """## Question
 {question}
 
-## Known Source Metadata
+## Known Metadata
 {source_metadata}
 
-## Analysis Context
+## Context
 {context}
 
-## Observations So Far
+## Command Results So Far
 {observations}
 {replan_hint}
 
-Plan the next diagnostic action. Output a tool call with command_spec."""
+**Your response MUST be a JSON object with an "actions" array. Each action requires: tool, command, purpose. Include target_kind and target_identity. NO analysis text — only the JSON.**"""
 
     REPLAN_HINT = """## ⚠️ Replan Required
 Previous actions did not resolve all evidence gaps. Review the observations above
@@ -122,55 +120,50 @@ Do NOT repeat commands that have already been executed."""
 
     def build_tool_schema(self) -> Dict[str, Any]:
         return {
-            "type": "function",
-            "function": {
-                "name": "execute_diagnostic_command",
-                "description": (
-                    "Execute a read-only diagnostic action. "
-                    "Use clickhouse_query to search logs via ClickHouse (local, fast). "
-                    "Use generic_exec ONLY for system state checks that cannot be done via logs "
-                    "(ps, df, cat config, ss, systemctl status)."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "tool": {
-                            "type": "string",
-                            "enum": ["generic_exec", "clickhouse_query"],
-                            "description": (
-                                "clickhouse_query: search logs in ClickHouse (use this FIRST — "
-                                "filter by known service_name/pod_name/namespace/trace_id). "
-                                "generic_exec: run shell command on target pod/node (use ONLY when "
-                                "logs are insufficient — ps, df, cat, ss, systemctl, kubectl describe)."
-                            ),
-                        },
-                        "command": {
-                            "type": "string",
-                            "description": (
-                                "For clickhouse_query: a SELECT SQL query on logs.events. "
-                                "For generic_exec: a shell command targeting the known pod/node. "
-                                "NEVER use 'kubectl get pods -A' or 'kubectl logs'."
-                            ),
-                        },
-                        "target_kind": {
-                            "type": "string",
-                            "description": "k8s_cluster for shell commands, clickhouse_cluster for SQL",
-                        },
-                        "target_identity": {
-                            "type": "string",
-                            "description": (
-                                "For k8s: pod:<name>/namespace:<ns> (use the known pod name). "
-                                "For ClickHouse: database:logs"
-                            ),
-                        },
-                        "purpose": {
-                            "type": "string",
-                            "description": "Why this command is needed and what evidence it will provide",
-                        },
-                    },
-                    "required": ["tool", "command", "purpose"],
+            "type": "json_schema",
+            "name": "diagnostic_actions",
+            "description": (
+                "A JSON object with an 'actions' array of diagnostic commands. "
+                "Use clickhouse_query FIRST to search logs. "
+                "Use generic_exec ONLY for pod-level system checks (ps, df, cat, ss)."
+            ),
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        "description": "Array of diagnostic commands to execute",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {
+                                    "type": "string",
+                                    "enum": ["clickhouse_query", "generic_exec"],
+                                    "description": "clickhouse_query=search logs in ClickHouse, generic_exec=run shell command on pod"
+                                },
+                                "command": {
+                                    "type": "string",
+                                    "description": "SQL query (for clickhouse_query) or shell command (for generic_exec)"
+                                },
+                                "target_kind": {
+                                    "type": "string",
+                                    "description": "clickhouse_cluster or k8s_cluster"
+                                },
+                                "target_identity": {
+                                    "type": "string",
+                                    "description": "database:logs or pod:<name>/namespace:<ns>"
+                                },
+                                "purpose": {
+                                    "type": "string",
+                                    "description": "Why this command is needed"
+                                }
+                            },
+                            "required": ["tool", "command", "purpose"]
+                        }
+                    }
                 },
-            },
+                "required": ["actions"]
+            }
         }
 
     # ── internal helpers ────────────────────────────────────────────────────
