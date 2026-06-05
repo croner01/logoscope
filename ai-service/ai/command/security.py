@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from ai.command.spec import CommandSpec, CommandType, RiskLevel
+from ai.command.spec import CommandSpec, CommandType, RiskLevel, ToolType
 
 
 # ── Single allowlist ──────────────────────────────────────────────────────
@@ -96,28 +96,33 @@ def evaluate_command(
     if not command:
         return SecurityDecision(allowed=False, reason="Empty command")
 
-    head = _extract_head(command)
-    if not head or head not in ALLOWED_HEADS:
-        return SecurityDecision(
-            allowed=False,
-            reason=f"Command head '{head or '(empty)'}' not in allowlist",
-        )
+    # ClickHouse queries: SQL text, not shell commands — skip head check
+    if spec.tool == ToolType.CLICKHOUSE_QUERY:
+        # SQL is validated by the ClickHouse client, not by shell allowlist
+        pass
+    else:
+        head = _extract_head(command)
+        if not head or head not in ALLOWED_HEADS:
+            return SecurityDecision(
+                allowed=False,
+                reason=f"Command head '{head or '(empty)'}' not in allowlist",
+            )
 
-    # Check blocked operators in each token
-    tokens = command.split()
-    for token in tokens:
-        for op in BLOCKED_OPERATORS:
-            if op in token and token != op:
-                # Operator embedded in another token, e.g. "pods;"
-                return SecurityDecision(
-                    allowed=False,
-                    reason=f"Blocked operator '{op}' found in token '{token}'",
-                )
-            if token == op:
-                return SecurityDecision(
-                    allowed=False,
-                    reason=f"Blocked operator '{op}' in command",
-                )
+    # Check blocked operators in each token (shell commands only)
+    if spec.tool != ToolType.CLICKHOUSE_QUERY:
+        tokens = command.split()
+        for token in tokens:
+            for op in BLOCKED_OPERATORS:
+                if op in token and token != op:
+                    return SecurityDecision(
+                        allowed=False,
+                        reason=f"Blocked operator '{op}' found in token '{token}'",
+                    )
+                if token == op:
+                    return SecurityDecision(
+                        allowed=False,
+                        reason=f"Blocked operator '{op}' in command",
+                    )
 
     # Write command handling
     if spec.command_type == CommandType.REPAIR:

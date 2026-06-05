@@ -9,15 +9,6 @@ should use:
     from ai.skills.matcher import match_skills_by_rules, build_skill_catalog_for_prompt
     from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep
 
-    # Diagnostic skills
-    from ai.skills.diagnostics import (
-        K8sDiagnosticSkill,
-        OpenStackDiagnosticSkill,
-        MariaDBDiagnosticSkill,
-        LinuxDiagnosticSkill,
-        LogAnalysisDiagnosticSkill,
-    )
-
     # Infrastructure skills
     from ai.skills.infrastructure import (
         CommandDeduplicator,
@@ -55,9 +46,6 @@ from ai.skills.registry import (  # noqa: F401
 
 # Trigger registration of all built-in skills
 import ai.skills.builtin  # noqa: F401
-
-# Trigger registration of diagnostic skills
-import ai.skills.diagnostics  # noqa: F401
 
 __all__ = [
     # Base classes

@@ -3,6 +3,9 @@ Shared helper functions for all builtin diagnostic skills.
 
 Centralises _as_str / _generic_exec / _clickhouse_query so that every
 builtin skill file can import from here instead of re-defining them.
+
+All returned dicts are compatible with ai.command.spec.CommandSpec.
+See ai/command/spec.py for the canonical data model.
 """
 
 from __future__ import annotations
