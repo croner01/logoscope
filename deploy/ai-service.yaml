@@ -35,7 +35,7 @@ data:
   AI_AGENT_QUERY_API_TIMEOUT_SECONDS: "6"
   EXEC_SERVICE_BASE_URL: "http://exec-service:8095"
   QUERY_SERVICE_BASE_URL: "http://query-service:8002"
-  AI_RUNTIME_UNIFIED_ENGINE_ENABLED: "false"
+  AI_RUNTIME_UNIFIED_ENGINE_ENABLED: "true"
   AI_RUNTIME_SESSION_COMMAND_LIMIT: "10"
   LLM_PROVIDER: "deepseek"
   LLM_API_BASE: ""
@@ -144,7 +144,7 @@ spec:
       serviceAccountName: ai-service
       containers:
       - name: ai-service
-        image: localhost:5000/logoscope/ai-service:phase2-test
+        image: localhost:5000/logoscope/ai-service:20260605-2
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8090

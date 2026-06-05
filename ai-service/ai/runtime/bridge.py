@@ -38,7 +38,17 @@ def _as_list(value: Any) -> list:
 
 
 def _parse_llm_json_response(raw: str) -> list:
-    """Parse LLM JSON response into action dicts. Handles common shapes."""
+    """Parse LLM JSON response into action dicts. Handles common shapes.
+
+    Covers:
+    - Direct action: {"tool": "...", "command": "..."}
+    - Array: [{"tool": "...", "command": "..."}]
+    - Wrapped: {"actions": [...]}
+    - Function call: {"tool_calls": [{"function": {"arguments": {...}}}]}
+    - DeepSeek json_object: top-level dict with embedded action fields
+    - Markdown code fence: ```json {...} ```
+    - Plain text with embedded JSON (last-resort extraction)
+    """
     text = _as_str(raw).strip()
     if not text:
         return []
@@ -54,9 +64,26 @@ def _parse_llm_json_response(raw: str) -> list:
             try:
                 parsed = json.loads(m.group(1).strip())
             except json.JSONDecodeError:
-                return []
+                # Last resort: try to find any JSON object in the text
+                m2 = re.search(r'\{[^{}]*"(?:tool|command|purpose)"[^{}]*\}', text)
+                if m2:
+                    try:
+                        parsed = json.loads(m2.group(0))
+                    except json.JSONDecodeError:
+                        return []
+                else:
+                    return []
         else:
-            return []
+            # Last resort: try to find any JSON object in the text
+            import re
+            m2 = re.search(r'\{[^{}]*"(?:tool|command|purpose)"[^{}]*\}', text)
+            if m2:
+                try:
+                    parsed = json.loads(m2.group(0))
+                except json.JSONDecodeError:
+                    return []
+            else:
+                return []
 
     # Normalize to list of action dicts
     if isinstance(parsed, list):
@@ -67,8 +94,27 @@ def _parse_llm_json_response(raw: str) -> list:
             parsed.get("actions")
             or parsed.get("tool_calls")
             or parsed.get("steps")
-            or [parsed]
+            or parsed.get("diagnostic_actions")
+            or None
         )
+        if candidates is None:
+            # Check if the top-level dict is itself an action (has command/tool)
+            if parsed.get("command") or parsed.get("tool"):
+                candidates = [parsed]
+            else:
+                # DeepSeek json_object may wrap in "response" or root key
+                for key in ("response", "result", "action", "data"):
+                    inner = parsed.get(key)
+                    if isinstance(inner, dict):
+                        if inner.get("command") or inner.get("tool") or inner.get("actions"):
+                            parsed = inner
+                            break
+                candidates = (
+                    parsed.get("actions")
+                    or parsed.get("tool_calls")
+                    or parsed.get("steps")
+                    or [parsed]
+                )
         if not isinstance(candidates, list):
             candidates = [parsed]
     else:
@@ -79,7 +125,7 @@ def _parse_llm_json_response(raw: str) -> list:
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        # Extract from function call shape
+        # Extract from function call shape: {"function": {"arguments": {...}}}
         fn = item.get("function") or item
         args = fn.get("arguments", {}) if isinstance(fn, dict) else {}
         if isinstance(args, str):
@@ -89,7 +135,15 @@ def _parse_llm_json_response(raw: str) -> list:
                 args = {}
         if isinstance(args, dict) and (args.get("command") or args.get("tool")):
             item = args
+        # Accept items with command or tool fields
         if item.get("command") or item.get("tool"):
+            # Ensure required fields have defaults
+            if "tool" not in item:
+                # Auto-detect: SQL → clickhouse_query, shell → generic_exec
+                cmd = _as_str(item.get("command", "")).strip().upper()
+                item["tool"] = "clickhouse_query" if cmd.startswith("SELECT") else "generic_exec"
+            if "purpose" not in item:
+                item["purpose"] = item.get("description", "diagnostic action")
             actions.append(item)
 
     return actions
@@ -172,6 +226,26 @@ async def unified_diagnosis_bridge(
         # Start relay in background (non-blocking)
         asyncio.create_task(_relay_events())
 
+    async def _try_llm_chat(svc: Any, message: str, use_json_format: bool, log_fn: Any) -> str:
+        """Call LLMService.chat() and return the response string."""
+        chat_fn = getattr(svc, "chat", None)
+        if not callable(chat_fn):
+            raise RuntimeError("LLM service has no chat method")
+
+        kwargs: dict = {"message": message, "context": None}
+        if use_json_format:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        try:
+            raw = await chat_fn(**kwargs)
+            if not isinstance(raw, str):
+                raw = str(raw)
+            return raw
+        except Exception as exc:
+            if log_fn:
+                log_fn.warning("bridge: LLM chat call failed: %s", exc)
+            raise
+
     # Build LLM plan function — calls LLMService.chat() with JSON response_format
     async def _llm_plan(system_prompt, task_prompt, tool_schema, st, mem, lc):
         svc = llm_service or llm_chat_fn
@@ -187,32 +261,44 @@ async def unified_diagnosis_bridge(
             f"{task_prompt}"
         )
 
-        try:
-            raw: str = ""
-            # Try chat method (LLMService interface: message + context + response_format)
-            chat_fn = getattr(svc, "chat", None)
-            if callable(chat_fn):
-                # response_format only for OpenAI-compatible providers (deepseek, openai, local)
-                provider = _as_str(getattr(getattr(svc, "config", None), "provider", "")).lower()
-                supports_json_format = provider in ("deepseek", "openai", "local")
-                kwargs: dict = {"message": combined_message, "context": None}
-                if supports_json_format:
-                    kwargs["response_format"] = {"type": "json_object"}
-                raw = await chat_fn(**kwargs)
-            elif callable(svc):
-                raw = await svc(combined_message)
-            else:
-                return LlmPlanResult(actions=[], summary="LLM service has no chat method")
+        provider = _as_str(getattr(getattr(svc, "config", None), "provider", "")).lower()
+        supports_json_format = provider in ("deepseek", "openai", "local")
 
-            if not isinstance(raw, str):
-                raw = str(raw)
-        except Exception as exc:
-            if logger:
-                logger.warning("LLM plan call failed: %s", exc)
-            return LlmPlanResult(actions=[], summary=f"LLM error: {exc}")
-
-        # Parse JSON response
+        # Try primary call with response_format
+        raw = await _try_llm_chat(svc, combined_message, supports_json_format, logger)
         actions_out = _parse_llm_json_response(raw)
+
+        # If no actions parsed, retry without response_format (some providers
+        # return different JSON shapes with json_object mode)
+        if not actions_out and supports_json_format:
+            if logger:
+                logger.warning(
+                    "bridge: no actions parsed from json_object response (len=%d), retrying without response_format. "
+                    "raw_preview=%s",
+                    len(raw), _as_str(raw)[:200],
+                )
+            raw2 = await _try_llm_chat(svc, combined_message, False, logger)
+            actions_out2 = _parse_llm_json_response(raw2)
+            if actions_out2:
+                raw = raw2
+                actions_out = actions_out2
+                if logger:
+                    logger.info("bridge: retry without response_format succeeded, %d actions", len(actions_out))
+
+        # Log outcome
+        if logger:
+            if actions_out:
+                logger.info(
+                    "bridge: LLM plan generated %d actions: %s",
+                    len(actions_out),
+                    [(a.get("tool", ""), _as_str(a.get("command", ""))[:80]) for a in actions_out],
+                )
+            else:
+                logger.warning(
+                    "bridge: LLM plan returned no parseable actions. raw_len=%d raw_preview=%s",
+                    len(raw), _as_str(raw)[:300],
+                )
+
         return LlmPlanResult(actions=actions_out, raw_response=raw[:2000])
 
     # Build tools adapter
