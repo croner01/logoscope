@@ -1,8 +1,8 @@
 """Integration tests for runtime/engine.py."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-from ai.runtime.engine import run_diagnosis
-from ai.runtime.state import RuntimeState, Action, Observation
+from ai.runtime.engine import run_diagnosis, LlmPlanResult
+from ai.runtime.state import RuntimeState, Action
 from ai.runtime.memory import SessionMemory
 from ai.runtime.events import EventEmitter
 from ai.command.spec import CommandSpec, ToolType
@@ -10,7 +10,7 @@ from ai.command.spec import CommandSpec, ToolType
 
 class TestRunDiagnosis:
     def test_engine_completes_with_sufficient_evidence(self):
-        """Engine should exit when evidence_sufficient becomes True."""
+        """Engine exits immediately when evidence is pre-filled and LLM returns no actions."""
         async def _test():
             state = RuntimeState(
                 run_id="run-1",
@@ -24,15 +24,45 @@ class TestRunDiagnosis:
             memory = SessionMemory()
             emitter = EventEmitter()
 
+            async def noop_plan(system, task, schema, st, mem, llm):
+                return LlmPlanResult(actions=[])
+
             result = await run_diagnosis(
                 state=state,
                 tools=MagicMock(),
                 prompt_builder=MagicMock(),
                 memory=memory,
                 event_emitter=emitter,
+                llm_plan=noop_plan,
             )
             assert result.summary != ""
-            # Engine exits immediately because no pending actions
+
+        asyncio.run(_test())
+
+    def test_engine_stops_at_max_iterations_with_empty_llm(self):
+        """Engine stops after max_iterations when LLM returns no actions."""
+        async def _test():
+            state = RuntimeState(
+                run_id="run-2",
+                question="test",
+                analysis_context={},
+                max_iterations=1,
+            )
+            memory = SessionMemory()
+            emitter = EventEmitter()
+
+            async def empty_plan(system, task, schema, st, mem, llm):
+                return LlmPlanResult(actions=[])
+
+            result = await run_diagnosis(
+                state=state,
+                tools=MagicMock(),
+                prompt_builder=MagicMock(),
+                memory=memory,
+                event_emitter=emitter,
+                llm_plan=empty_plan,
+            )
+            assert state.phase in ("completed", "done")
 
         asyncio.run(_test())
 

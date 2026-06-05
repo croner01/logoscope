@@ -36,6 +36,7 @@ from ai.followup_command import (
 )
 from ai.langchain_runtime import run_followup_langchain
 from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
+from ai.runtime.bridge import unified_diagnosis_bridge, _is_unified_engine_enabled
 from ai.knowledge_provider import get_knowledge_gateway, shutdown_knowledge_gateway, reload_knowledge_gateway
 from ai.followup_prompt_helpers import (
     _build_followup_planner_prompt,
@@ -6508,23 +6509,45 @@ async def _run_follow_up_analysis_core(
             return None
         return new_actions_raw
 
-    react_exec_bundle = await _run_followup_auto_exec_react_loop(
-        session_id=analysis_session_id,
-        message_id=assistant_message_id,
-        actions=followup_actions,
-        analysis_context=analysis_context,
-        allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
-        executed_commands=executed_commands_set,
-        initial_action_observations=prior_action_observations,
-        initial_evidence_gaps=evidence_gap_queue_for_execution,
-        initial_summary=answer_summary_seed,
-        emit_iteration_thoughts=bool(show_thought),
-        run_blocking=_run_blocking,
-        build_react_loop_fn=_build_followup_react_loop,
-        event_callback=event_callback,
-        logger=logger,
-        llm_replan_callback=_llm_replan_callback,
-    )
+    # ── Unified engine path (opt-in via env var) ──────────────────────────
+    if _is_unified_engine_enabled():
+        llm_service = get_llm_service()
+        react_exec_bundle = await unified_diagnosis_bridge(
+            session_id=analysis_session_id,
+            message_id=assistant_message_id,
+            actions=followup_actions,
+            analysis_context=analysis_context,
+            allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
+            executed_commands=executed_commands_set,
+            initial_action_observations=prior_action_observations,
+            initial_evidence_gaps=evidence_gap_queue_for_execution,
+            initial_summary=answer_summary_seed,
+            emit_iteration_thoughts=bool(show_thought),
+            run_blocking=_run_blocking,
+            build_react_loop_fn=_build_followup_react_loop,
+            event_callback=event_callback,
+            logger=logger,
+            llm_replan_callback=_llm_replan_callback,
+            llm_chat_fn=llm_service.chat if llm_service else None,
+        )
+    else:
+        react_exec_bundle = await _run_followup_auto_exec_react_loop(
+            session_id=analysis_session_id,
+            message_id=assistant_message_id,
+            actions=followup_actions,
+            analysis_context=analysis_context,
+            allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
+            executed_commands=executed_commands_set,
+            initial_action_observations=prior_action_observations,
+            initial_evidence_gaps=evidence_gap_queue_for_execution,
+            initial_summary=answer_summary_seed,
+            emit_iteration_thoughts=bool(show_thought),
+            run_blocking=_run_blocking,
+            build_react_loop_fn=_build_followup_react_loop,
+            event_callback=event_callback,
+            logger=logger,
+            llm_replan_callback=_llm_replan_callback,
+        )
     promoted_actions = [
         item
         for item in _as_list(react_exec_bundle.get("actions"))
