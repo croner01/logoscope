@@ -1331,6 +1331,25 @@ def compile_followup_command_spec(spec: Any, *, run_sql_preflight: bool = False)
                         "detail": "kubectl positional token must not include '='",
                     }
                 index += 1
+        # kubectl logs without -c <container> is a common LLM oversight for
+        # multi-container pods (sidecar pattern).  Flag as compile warning
+        # so callers can surface the issue even when the command passes.
+        if head == "kubectl" and "logs" in command_argv:
+            _logs_idx = None
+            for _i, _tok in enumerate(command_argv):
+                if _tok == "logs":
+                    _logs_idx = _i
+                    break
+            if _logs_idx is not None:
+                _has_container_flag = any(
+                    tok in ("-c", "--container") for tok in command_argv[_logs_idx + 1:]
+                )
+                if not _has_container_flag:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "compile: kubectl logs missing -c/--container flag - multi-container pod may fail: %s",
+                        " ".join(command_argv[:6]),
+                    )
         inferred_target_kind, inferred_target_identity, strict_identity = _infer_generic_exec_target(command_argv)
         if inferred_target_kind and (not target_kind or target_kind == "runtime_node"):
             target_kind = inferred_target_kind

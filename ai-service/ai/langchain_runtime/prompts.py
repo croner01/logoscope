@@ -49,6 +49,13 @@ FOLLOWUP_SYSTEM_PROMPT = """你必须只输出 JSON，不要输出任何非 JSON
     - command_spec.args.target_kind 不能为空（k8s_cluster / clickhouse_cluster / runtime_node）
     - command_spec.args.target_identity 不能为空（namespace:<ns> / database:<db> / runtime:local）
     缺少任意一项 → 该 action 标记为 spec_blocked → 整个计划可能被阻断无法继续。
+    18) 多容器 Pod 使用 kubectl logs 时必须指定 -c <容器名>。Pod 有多个容器（sidecar 模式）时，
+        kubectl logs 不加 -c 会报错 "a container name must be specified"。
+        不知道容器名时，先执行以下命令查看容器列表再选择目标容器：
+        kubectl get pod <Pod名称> -n <Namespace> -o jsonpath='{.spec.containers[*].name}'
+        常见多容器场景：istio-proxy（网格 sidecar）、config-reloader（配置热加载）、thanos-ruler 等。
+        对于监控/诊断场景，通常选择主业务容器而非 sidecar。
+
 
 【重要】你的输出将被程序自动解析。如果输出不是合法 JSON，系统将无法处理你的诊断结果，必须重试。请确保输出是严格的 JSON 格式。"""
 
