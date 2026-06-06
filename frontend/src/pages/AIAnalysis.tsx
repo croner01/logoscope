@@ -6806,9 +6806,12 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.role === 'assistant' && messageSubgoals.length > 0 && (
-                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2">
-                          <div className="text-[11px] font-medium text-sky-700 mb-1">子目标拆解</div>
-                          <div className="space-y-1.5">
+                        <details className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2 group" open>
+                          <summary className="cursor-pointer text-[11px] font-medium text-sky-700 list-none flex items-center gap-1">
+                            <svg className="w-3 h-3 text-sky-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                            子目标拆解
+                          </summary>
+                          <div className="mt-1.5 space-y-1.5">
                             {messageSubgoals.map((goal, goalIndex) => (
                               <div key={`${msg.message_id || index}:subgoal:${goal.id || goalIndex}`} className="rounded border border-sky-100 bg-white p-1.5">
                                 <div className="flex items-center justify-between gap-2">
@@ -6826,10 +6829,15 @@ const AIAnalysis: React.FC = () => {
                               </div>
                             ))}
                           </div>
-                        </div>
+                        </details>
                       )}
                       {msg.role === 'assistant' && messageReflection && (
-                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2">
+                        <details className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2 group" open>
+                          <summary className="cursor-pointer text-[11px] font-medium text-violet-700 list-none flex items-center gap-1">
+                            <svg className="w-3 h-3 text-violet-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                            反思 & 缺口
+                          </summary>
+                          <div className="mt-1.5 space-y-1.5">
                           <div className="text-[11px] font-medium text-violet-700 mb-1">反思闭环</div>
                           <div className="flex flex-wrap gap-2 text-[11px] text-violet-700">
                             <span>迭代: {Number(messageReflection.iterations || 0)}</span>
@@ -6843,6 +6851,7 @@ const AIAnalysis: React.FC = () => {
                             <div className="mt-1 text-[11px] text-violet-700">下一步：{reflectionActions.slice(0, 3).join('；')}</div>
                           )}
                         </div>
+                        </details>
                       )}
                       {msg.role === 'assistant' && messageActions.length > 0 && (
                         <div className="mt-1.5 w-full max-w-[85%] rounded border border-emerald-200 bg-emerald-50 p-2">
@@ -7180,20 +7189,26 @@ const AIAnalysis: React.FC = () => {
               )}
             </div>
 
-            {/* 快捷追问建议 */}
+            {/* 快捷追问建议 - 可折叠 */}
             {followUpSuggestions.length > 0 && (
-              <div className="px-3 py-2 border-t border-gray-100 bg-slate-50 flex flex-wrap gap-1.5 shrink-0">
-                {followUpSuggestions.map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    type="button"
-                    onClick={() => setFollowUpQuestion(suggestion)}
-                    className="px-2 py-0.5 text-[11px] rounded bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-                  >
-                    {suggestion}
-                  </button>
-                ))}
-              </div>
+              <details className="px-3 py-1.5 border-t border-gray-100 bg-slate-50 shrink-0 group" open>
+                <summary className="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-500 hover:text-gray-700 list-none">
+                  <svg className="w-3 h-3 text-gray-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                  <span>快捷追问 ({followUpSuggestions.length})</span>
+                </summary>
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {followUpSuggestions.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => setFollowUpQuestion(suggestion)}
+                      className="px-2 py-0.5 text-[11px] rounded bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              </details>
             )}
 
             {/* 横向日志注入工具 */}
