@@ -92,6 +92,7 @@ Columns: timestamp, service_name, pod_name, namespace, node_name,
 5. NEVER run kubectl get pods -A, kubectl get pods -l, or kubectl logs.
 6. Check the journal above — do not repeat already-executed commands.
 7. If the question is about config/setup (not runtime errors), use generic_exec to check the config file.
+8. Each command MUST be a single executable (kubectl, ls, cat, etc.) with flags/args. NEVER use shell programming constructs (for, while, until, if, case, function) — the sandbox only allows specific command heads. A "for f in ..." loop will be REJECTED. Use "ls ..." or "cat ..." directly.
 """
 
     TASK_TEMPLATE = """## Question

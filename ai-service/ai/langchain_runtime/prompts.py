@@ -23,7 +23,7 @@ FOLLOWUP_SYSTEM_PROMPT = """你必须只输出 JSON，不要输出任何非 JSON
    kubectl_clickhouse_query 示例：
      {"tool": "kubectl_clickhouse_query", "args": {"target_kind": "clickhouse_cluster", "target_identity": "database:logs", "query": "SELECT ...", "timeout_s": 45}}
 6) actions 在未使用 skill_name 时必须提供 command_spec（tool + args）。SQL 查询优先用 kubectl_clickhouse_query（默认提供 target_kind=clickhouse_cluster、target_identity=database:<db>、query、timeout_s；仅旧链路兼容时才提供 pod_selector）；非 SQL 的系统查询命令用 generic_exec（必须提供 command 或 command_argv、target_kind、target_identity、timeout_s）。由系统编译成可执行命令，禁止自行压缩空格或拼接紧凑 shell；
-7) command 需可执行且安全：默认优先使用 kubectl/rg/grep/cat/tail/head/jq/ls/echo/pwd 等当前自动执行链路稳定支持的只读命令；只有明确需要 HTTP/数据库直接取证时，再使用 curl（仅 GET/HEAD 或 -G 查询）或 clickhouse-client/clickhouse（仅 SELECT/SHOW/DESCRIBE/EXPLAIN 只读查询）；禁止脚本化链式拼接（| && || ;）与重定向（> >> < <<）及后台执行（&）；每个 action 只允许一条单步命令，pipeline_steps 最多 2-3 步；命令必须保留标准空格分词（命令、flag、参数之间要有空格），禁止输出 logs--tail / grep-ierror / head-20 / -it$(...) 这类紧凑写法；
+7) command 需可执行且安全：默认优先使用 kubectl/rg/grep/cat/tail/head/jq/ls/echo/pwd 等当前自动执行链路稳定支持的只读命令；只有明确需要 HTTP/数据库直接取证时，再使用 curl（仅 GET/HEAD 或 -G 查询）或 clickhouse-client/clickhouse（仅 SELECT/SHOW/DESCRIBE/EXPLAIN 只读查询）；禁止脚本化链式拼接（| && || ;）与重定向（> >> < <<）及后台执行（&）；每个 action 只允许一条单步命令，禁止使用 for/while/until/if/case/function 等 Shell 编程语法（Pod 内操作也不允许循环）；pipeline_steps 最多 2-3 步；命令必须保留标准空格分词（命令、flag、参数之间要有空格），禁止输出 logs--tail / grep-ierror / head-20 / -it$(...) 这类紧凑写法；
 8) 不能给可执行命令时，明确 executable=false 与 reason，不要伪造命令；禁止用 echo/printf 把人工说明、页面操作提示、监控检查建议包装成"伪命令"。
 9) `trace_id`、`request_id`、时间窗是重要诊断锚点，但不是所有场景继续排障的硬前置；当上下文已经显示更强的故障层信号时，应先使用当前最强锚点继续取证，而不是机械要求补齐全部锚点。
 10) 若症状已明显落在某一故障层，优先收集该层直接证据：读路径/慢查询优先执行与资源证据，网络问题优先连通性与端点证据，Pod 生命周期问题优先 describe/events/logs，资源问题优先 CPU/内存/配额证据，拓扑问题优先图构建与预览契约证据；不要把通用相关性补全当成默认下一步。
