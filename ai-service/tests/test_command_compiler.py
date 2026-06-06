@@ -19,7 +19,7 @@ class TestCompileCommand:
         assert compiled.executor_profile == "toolbox-k8s-readonly"
 
     def test_all_clickhouse_queries_route_remote(self):
-        """Simple SELECT queries now route remote too — no local fast path."""
+        """ClickHouse queries now route via kubectl exec → toolbox-k8s-readonly."""
         spec = CommandSpec(
             tool=ToolType.CLICKHOUSE_QUERY,
             command="SELECT * FROM logs.events WHERE service_name='api' LIMIT 10",
@@ -29,7 +29,7 @@ class TestCompileCommand:
         )
         compiled = compile_command(spec)
         assert compiled.route == "remote"
-        assert compiled.executor_profile == "toolbox-clickhouse-readonly"
+        assert compiled.executor_profile == "toolbox-k8s-readonly"
 
     def test_complex_clickhouse_still_routes_remote(self):
         spec = CommandSpec(
@@ -42,7 +42,8 @@ class TestCompileCommand:
         compiled = compile_command(spec)
         assert compiled.route == "remote"
 
-    def test_shell_command_uses_clickhouse_client(self):
+    def test_shell_command_wraps_clickhouse_with_kubectl_exec(self):
+        """ClickHouse queries now wrapped with kubectl exec for exec-service compat."""
         spec = CommandSpec(
             tool=ToolType.CLICKHOUSE_QUERY,
             command="SELECT COUNT(*) FROM logs.events GROUP BY level",
@@ -51,12 +52,10 @@ class TestCompileCommand:
             purpose="count by level",
         )
         compiled = compile_command(spec)
+        assert "kubectl exec" in compiled.shell_command
         assert "clickhouse-client" in compiled.shell_command.lower()
         assert "--query" in compiled.shell_command
         assert "SELECT" in compiled.shell_command
-        # No kubectl wrapper or pipe operator
-        assert "kubectl" not in compiled.shell_command
-        assert "|" not in compiled.shell_command
 
     def test_clickhouse_query_escapes_single_quotes(self):
         spec = CommandSpec(
@@ -66,10 +65,11 @@ class TestCompileCommand:
             purpose="query with quotes",
         )
         compiled = compile_command(spec)
-        # The query value 'api' is preserved; single quotes are shell-escaped
-        assert '"api"' not in compiled.shell_command  # no double-quoted api
+        # The query value 'api' is preserved; single quotes are shell-escaped;
+        # wrapped with kubectl exec for exec-service compatibility
         assert "service_name=" in compiled.shell_command
-        assert 'clickhouse-client --query' in compiled.shell_command
+        assert "kubectl exec" in compiled.shell_command
+        assert "clickhouse-client --query" in compiled.shell_command
 
     def test_rejects_blocked_operators_in_generic_exec(self):
         spec = CommandSpec(

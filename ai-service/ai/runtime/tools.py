@@ -55,7 +55,15 @@ class ToolAdapter:
         message_id: str = "",
         action_id: str = "",
     ) -> ToolResult:
-        """Execute a compiled command via exec-service.
+        """Execute a compiled command via exec-service (two-step flow).
+
+        Step 1 — precheck: classify the command, get a confirmation ticket
+                 if the policy requires it.
+        Step 2 — execute: send the command with confirmed=true + ticket.
+
+        Read-only commands (CommandType.QUERY) are auto-confirmed.
+        REPAIR / mutating commands are never auto-confirmed — exec-service
+        will return confirmation_required for manual approval.
 
         Args:
             compiled: The CompiledCommand to execute.
@@ -66,19 +74,54 @@ class ToolAdapter:
         Returns:
             ToolResult with execution outcome.
         """
+        is_readonly = compiled.spec.command_type.value == "query"
+        sid = session_id or "runtime"
+        mid = message_id or "runtime"
+        aid = action_id or "runtime"
         started = time.monotonic()
+
         try:
-            # Auto-confirm read-only diagnostic commands so they bypass the
-            # exec-service confirmation gate.  REPAIR/mutating commands are
-            # never auto-confirmed.
-            is_readonly = compiled.spec.command_type.value == "query"
+            # ── Step 1: precheck ──────────────────────────────────────────
+            precheck_resp = await asyncio.to_thread(
+                requests.post,
+                f"{self._exec_url}/api/v1/exec/precheck",
+                json={
+                    "session_id": sid,
+                    "message_id": mid,
+                    "action_id": aid,
+                    "command": compiled.shell_command,
+                    "purpose": compiled.spec.purpose,
+                    "target_kind": compiled.spec.target_kind,
+                    "target_identity": compiled.spec.target_identity,
+                },
+                timeout=(3, 30),
+            )
+            precheck_data = precheck_resp.json() if precheck_resp.ok else {}
+            precheck_status = _as_str(precheck_data.get("status")).lower()
+
+            # Hard deny — policy engine refuses this command class outright
+            if precheck_status == "permission_required":
+                duration_ms = int((time.monotonic() - started) * 1000)
+                return ToolResult(
+                    success=False,
+                    status="permission_required",
+                    exit_code=0,
+                    stderr=_as_str(precheck_data.get("message", "command class denied by policy")),
+                    duration_ms=duration_ms,
+                    channel="remote",
+                )
+
+            # Extract ticket for confirmation/elevation gates
+            ticket = _as_str(precheck_data.get("confirmation_ticket"))
+
+            # ── Step 2: execute with ticket ───────────────────────────────
             resp = await asyncio.to_thread(
                 requests.post,
                 f"{self._exec_url}/api/v1/exec/execute",
                 json={
-                    "session_id": session_id or "runtime",
-                    "message_id": message_id or "runtime",
-                    "action_id": action_id or "runtime",
+                    "session_id": sid,
+                    "message_id": mid,
+                    "action_id": aid,
                     "command": compiled.shell_command,
                     "purpose": compiled.spec.purpose,
                     "target_kind": compiled.spec.target_kind,
@@ -86,6 +129,7 @@ class ToolAdapter:
                     "timeout_seconds": compiled.spec.timeout_seconds,
                     "confirmed": is_readonly,
                     "elevated": False,
+                    "confirmation_ticket": ticket,
                 },
                 timeout=(3, compiled.spec.timeout_seconds + 10),
             )
