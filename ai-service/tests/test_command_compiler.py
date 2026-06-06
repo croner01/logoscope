@@ -18,7 +18,8 @@ class TestCompileCommand:
         assert compiled.shell_command == "kubectl get pods -n islap"
         assert compiled.executor_profile == "toolbox-k8s-readonly"
 
-    def test_compiles_simple_clickhouse_to_local(self):
+    def test_all_clickhouse_queries_route_remote(self):
+        """Simple SELECT queries now route remote too — no local fast path."""
         spec = CommandSpec(
             tool=ToolType.CLICKHOUSE_QUERY,
             command="SELECT * FROM logs.events WHERE service_name='api' LIMIT 10",
@@ -27,10 +28,10 @@ class TestCompileCommand:
             purpose="query logs",
         )
         compiled = compile_command(spec)
-        assert compiled.route == "local"
-        assert compiled.executor_profile == "query-service-readonly"
+        assert compiled.route == "remote"
+        assert compiled.executor_profile == "toolbox-clickhouse-readonly"
 
-    def test_compiles_complex_clickhouse_to_remote(self):
+    def test_complex_clickhouse_still_routes_remote(self):
         spec = CommandSpec(
             tool=ToolType.CLICKHOUSE_QUERY,
             command="SELECT service_name, COUNT(*) as cnt FROM logs.events GROUP BY service_name",
@@ -41,7 +42,7 @@ class TestCompileCommand:
         compiled = compile_command(spec)
         assert compiled.route == "remote"
 
-    def test_shell_command_wraps_clickhouse_for_remote(self):
+    def test_shell_command_uses_clickhouse_client(self):
         spec = CommandSpec(
             tool=ToolType.CLICKHOUSE_QUERY,
             command="SELECT COUNT(*) FROM logs.events GROUP BY level",
@@ -51,13 +52,30 @@ class TestCompileCommand:
         )
         compiled = compile_command(spec)
         assert "clickhouse-client" in compiled.shell_command.lower()
+        assert "--query" in compiled.shell_command
         assert "SELECT" in compiled.shell_command
+        # No kubectl wrapper or pipe operator
+        assert "kubectl" not in compiled.shell_command
+        assert "|" not in compiled.shell_command
+
+    def test_clickhouse_query_escapes_single_quotes(self):
+        spec = CommandSpec(
+            tool=ToolType.CLICKHOUSE_QUERY,
+            command="SELECT * FROM logs.events WHERE service_name='api'",
+            target_kind="clickhouse_cluster",
+            purpose="query with quotes",
+        )
+        compiled = compile_command(spec)
+        # The query value 'api' is preserved; single quotes are shell-escaped
+        assert '"api"' not in compiled.shell_command  # no double-quoted api
+        assert "service_name=" in compiled.shell_command
+        assert 'clickhouse-client --query' in compiled.shell_command
 
     def test_rejects_blocked_operators_in_generic_exec(self):
         spec = CommandSpec(
             tool=ToolType.GENERIC_EXEC,
-            command="kubectl get pods | grep error",
-            purpose="filtered list",
+            command="kubectl get pods; rm -rf /tmp",
+            purpose="chained with semicolon",
         )
         compiled = compile_command(spec)
         assert compiled.route == ""
@@ -120,3 +138,29 @@ class TestCompileCommand:
         compiled = compile_command(spec)
         assert compiled.shell_command == "kubectl describe pod my-pod -n islap"
         assert compiled.executor_profile == "toolbox-k8s-readonly"
+
+    def test_allows_pipe_operator_in_generic_exec(self):
+        """Pipe | is allowed for diagnostic chaining (kubectl logs | grep)."""
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="kubectl logs my-pod -n islap | grep ERROR",
+            target_kind="k8s_cluster",
+            target_identity="pod:my-pod/namespace:islap",
+            purpose="filter logs",
+        )
+        compiled = compile_command(spec)
+        assert compiled.route == "remote"
+        assert "|" in compiled.shell_command
+
+    def test_allows_and_and_operator_in_generic_exec(self):
+        """&& is allowed for diagnostic chaining (cat file && ls dir)."""
+        spec = CommandSpec(
+            tool=ToolType.GENERIC_EXEC,
+            command="cat /etc/hosts && ls /var/log",
+            target_kind="k8s_cluster",
+            target_identity="pod:my-pod/namespace:islap",
+            purpose="check files",
+        )
+        compiled = compile_command(spec)
+        assert compiled.route == "remote"
+        assert "&&" in compiled.shell_command

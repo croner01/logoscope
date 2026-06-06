@@ -1,6 +1,7 @@
 """Unified tool execution adapter.
 
-Routes commands to query-service (local) or exec-service (remote).
+Routes all commands to exec-service (remote).  The local query-service
+fast path has been removed — query-service has no raw-SQL endpoint.
 """
 from __future__ import annotations
 
@@ -36,70 +37,55 @@ class ToolResult:
 
 
 class ToolAdapter:
-    """Executes compiled commands via local or remote channels."""
+    """Executes compiled commands via exec-service (remote)."""
 
     def __init__(
         self,
-        query_service_url: str | None = None,
         exec_service_url: str | None = None,
     ):
-        self._query_url = (query_service_url or os.getenv("QUERY_SERVICE_BASE_URL", "http://query-service:8092")).rstrip("/")
-        self._exec_url = (exec_service_url or os.getenv("EXEC_SERVICE_BASE_URL", "http://exec-service:8095")).rstrip("/")
+        self._exec_url = (
+            exec_service_url or os.getenv("EXEC_SERVICE_BASE_URL", "http://exec-service:8095")
+        ).rstrip("/")
 
-    async def execute(self, compiled: CompiledCommand) -> ToolResult:
-        if compiled.route == "local":
-            return await self._execute_local(compiled)
-        else:
-            return await self._execute_remote(compiled)
+    async def execute(
+        self,
+        compiled: CompiledCommand,
+        *,
+        session_id: str = "",
+        message_id: str = "",
+        action_id: str = "",
+    ) -> ToolResult:
+        """Execute a compiled command via exec-service.
 
-    async def _execute_local(self, compiled: CompiledCommand) -> ToolResult:
-        """Execute via query-service /api/v1/logs."""
+        Args:
+            compiled: The CompiledCommand to execute.
+            session_id: Diagnostic session ID (for audit trail correlation).
+            message_id: Message ID (for audit trail correlation).
+            action_id: Action ID (for audit trail correlation).
+
+        Returns:
+            ToolResult with execution outcome.
+        """
         started = time.monotonic()
         try:
-            resp = await asyncio.to_thread(
-                requests.get,
-                f"{self._query_url}/api/v1/logs",
-                params={"search": compiled.shell_command[:200], "limit": 200},
-                timeout=(3, 30),
-            )
-            duration_ms = int((time.monotonic() - started) * 1000)
-            data = resp.json() if resp.ok else {}
-            events = data.get("events", []) if isinstance(data, dict) else []
-            return ToolResult(
-                success=resp.ok,
-                status="completed" if resp.ok else "failed",
-                exit_code=0 if resp.ok else 1,
-                stdout=str(events)[:5000],
-                duration_ms=duration_ms,
-                channel="local",
-            )
-        except Exception as e:
-            duration_ms = int((time.monotonic() - started) * 1000)
-            return ToolResult(
-                success=False,
-                status="failed",
-                exit_code=1,
-                error=_as_str(e),
-                duration_ms=duration_ms,
-                channel="local",
-            )
-
-    async def _execute_remote(self, compiled: CompiledCommand) -> ToolResult:
-        """Execute via exec-service."""
-        started = time.monotonic()
-        try:
+            # Auto-confirm read-only diagnostic commands so they bypass the
+            # exec-service confirmation gate.  REPAIR/mutating commands are
+            # never auto-confirmed.
+            is_readonly = compiled.spec.command_type.value == "query"
             resp = await asyncio.to_thread(
                 requests.post,
                 f"{self._exec_url}/api/v1/exec/execute",
                 json={
-                    "session_id": "runtime",
-                    "message_id": "runtime",
-                    "action_id": "runtime",
+                    "session_id": session_id or "runtime",
+                    "message_id": message_id or "runtime",
+                    "action_id": action_id or "runtime",
                     "command": compiled.shell_command,
                     "purpose": compiled.spec.purpose,
                     "target_kind": compiled.spec.target_kind,
                     "target_identity": compiled.spec.target_identity,
                     "timeout_seconds": compiled.spec.timeout_seconds,
+                    "confirmed": is_readonly,
+                    "elevated": False,
                 },
                 timeout=(3, compiled.spec.timeout_seconds + 10),
             )

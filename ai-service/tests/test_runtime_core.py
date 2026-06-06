@@ -103,11 +103,13 @@ class TestSessionMemory:
         assert "kubectl logs pod-a" in ctx
         assert "3 errors found" in ctx
 
-    def test_record_blocked_not_duplicate(self):
+    def test_record_blocked_is_duplicate(self):
+        """Blocked commands are now duplicates to prevent LLM replan loops."""
         mem = SessionMemory()
         spec = CommandSpec(tool=ToolType.GENERIC_EXEC, command="rm -rf /")
         mem.record_blocked(spec, "head not in allowlist")
-        assert mem.is_duplicate(spec) is False
+        assert mem.is_duplicate(spec) is True
+        assert mem.was_previously_blocked(spec) is True
 
 
 class TestEventEmitter:

@@ -101,8 +101,8 @@ class TestRunDiagnosis:
         assert compiled.route == "remote"
         assert compiled.shell_command == "kubectl get pods -n islap"
 
-    def test_engine_pipeline_clickhouse_local_route(self):
-        """Simple ClickHouse query should route to local."""
+    def test_engine_pipeline_clickhouse_remote_route(self):
+        """All ClickHouse queries route to remote now — no local fast path."""
         from ai.command.normalizer import normalize_command_spec
         from ai.command.security import evaluate_command, SessionCostState
         from ai.command.compiler import compile_command
@@ -117,7 +117,8 @@ class TestRunDiagnosis:
         assert decision.allowed is True
 
         compiled = compile_command(spec)
-        assert compiled.route == "local"
+        assert compiled.route == "remote"
+        assert "clickhouse-client --query" in compiled.shell_command
 
     def test_engine_pipeline_security_blocks_bad_command(self):
         """Command with blocked operator should be rejected."""

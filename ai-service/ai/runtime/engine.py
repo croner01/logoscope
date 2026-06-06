@@ -117,6 +117,7 @@ async def run_diagnosis(
     llm_plan: LlmPlanFn | None = None,
     llm_call: Any = None,
     on_iteration: Callable | None = None,
+    logger: Any = None,
 ) -> RuntimeResult:
     """Run the diagnosis loop.
 
@@ -131,6 +132,7 @@ async def run_diagnosis(
         llm_plan: Optional custom LLM planning function.
         llm_call: Raw LLM call function (used by default llm_plan).
         on_iteration: Optional callback called after each iteration.
+        logger: Optional logger for pipeline observability.
     """
     deadline = time.monotonic() + state.timeout_seconds
     plan_fn = llm_plan or _default_llm_plan
@@ -142,6 +144,16 @@ async def run_diagnosis(
             break
 
         state.iteration = iteration
+
+        # Collect replan actions added by on_iteration in the previous round
+        # (bridge._on_iteration appends them to state.actions, which would be
+        #  overwritten by the new LLM plan below)
+        replan_actions = [a for a in state.actions if a.action_id.startswith("replan")]
+        if replan_actions and logger:
+            logger.info(
+                "engine: session=%s iter=%d preserving %d replan actions from previous round",
+                state.run_id, iteration, len(replan_actions),
+            )
 
         # 1. PLAN — call LLM to generate actions
         system_prompt = prompt_builder.build_system(state, memory)
@@ -160,7 +172,18 @@ async def run_diagnosis(
         for i, raw_action in enumerate(plan.actions):
             try:
                 spec = normalize_command_spec(raw_action, source_target=state.source_target)
-            except Exception:
+            except Exception as exc:
+                if logger:
+                    logger.warning(
+                        "engine: session=%s iter=%d action[%d] normalize failed: %s raw_keys=%s",
+                        state.run_id, iteration, i, exc,
+                        list(raw_action.keys()) if isinstance(raw_action, dict) else type(raw_action).__name__,
+                    )
+                await event_emitter.emit(state.run_id, "tool_call_normalize_failed", {
+                    "iteration": iteration,
+                    "action_index": i,
+                    "reason": str(exc)[:200],
+                })
                 continue
 
             action = Action(
@@ -171,7 +194,13 @@ async def run_diagnosis(
             )
             iteration_actions.append(action)
 
-        state.actions = iteration_actions
+        # Prepend replan actions from the previous round so they execute first
+        state.actions = replan_actions + iteration_actions
+        if logger:
+            logger.info(
+                "engine: session=%s iter=%d plan=%d actions (llm=%d replan=%d)",
+                state.run_id, iteration, len(state.actions), len(iteration_actions), len(replan_actions),
+            )
         pending = [a for a in state.actions if a.status == "pending"]
         if not pending:
             break
@@ -183,11 +212,24 @@ async def run_diagnosis(
 
             # Dedup check
             if memory.is_duplicate(action.command_spec):
+                previously_blocked = memory.was_previously_blocked(action.command_spec)
+                reason = (
+                    "previously blocked by security — command contains disallowed operator"
+                    if previously_blocked
+                    else "previously executed in this session"
+                )
                 await event_emitter.emit(state.run_id, "tool_call_skipped_duplicate", {
                     "action_id": action.action_id,
-                    "reason": "previously executed in this session",
+                    "reason": reason,
                 })
                 action.status = "skipped_duplicate"
+                if logger:
+                    logger.info(
+                        "engine: session=%s action=%s skipped duplicate (%s) cmd=%s",
+                        state.run_id, action.action_id,
+                        "was_blocked" if previously_blocked else "was_executed",
+                        _as_str(action.command_spec.command)[:80],
+                    )
                 continue
 
             # Security
@@ -202,17 +244,51 @@ async def run_diagnosis(
                     # In auto mode without UI, we skip approval-required commands
                     action.status = "blocked_approval"
                     memory.record_blocked(action.command_spec, f"approval required: {decision.reason}")
+                    if logger:
+                        logger.warning(
+                            "engine: session=%s action=%s blocked_approval: %s",
+                            state.run_id, action.action_id, decision.reason,
+                        )
                     continue
                 else:
                     action.status = "blocked"
                     memory.record_blocked(action.command_spec, decision.reason)
+                    await event_emitter.emit(state.run_id, "tool_call_blocked", {
+                        "action_id": action.action_id,
+                        "command": action.command_spec.command,
+                        "reason": decision.reason,
+                    })
+                    if logger:
+                        logger.warning(
+                            "engine: session=%s action=%s blocked: %s",
+                            state.run_id, action.action_id, decision.reason,
+                        )
                     continue
 
             # Compile
             compiled = compile_command(action.command_spec)
             if not compiled.shell_command:
                 action.status = "compile_failed"
+                await event_emitter.emit(state.run_id, "tool_call_compile_failed", {
+                    "action_id": action.action_id,
+                    "command": action.command_spec.command,
+                    "tool": str(action.command_spec.tool.value),
+                })
+                if logger:
+                    logger.warning(
+                        "engine: session=%s action=%s compile failed cmd=%s",
+                        state.run_id, action.action_id,
+                        _as_str(action.command_spec.command)[:80],
+                    )
                 continue
+
+            if logger:
+                logger.info(
+                    "engine: session=%s action=%s executing route=%s profile=%s cmd=%s",
+                    state.run_id, action.action_id,
+                    compiled.route, compiled.executor_profile,
+                    compiled.shell_command[:120],
+                )
 
             # Execute
             await event_emitter.emit(state.run_id, "tool_call_started", {
@@ -221,7 +297,12 @@ async def run_diagnosis(
                 "route": compiled.route,
             })
 
-            result = await tools.execute(compiled)
+            result = await tools.execute(
+                compiled,
+                session_id=state.run_id,
+                message_id=state.run_id,
+                action_id=action.action_id,
+            )
 
             await event_emitter.emit(state.run_id, "tool_call_finished", {
                 "action_id": action.action_id,
@@ -230,6 +311,14 @@ async def run_diagnosis(
                 "stdout": result.stdout[:2000],
                 "duration_ms": result.duration_ms,
             })
+
+            if logger:
+                logger.info(
+                    "engine: session=%s action=%s executed status=%s exit=%d dur=%dms out_preview=%s",
+                    state.run_id, action.action_id,
+                    result.status, result.exit_code, result.duration_ms,
+                    result.stdout[:120] if result.exit_code == 0 else result.stderr[:120],
+                )
 
             # Record
             obs = Observation(

@@ -55,7 +55,7 @@ class TestMetadataDrivenE2E:
         assert spec.tool == ToolType.CLICKHOUSE_QUERY
 
         compiled = compile_command(spec)
-        assert compiled.route == "local"  # simple SELECT → local
+        assert compiled.route == "remote"  # all CH queries → remote
 
         # Step 2: Security check should pass
         decision = evaluate_command(spec, session_cost=SessionCostState())

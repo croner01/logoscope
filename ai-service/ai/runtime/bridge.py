@@ -210,12 +210,18 @@ async def unified_diagnosis_bridge(
     if event_callback:
         queue = emitter.subscribe(session_id)
 
+        # Detect whether the callback is async so we can await it properly
+        _is_async_callback = asyncio.iscoroutinefunction(event_callback)
+
         async def _relay_events():
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.5)
                     try:
-                        event_callback(event.get("type", ""), event.get("payload", {}))
+                        if _is_async_callback:
+                            await event_callback(event.get("type", ""), event.get("payload", {}))
+                        else:
+                            event_callback(event.get("type", ""), event.get("payload", {}))
                     except Exception:
                         pass
                 except asyncio.TimeoutError:
@@ -243,7 +249,7 @@ async def unified_diagnosis_bridge(
             return raw
         except Exception as exc:
             if log_fn:
-                log_fn.warning("bridge: LLM chat call failed: %s", exc)
+                log_fn.warning("bridge: session=%s LLM chat call failed: %s", session_id, exc)
             raise
 
     # Build LLM plan function — calls LLMService.chat() with JSON response_format
@@ -273,9 +279,9 @@ async def unified_diagnosis_bridge(
         if not actions_out and supports_json_format:
             if logger:
                 logger.warning(
-                    "bridge: no actions parsed from json_object response (len=%d), retrying without response_format. "
+                    "bridge: session=%s no actions parsed from json_object response (len=%d), retrying without response_format. "
                     "raw_preview=%s",
-                    len(raw), _as_str(raw)[:200],
+                    session_id, len(raw), _as_str(raw)[:200],
                 )
             raw2 = await _try_llm_chat(svc, combined_message, False, logger)
             actions_out2 = _parse_llm_json_response(raw2)
@@ -283,20 +289,21 @@ async def unified_diagnosis_bridge(
                 raw = raw2
                 actions_out = actions_out2
                 if logger:
-                    logger.info("bridge: retry without response_format succeeded, %d actions", len(actions_out))
+                    logger.info("bridge: session=%s retry without response_format succeeded, %d actions", session_id, len(actions_out))
 
         # Log outcome
         if logger:
             if actions_out:
                 logger.info(
-                    "bridge: LLM plan generated %d actions: %s",
+                    "bridge: session=%s LLM plan generated %d actions: %s",
+                    session_id,
                     len(actions_out),
                     [(a.get("tool", ""), _as_str(a.get("command", ""))[:80]) for a in actions_out],
                 )
             else:
                 logger.warning(
-                    "bridge: LLM plan returned no parseable actions. raw_len=%d raw_preview=%s",
-                    len(raw), _as_str(raw)[:300],
+                    "bridge: session=%s LLM plan returned no parseable actions. raw_len=%d raw_preview=%s",
+                    session_id, len(raw), _as_str(raw)[:300],
                 )
 
         return LlmPlanResult(actions=actions_out, raw_response=raw[:2000])
@@ -351,6 +358,7 @@ async def unified_diagnosis_bridge(
         llm_plan=_llm_plan,
         llm_call=llm_chat_fn,
         on_iteration=_on_iteration,
+        logger=logger,
     )
 
     # Convert to legacy format

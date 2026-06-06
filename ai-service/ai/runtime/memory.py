@@ -44,15 +44,22 @@ class SessionMemory:
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
     def is_duplicate(self, spec: CommandSpec) -> bool:
-        """Check if this exact spec was already executed.
+        """Check if this exact spec was already seen (executed or blocked).
 
-        Blocked entries don't count as duplicates — they were never executed.
+        Previously-blocked commands also count as duplicates to prevent
+        the LLM from re-planning identical blocked commands in a loop.
+        Use is_blocked_duplicate() if you need to distinguish the two cases.
         """
+        fp = self.fingerprint(spec)
+        return fp in self._entries
+
+    def was_previously_blocked(self, spec: CommandSpec) -> bool:
+        """Check if this spec was previously blocked by security."""
         fp = self.fingerprint(spec)
         entry = self._entries.get(fp)
         if entry is None:
             return False
-        return not entry.get("blocked", False)
+        return bool(entry.get("blocked", False))
 
     def record(
         self,

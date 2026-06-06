@@ -24,7 +24,9 @@ ALLOWED_HEADS: set[str] = {
     "timeout", "ps", "ss",
 }
 
-BLOCKED_OPERATORS: set[str] = {";", "&", ">", ">>", "<", "<<", "|", "||", "&&"}
+# Blocked operators — exact token match only.  | and && are intentionally
+# allowed for diagnostic command chaining (kubectl logs | grep, cmd1 && cmd2).
+BLOCKED_OPERATORS: set[str] = {";", "&", ">", ">>", "<", "<<", "||"}
 
 _ALL_NAMESPACES_RE = re.compile(r"(?:\s|^)-(?:-all-namespaces|A)(?:\s|$)")
 
@@ -116,21 +118,22 @@ def evaluate_command(
                 reason=f"Command head '{head or '(empty)'}' not in allowlist",
             )
 
-    # Check blocked operators in each token (shell commands only)
+    # Check blocked operators.  | and && are allowed for diagnostic chaining.
+    # Exact-token match for standalone operators; substring check for ; which
+    # often appears attached to the preceding token (cmd1;cmd2).
     if spec.tool != ToolType.CLICKHOUSE_QUERY:
         tokens = command.split()
         for token in tokens:
-            for op in BLOCKED_OPERATORS:
-                if op in token and token != op:
-                    return SecurityDecision(
-                        allowed=False,
-                        reason=f"Blocked operator '{op}' found in token '{token}'",
-                    )
-                if token == op:
-                    return SecurityDecision(
-                        allowed=False,
-                        reason=f"Blocked operator '{op}' in command",
-                    )
+            if token in BLOCKED_OPERATORS:
+                return SecurityDecision(
+                    allowed=False,
+                    reason=f"Blocked operator '{token}' in command",
+                )
+            if ";" in token:
+                return SecurityDecision(
+                    allowed=False,
+                    reason=f"Blocked operator ';' found in token '{token}'",
+                )
 
     # Write command handling
     if spec.command_type == CommandType.REPAIR:

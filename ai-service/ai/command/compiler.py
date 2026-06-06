@@ -1,27 +1,18 @@
 """CommandSpec → executable shell command.
 
 Compiles a validated CommandSpec into a CompiledCommand ready for execution.
-Routes simple ClickHouse queries to query-service (local) and everything
-else to exec-service (remote).
+All commands (including ClickHouse queries) route to exec-service (remote);
+the toolbox-gateway sandbox provides clickhouse-client for SQL execution.
 """
 from __future__ import annotations
 
-import os
-import re
-import shlex
 from typing import Any
 
 from ai.command.spec import CommandSpec, CompiledCommand, ToolType
 
 
-_SIMPLE_SELECT_RE = re.compile(
-    r"^\s*SELECT\s+(?!.*\bGROUP\s+BY\b)(?!.*\bJOIN\b)(?!.*\bUNION\b)"
-    r"(?!.*\bHAVING\b)(?!.*\bOVER\s*\()"
-    r".*?\bFROM\s+logs\.events\b",
-    re.IGNORECASE | re.DOTALL,
-)
-
-_BLOCKED_OPERATORS = {";", "&", ">", ">>", "<", "<<", "|", "||", "&&"}
+_BLOCKED_OPERATORS = {";", "&", ">", ">>", "<", "<<", "||"}
+# | and && are allowed in commands (piping and conditional chaining)
 
 # Commands that need to run inside the target pod → auto-wrap with kubectl exec
 _POD_INTERNAL_COMMANDS = {
@@ -50,11 +41,6 @@ def _as_str(value: Any, default: str = "") -> str:
     return str(value)
 
 
-def _is_simple_select(query: str) -> bool:
-    """Check if a ClickHouse query is a simple SELECT on logs.events."""
-    return bool(query and _SIMPLE_SELECT_RE.search(query))
-
-
 def _extract_head(command: str) -> str:
     """Extract the command head (first token)."""
     parts = command.strip().split()
@@ -81,16 +67,9 @@ def _parse_target_identity(target_identity: str) -> tuple[str, str]:
     return pod, ns
 
 
-def _wrap_clickhouse_query(query: str, namespace: str = "islap") -> str:
-    """Wrap a ClickHouse query for kubectl exec remote execution."""
-    selector = os.getenv("AI_RUNTIME_CLICKHOUSE_POD_SELECTOR_DEFAULT", "app=clickhouse")
-    safe_query = query.replace("'", "'\"'\"'")
-    ns = shlex.quote(namespace)
-    sel = shlex.quote(selector)
-    return (
-        f"kubectl get pods -n {ns} -l {sel} -o jsonpath='{{.items[0].metadata.name}}'"
-        f" | xargs -I {{}} kubectl -n {ns} exec -i {{}} -- clickhouse-client --query '{safe_query}'"
-    )
+def _escape_clickhouse_query(query: str) -> str:
+    """Escape single quotes in a ClickHouse query for use with clickhouse-client --query."""
+    return query.replace("'", "'\"'\"'")
 
 
 def compile_command(
@@ -114,12 +93,13 @@ def compile_command(
         return CompiledCommand(spec=spec, shell_command="", route="")
 
     if spec.tool == ToolType.GENERIC_EXEC:
-        # Blocked operator check (before wrapping)
+        # Blocked operator check (before wrapping).  | and && are allowed.
+        # Exact-token match for standalone operators; ; is also checked
+        # as substring since it often appears attached (cmd1;cmd2).
         tokens = command.split()
         for token in tokens:
-            for op in _BLOCKED_OPERATORS:
-                if op in token:
-                    return CompiledCommand(spec=spec, shell_command="", route="")
+            if token in _BLOCKED_OPERATORS or ";" in token:
+                return CompiledCommand(spec=spec, shell_command="", route="")
 
         head = _extract_head(command)
         pod, ns = _parse_target_identity(spec.target_identity)
@@ -182,23 +162,18 @@ def compile_command(
         )
 
     if spec.tool == ToolType.CLICKHOUSE_QUERY:
-        if _is_simple_select(command):
-            return CompiledCommand(
-                spec=spec,
-                shell_command=command,
-                route="local",
-                executor_profile="query-service-readonly",
-                sql_preflight_passed=True,
-            )
-        else:
-            wrapped = _wrap_clickhouse_query(command, namespace=namespace)
-            return CompiledCommand(
-                spec=spec,
-                shell_command=wrapped,
-                route="remote",
-                executor_profile="toolbox-clickhouse-readonly",
-                sql_preflight_passed=not run_sql_preflight,
-            )
+        # All ClickHouse queries go remote via toolbox-gateway (which has
+        # clickhouse-client in its allowed heads).  No local fast path —
+        # query-service has no raw-SQL execution endpoint.
+        escaped = _escape_clickhouse_query(command)
+        shell = f"clickhouse-client --query '{escaped}'"
+        return CompiledCommand(
+            spec=spec,
+            shell_command=shell,
+            route="remote",
+            executor_profile="toolbox-clickhouse-readonly",
+            sql_preflight_passed=not run_sql_preflight,
+        )
 
     return CompiledCommand(spec=spec, shell_command="", route="")
 
