@@ -758,6 +758,61 @@ def _normalize_embedded_command_text(text: Any) -> str:
     return result
 
 
+_KUBECTL_COMMON_VERBS = {
+    "get", "describe", "logs", "exec", "top", "rollout", "apply", "delete",
+    "patch", "edit", "replace", "scale", "set", "annotate", "label",
+    "create", "expose", "autoscale", "cordon", "uncordon", "drain", "taint",
+}
+
+
+def _split_kubectl_verb_value_glue(token: str) -> list[str] | None:
+    """Split token where a kubectl verb is concatenated with its value.
+
+    Handles LLM-generated patterns where spaces are missing between a kubectl
+    verb and the resource/value that follows, e.g.:
+
+        "execthanos-ruler-ecms-0-nopenstack"
+        → ["exec", "thanos-ruler-ecms-0", "-n", "openstack"]
+
+    Safety rules to avoid false positives:
+    - Verb must be followed by a consonant (vowel → natural word continuation,
+      e.g. "executor" stays intact)
+    - Suffix must contain a hyphen (multi-part resource name)
+    - "-n<ns>" flag expansion requires that "-n" is NOT preceded by a letter
+      (avoids splitting "pod-nginx" into "pod -n ginx")
+    """
+    lowered = token.lower()
+    for verb in _KUBECTL_COMMON_VERBS:
+        if not lowered.startswith(verb) or len(token) <= len(verb):
+            continue
+        suffix = token[len(verb):]
+        # Vowel after verb → natural word continuation (executor, describes)
+        if re.match(r'^[aeiou]', suffix, re.IGNORECASE):
+            continue
+        # Suffix starting with dash → likely a flag, not a resource value
+        if suffix.startswith("-"):
+            continue
+        # Suffix must contain a hyphen (multi-word resource identifier)
+        if "-" not in suffix:
+            continue
+        parts: list[str] = [verb]
+        remaining = suffix
+        # Expand -n<namespace> glue inside the suffix, but only when -n is
+        # preceded by a non-letter character (digit/hyphen — not part of a
+        # hyphenated word like "pod-nginx").
+        m = re.search(r'(-n)([a-z][-a-z0-9.]*)', remaining, re.IGNORECASE)
+        if m and m.start() >= 1 and not remaining[m.start() - 1].isalpha():
+            before_n = remaining[:m.start()]
+            if before_n:
+                parts.append(before_n)
+            parts.append(m.group(1))
+            parts.append(m.group(2))
+        else:
+            parts.append(remaining)
+        return parts
+    return None
+
+
 def _canonicalize_kubectl_command_argv(command_argv: list[str]) -> list[str]:
     if not command_argv:
         return []
@@ -817,6 +872,14 @@ def _canonicalize_kubectl_command_argv(command_argv: list[str]) -> list[str]:
             value = safe_token[len("--output"):].strip()
             if value:
                 canonical.extend(["--output", value])
+                continue
+        # Verb+value concatenation: execthanos-ruler-ecms-0-nopenstack
+        # should be "exec thanos-ruler-ecms-0 -n openstack".
+        # Only applies to index>=1 tokens that don't start with "-".
+        if index >= 1 and not safe_token.startswith("-"):
+            _split = _split_kubectl_verb_value_glue(safe_token)
+            if _split:
+                canonical.extend(_split)
                 continue
         canonical.append(safe_token)
     return canonical
