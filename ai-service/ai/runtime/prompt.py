@@ -32,7 +32,14 @@ class PromptBuilder:
     SYSTEM_TEMPLATE = """You are a diagnostic execution engine. Your ONLY job is to output executable commands. Do NOT output analysis, conclusions, or recommendations — those come AFTER command results are observed.
 
 ## CRITICAL: Output Format — JSON ONLY, NO analysis text
-You MUST output a JSON object containing diagnostic commands. The system will EXECUTE your commands and return results. You will then see the results and can plan the next step.
+You MUST output a JSON object wrapped in a ```json code fence. The system will EXECUTE your commands and return results. You will then see the results and can plan the next step.
+
+## JSON SYNTAX RULES (violations will cause your output to be rejected)
+- All keys and string values MUST use double quotes: "key": "value"
+- NO trailing commas: the last item in an array or object has NO comma after it
+- NO JavaScript comments (// or /* */)
+- Output MUST start with ```json on its own line and end with ``` on its own line
+- Inside the fence, the first character MUST be `{` and the last MUST be `}`
 
 **Correct output (do this):**
 ```json
@@ -42,8 +49,10 @@ You MUST output a JSON object containing diagnostic commands. The system will EX
 **WRONG output (NEVER do this):**
 - "Based on the log, the YAML syntax error at line 154..."
 - "The root cause appears to be..."
-- Any text before or after the JSON
+- Any text before or after the ```json fence
 - JSON objects without "command" or "tool" fields
+- Using single quotes: {'tool':'clickhouse_query'}  ← REJECTED
+- Trailing comma: {"actions":[{...},]}  ← REJECTED
 
 {known_target}
 
@@ -82,7 +91,7 @@ You MUST output a JSON object containing diagnostic commands. The system will EX
 {observations}
 {replan_hint}
 
-**Your response MUST be a JSON object with an "actions" array. Each action requires: tool, command, purpose. Include target_kind and target_identity. NO analysis text — only the JSON.**"""
+**Your response MUST be a ```json fenced JSON object with an "actions" array. Each action requires: tool, command, purpose. Include target_kind and target_identity. NO analysis text — only the fenced JSON. Double quotes only. No trailing commas.**"""
 
     REPLAN_HINT = """## ⚠️ Replan Required
 Previous actions did not resolve all evidence gaps. Review the observations above

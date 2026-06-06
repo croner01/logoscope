@@ -53,36 +53,46 @@ def _parse_llm_json_response(raw: str) -> list:
     if not text:
         return []
 
-    # Try direct JSON parse
+    # ── Layer 3: json_repair — auto-fix common syntax errors ──────────
+    # Handles single quotes, trailing commas, missing brackets, and
+    # extra text around the JSON object — before attempting json.loads().
     try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        # Try extracting JSON from markdown code fence
-        import re
-        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-        if m:
-            try:
-                parsed = json.loads(m.group(1).strip())
-            except json.JSONDecodeError:
+        from json_repair import repair_json
+        repaired = repair_json(text)
+        parsed = json.loads(repaired)
+    except Exception:
+        # json_repair failed → fall through to direct parse + extraction chain
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # Try extracting JSON from markdown code fence
+            import re
+            m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1).strip())
+                except json.JSONDecodeError:
+                    # Last resort: try to find any JSON object in the text
+                    m2 = re.search(r'\{[^{}]*"(?:tool|command|purpose)"[^{}]*\}', text)
+                    if m2:
+                        try:
+                            parsed = json.loads(m2.group(0))
+                        except json.JSONDecodeError:
+                            parsed = None
+                    else:
+                        parsed = None
+            else:
                 # Last resort: try to find any JSON object in the text
                 m2 = re.search(r'\{[^{}]*"(?:tool|command|purpose)"[^{}]*\}', text)
                 if m2:
                     try:
                         parsed = json.loads(m2.group(0))
                     except json.JSONDecodeError:
-                        return []
+                        parsed = None
                 else:
-                    return []
-        else:
-            # Last resort: try to find any JSON object in the text
-            import re
-            m2 = re.search(r'\{[^{}]*"(?:tool|command|purpose)"[^{}]*\}', text)
-            if m2:
-                try:
-                    parsed = json.loads(m2.group(0))
-                except json.JSONDecodeError:
-                    return []
-            else:
+                    parsed = None
+
+            if parsed is None:
                 return []
 
     # Normalize to list of action dicts
@@ -241,6 +251,10 @@ async def unified_diagnosis_bridge(
         kwargs: dict = {"message": message, "context": None}
         if use_json_format:
             kwargs["response_format"] = {"type": "json_object"}
+            # Pre-filling: force the model to start output from the correct key.
+            # The provider appends this as an assistant message so the model
+            # continues from `{"actions":[` instead of inventing an outer wrapper.
+            kwargs["assistant_prefix"] = '{"actions":['
 
         try:
             raw = await chat_fn(**kwargs)
@@ -270,26 +284,66 @@ async def unified_diagnosis_bridge(
         provider = _as_str(getattr(getattr(svc, "config", None), "provider", "")).lower()
         supports_json_format = provider in ("deepseek", "openai", "local")
 
-        # Try primary call with response_format
+        # Try primary call with response_format (includes pre-filling)
         raw = await _try_llm_chat(svc, combined_message, supports_json_format, logger)
         actions_out = _parse_llm_json_response(raw)
 
-        # If no actions parsed, retry without response_format (some providers
-        # return different JSON shapes with json_object mode)
+        # If no actions parsed, retry with error feedback in the prompt.
+        # The model sees what it produced and is told exactly what was wrong.
         if not actions_out and supports_json_format:
+            raw_preview = _as_str(raw)[:300]
             if logger:
                 logger.warning(
-                    "bridge: session=%s no actions parsed from json_object response (len=%d), retrying without response_format. "
+                    "bridge: session=%s no actions parsed from json_object response (len=%d), retrying with error feedback. "
                     "raw_preview=%s",
-                    session_id, len(raw), _as_str(raw)[:200],
+                    session_id, len(raw), raw_preview,
                 )
-            raw2 = await _try_llm_chat(svc, combined_message, False, logger)
+            # Layer 4: feedback retry — tell the model what failed
+            feedback = (
+                f"\n\n## ⚠️ PARSE ERROR — YOUR PREVIOUS OUTPUT WAS REJECTED\n"
+                f"Your last response could not be parsed as valid JSON. It was:\n"
+                f"```\n{raw_preview}\n```\n"
+                f"Please output ONLY a valid JSON object with an \"actions\" array.\n"
+                f'Example: {{"actions":[{{"tool":"clickhouse_query","command":"SELECT 1","purpose":"test"}}]}}\n'
+                f"Use double quotes. No trailing commas. No analysis text."
+            )
+            raw2 = await _try_llm_chat(svc, combined_message + feedback, False, logger)
             actions_out2 = _parse_llm_json_response(raw2)
             if actions_out2:
                 raw = raw2
                 actions_out = actions_out2
                 if logger:
-                    logger.info("bridge: session=%s retry without response_format succeeded, %d actions", session_id, len(actions_out))
+                    logger.info(
+                        "bridge: session=%s feedback retry succeeded, %d actions",
+                        session_id, len(actions_out),
+                    )
+
+        # Layer 4: degradation fallback — if structured parsing failed,
+        # try to extract any SELECT or shell command from the raw text
+        if not actions_out:
+            import re
+            fallback_actions = []
+            # Look for SQL statements
+            for m in re.finditer(
+                r"(SELECT\s+.*?FROM\s+\S+(?:\s+WHERE\s+.*?)?(?:LIMIT\s+\d+)?)",
+                _as_str(raw), re.IGNORECASE | re.DOTALL,
+            ):
+                sql = m.group(1).strip()[:500]
+                if sql:
+                    fallback_actions.append({
+                        "tool": "clickhouse_query",
+                        "command": sql,
+                        "target_kind": "clickhouse_cluster",
+                        "target_identity": "database:logs",
+                        "purpose": "extracted from unstructured LLM response",
+                    })
+            if fallback_actions:
+                actions_out = fallback_actions
+                if logger:
+                    logger.warning(
+                        "bridge: session=%s degraded fallback extracted %d actions from raw text",
+                        session_id, len(actions_out),
+                    )
 
         # Log outcome
         if logger:
