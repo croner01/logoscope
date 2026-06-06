@@ -39,11 +39,17 @@ FOLLOWUP_SYSTEM_PROMPT = """你必须只输出 JSON，不要输出任何非 JSON
     所有诊断步骤——包括 namespace 发现命令——都必须作为 source=langchain 的 action 输出到 actions 数组中，每条 action 必须有 command 或 command_spec（tool + args），executable=true。
     结论文本只应包含已确认的事实和推理，不应包含"建议执行""下一步""可执行""待补全"等命令建议。
     如果系统发现 actions 数组为空或全部 executable=false，将判定为 planning_incomplete 并阻塞。
-16) 找到 Pod 名称和 Namespace 后，使用精确的 Pod 名称构造命令，不要使用 -l app= 标签选择器：
-    kubectl describe pod <Pod名称> -n <Namespace>
+16) 先判断上下文是否已有足够的日志数据。如果 agent_related_logs 或
+    request_flow.evidence / root_cause_hints 中已经包含目标 Pod 的完整错误日志
+    （包括具体错误详情如 YAML 解析行号、SQL 错误信息等），说明日志已被关联分析
+    拉取到上下文中，不要重复执行 kubectl logs 或 ClickHouse 查询来获取同一份数据。
+    只有在上下文没有日志内容、或者已有日志不足以确定根因时才需要执行：
     kubectl logs <Pod名称> -n <Namespace> --since-time=...
-    禁止被日志文本中的细节卡住。完成 namespace/pod 发现后，下一个 action 必须是 kubectl logs，不是 ClickHouse 查询。不要等待额外信息（如 shard 映射、pod 名称解析等）。
-    注意：ClickHouse 查询通常会触发 semantic_incomplete 阻塞而需要用户确认，应作为最后手段而不是首选下一步。诊断路径应该是：pod 发现 → kubectl logs → （如有必要再）ClickHouse。
+    禁止被日志文本中的细节卡住。完成 namespace/pod 发现后，如果确实需要更多日志，
+    下一个 action 应该是 kubectl logs，不是 ClickHouse 查询。不要等待额外信息
+    （如 shard 映射、pod 名称解析等）。
+    注意：ClickHouse 查询通常会触发 semantic_incomplete 阻塞而需要用户确认，应作为最后手段
+    而不是首选下一步。诊断路径应该是：检查已有上下文 → （不足则）kubectl logs → （仍不足再）ClickHouse。
 17) 每个 action 必须同时满足以下三个条件才可执行（否则会被标记为 spec_blocked 导致整个计划阻断）：
     - command_spec.tool 必须是 generic_exec 或 kubectl_clickhouse_query
     - command_spec.args.target_kind 不能为空（k8s_cluster / clickhouse_cluster / runtime_node）
