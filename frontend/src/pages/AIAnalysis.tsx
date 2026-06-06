@@ -1978,6 +1978,7 @@ const AIAnalysis: React.FC = () => {
   const [activeRightTab, setActiveRightTab] = useState<'result' | 'kb' | 'actions' | 'executor'>('result');
   // 拖拽调整尺寸：输入卡片高度 & 右侧面板宽度
   const [inputPanelHeight, setInputPanelHeight] = useState<number>(320);
+  const [inputPanelCollapsed, setInputPanelCollapsed] = useState<boolean>(true);
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(320);
   const vDragStartY = useRef<number>(0);
   const vDragStartH = useRef<number>(0);
@@ -6282,10 +6283,14 @@ const AIAnalysis: React.FC = () => {
         {/* ── 中间工作区 ── */}
         <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
 
-          {/* 输入卡片（高度可拖拽）*/}
-          <div className="bg-white rounded-lg border border-gray-200 shadow-sm shrink-0 overflow-auto" style={{ height: `${inputPanelHeight}px` }}>
+          {/* 输入卡片（高度可拖拽，可折叠）*/}
+          <div
+            className={`bg-white rounded-lg border border-gray-200 shadow-sm shrink-0 overflow-auto ${inputPanelCollapsed ? 'input-panel-collapsed' : ''}`}
+            style={{ height: `${inputPanelHeight}px` }}
+            onClick={() => { if (inputPanelCollapsed) setInputPanelCollapsed(false); }}
+          >
             {/* 分析类型 tabs + LLM 开关 */}
-            <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-slate-50">
+            <div className={`flex items-center justify-between px-4 py-2 ${inputPanelCollapsed ? '' : 'border-b border-gray-100'} bg-slate-50 input-panel-tabs`}>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setAnalysisType('log')}
@@ -6321,6 +6326,14 @@ const AIAnalysis: React.FC = () => {
                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${useLLM ? 'translate-x-5' : 'translate-x-1'}`} />
                   </button>
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setInputPanelCollapsed(true)}
+                  className="ml-1 p-1 rounded hover:bg-slate-200 text-gray-400 hover:text-gray-600 transition-colors"
+                  title="折叠输入区"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 15l-6-6-6 6"/></svg>
+                </button>
               </div>
             </div>
 
