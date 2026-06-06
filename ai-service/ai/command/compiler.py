@@ -7,6 +7,7 @@ the toolbox-gateway sandbox provides clickhouse-client for SQL execution.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from ai.command.spec import CommandSpec, CompiledCommand, ToolType
@@ -89,6 +90,49 @@ def _resolve_clickhouse_target(namespace: str) -> str:
     return f"{target} -n {ns}"
 
 
+_KUBECTL_COMMON_VERBS = {
+    "get", "describe", "logs", "exec", "top", "rollout", "apply", "delete",
+    "patch", "edit", "replace", "scale", "set", "annotate", "label",
+    "create", "expose", "autoscale", "cordon", "uncordon", "drain", "taint",
+}
+
+
+def _repair_kubectl_verb_value_glue(command: str) -> str:
+    """Repair LLM-generated commands where a kubectl verb is concatenated
+    with its resource value (e.g. 'execthanos-ruler-ecms-0-nopenstack'
+    → 'exec thanos-ruler-ecms-0 -n openstack').
+
+    Works on raw command text level, inserting missing spaces between
+    a known kubectl verb and the resource identifier that follows, and
+    splitting -n<namespace> glue when -n is preceded by a non-letter.
+    """
+    lowered = command.lower()
+    # Pass 1: split verb-value concatenation
+    for verb in _KUBECTL_COMMON_VERBS:
+        pattern = re.compile(rf"(?i)(?<=\s){verb}(?=[a-z][-a-z0-9])")
+        m = pattern.search(lowered)
+        if m:
+            start = m.start()
+            end = m.end()
+            before = command[:start]
+            verb_text = command[start:end]
+            after = command[end:]
+            command = f"{before}{verb_text} {after}"
+            lowered = command.lower()
+            continue
+    # Pass 2: split -n<namespace> when preceded by non-letter
+    # e.g. "ecms-0-nopenstack" → "ecms-0 -n openstack"
+    # but NOT "pod-nginx" (preceded by letter)
+    command = re.sub(
+        r'(?i)(?<=[^a-zA-Z])-n([a-z][-a-z0-9.]*)(?=\s|$)',
+        r' -n \1',
+        command,
+    )
+    # Clean up double spaces
+    command = re.sub(r' {2,}', ' ', command).strip()
+    return command
+
+
 def compile_command(
     spec: CommandSpec,
     *,
@@ -133,6 +177,14 @@ def compile_command(
 
         # ── K8s commands → toolbox-gateway ─────────────────────────────
         if head in _K8S_COMMANDS:
+            # Repair verb-value concatenation: "kubectl execthanos-ruler-ecms-0"
+            # → "kubectl exec thanos-ruler-ecms-0" — handles LLM output where
+            # a kubectl verb is glued to its resource value (common in NL->cmd extraction).
+            repaired = _repair_kubectl_verb_value_glue(command)
+            if repaired != command:
+                command = repaired
+                # Re-extract head in case repair changed it (it shouldn't for kubectl)
+                head = _extract_head(command)
             return CompiledCommand(
                 spec=spec,
                 shell_command=command,
