@@ -922,6 +922,85 @@ const buildFollowUpThoughtFromStreamEvent = (
       iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
     };
   }
+  // ── Engine events: command execution lifecycle ──────────────────────
+  if (eventName === 'tool_call_started') {
+    const command = truncateFollowUpThoughtText(data.command, 100);
+    const route = String(data.route || '').trim();
+    const routeLabel = route ? ` [${route}]` : '';
+    return {
+      phase: 'action',
+      status: 'info',
+      title: command ? `执行${routeLabel}: ${command}` : '执行诊断命令',
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_finished') {
+    const exitCode = Number(data.exit_code);
+    const stdoutPreview = truncateFollowUpThoughtText(data.stdout, 200);
+    const stderrPreview = truncateFollowUpThoughtText(data.stderr, 120);
+    const durMs = Number(data.duration_ms);
+    const durLabel = Number.isFinite(durMs) ? ` (${durMs}ms)` : '';
+    const ok = exitCode === 0;
+    const detailParts: string[] = [];
+    if (stdoutPreview) detailParts.push(stdoutPreview);
+    if (stderrPreview) detailParts.push(`stderr: ${stderrPreview}`);
+    return {
+      phase: 'observation',
+      status: ok ? 'success' : 'warning',
+      title: ok
+        ? `命令完成${durLabel}`
+        : `命令失败 (exit=${exitCode})${durLabel}`,
+      detail: detailParts.join(' | ') || undefined,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_blocked') {
+    const command = truncateFollowUpThoughtText(data.command, 80);
+    const reason = String(data.reason || '安全策略拒绝').trim();
+    return {
+      phase: 'observation',
+      status: 'warning',
+      title: command ? `已阻止: ${command}` : '命令被安全策略阻止',
+      detail: reason,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_skipped_duplicate') {
+    const reason = String(data.reason || '已执行过').trim();
+    return {
+      phase: 'observation',
+      status: 'info',
+      title: `跳过重复命令`,
+      detail: reason,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_compile_failed') {
+    const command = truncateFollowUpThoughtText(data.command, 80);
+    return {
+      phase: 'observation',
+      status: 'error',
+      title: command ? `编译失败: ${command}` : '命令编译失败',
+      detail: `工具: ${String(data.tool || 'unknown')}`,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_normalize_failed') {
+    const reason = String(data.reason || '格式不合法').trim();
+    return {
+      phase: 'observation',
+      status: 'error',
+      title: `命令解析失败`,
+      detail: reason,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
   if (eventName === 'replan') {
     const reactLoop = asObject(data.react_loop);
     const replan = asObject(reactLoop.replan);
