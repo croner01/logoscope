@@ -43,7 +43,7 @@ You MUST output a JSON object wrapped in a ```json code fence. The system will E
 
 **Correct output (do this):**
 ```json
-{"actions":[{"tool":"clickhouse_query","command":"SELECT * FROM logs.events WHERE pod_name='thanos-ruler-ecms' AND level='ERROR' LIMIT 20","target_kind":"clickhouse_cluster","target_identity":"database:logs","purpose":"check error patterns around the YAML failure"}]}
+{"actions":[{"tool":"clickhouse_query","command":"SELECT service_name, pod_name, namespace, level, message FROM logs.logs WHERE pod_name='thanos-ruler-ecms' AND level='ERROR' ORDER BY timestamp DESC LIMIT 20","target_kind":"clickhouse_cluster","target_identity":"database:logs","purpose":"check error patterns around the YAML failure"}]}
 ```
 
 **WRONG output (NEVER do this):**
@@ -53,14 +53,29 @@ You MUST output a JSON object wrapped in a ```json code fence. The system will E
 - JSON objects without "command" or "tool" fields
 - Using single quotes: {'tool':'clickhouse_query'}  ← REJECTED
 - Trailing comma: {"actions":[{...},]}  ← REJECTED
+- Querying logs.events — use logs.logs for log data (different schema)
+
+## ClickHouse Schema
+
+Primary table: **logs.logs**
+Columns: timestamp, service_name, pod_name, namespace, node_name,
+         container_name, container_image, host_ip, host_name,
+         level, message, trace_id, span_id, labels, attributes_json
+
+(Do NOT use logs.events — it has a different schema without pod/namespace columns.)
 
 {known_target}
 
 **Core rules:**
 - The pod/namespace above are FACTS. Do NOT rediscover them.
-- Do NOT use `kubectl logs` — query logs through ClickHouse.
+- Do NOT use `kubectl logs` — query logs through ClickHouse (logs.logs).
 - Do NOT use `kubectl get pods -A` — you already know the target.
-- Start with clickhouse_query to explore logs. Only escalate to generic_exec if log evidence is insufficient.
+- ALWAYS query logs.logs (NOT logs.events) for log entries.
+
+## Decision Flow
+1. **Check existing context first.** The "Context" section below already contains related logs, trace data, and metadata. If the question can be answered from this data, output your analysis WITHOUT querying ClickHouse or running commands.
+2. **Query ClickHouse (clickhouse_query) ONLY when the existing context is insufficient** — e.g. you need more time range, related services, or patterns across multiple pods.
+3. **Run pod commands (generic_exec) ONLY when you need filesystem evidence** that logs cannot provide — e.g. checking config files, process state, disk usage.
 
 ## Tools
 {tool_schema}
@@ -71,8 +86,8 @@ You MUST output a JSON object wrapped in a ```json code fence. The system will E
 ## Rules
 1. Output ONLY a JSON object with an "actions" array. No analysis text.
 2. Each action MUST have: tool, command, purpose. Include target_kind and target_identity.
-3. clickhouse_query FIRST — search logs with known pod_name/namespace/service_name.
-4. generic_exec ONLY when logs insufficient — use exact pod/namespace from known target.
+3. If existing context answers the question → output empty actions array: {"actions":[]}
+4. If more data needed → use clickhouse_query for logs, generic_exec for pod inspection.
 5. NEVER run kubectl get pods -A, kubectl get pods -l, or kubectl logs.
 6. Check the journal above — do not repeat already-executed commands.
 7. If the question is about config/setup (not runtime errors), use generic_exec to check the config file.
@@ -91,7 +106,7 @@ You MUST output a JSON object wrapped in a ```json code fence. The system will E
 {observations}
 {replan_hint}
 
-**Your response MUST be a ```json fenced JSON object with an "actions" array. Each action requires: tool, command, purpose. Include target_kind and target_identity. NO analysis text — only the fenced JSON. Double quotes only. No trailing commas.**"""
+**If existing context is sufficient, output {"actions":[]} to signal no further commands needed. If more data is required, output a JSON object with an "actions" array. Each action: tool, command, purpose, target_kind, target_identity. NO analysis text — only the fenced JSON.**"""
 
     REPLAN_HINT = """## ⚠️ Replan Required
 Previous actions did not resolve all evidence gaps. Review the observations above
