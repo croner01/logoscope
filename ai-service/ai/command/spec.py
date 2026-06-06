@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 class ToolType(str, Enum):
     GENERIC_EXEC = "generic_exec"
     CLICKHOUSE_QUERY = "clickhouse_query"
+    WEB_SEARCH = "web_search"
 
 
 class RiskLevel(str, Enum):

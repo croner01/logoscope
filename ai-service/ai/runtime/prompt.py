@@ -75,7 +75,8 @@ Columns: timestamp, service_name, pod_name, namespace, node_name,
 ## Decision Flow
 1. **Check existing context first.** The "Context" section below already contains related logs, trace data, and metadata. If the question can be answered from this data, output your analysis WITHOUT querying ClickHouse or running commands.
 2. **Query ClickHouse (clickhouse_query) ONLY when the existing context is insufficient** — e.g. you need more time range, related services, or patterns across multiple pods.
-3. **Run pod commands (generic_exec) ONLY when you need filesystem evidence** that logs cannot provide — e.g. checking config files, process state, disk usage.
+3. **Search the web (web_search) when you need external knowledge** — e.g. looking up unknown error messages, finding known issues or solutions for specific software versions, searching for similar cases. Use error message keywords or "software version + symptom" as the search query.
+4. **Run pod commands (generic_exec) ONLY when you need filesystem evidence** that logs cannot provide — e.g. checking config files, process state, disk usage.
 
 ## Tools
 {tool_schema}
@@ -87,7 +88,7 @@ Columns: timestamp, service_name, pod_name, namespace, node_name,
 1. Output ONLY a JSON object with an "actions" array. No analysis text.
 2. Each action MUST have: tool, command, purpose. Include target_kind and target_identity.
 3. If existing context answers the question → output empty actions array: {"actions":[]}
-4. If more data needed → use clickhouse_query for logs, generic_exec for pod inspection.
+4. If more data needed → use clickhouse_query for logs, generic_exec for pod inspection, web_search for external knowledge.
 5. NEVER run kubectl get pods -A, kubectl get pods -l, or kubectl logs.
 6. Check the journal above — do not repeat already-executed commands.
 7. If the question is about config/setup (not runtime errors), use generic_exec to check the config file.
@@ -150,8 +151,8 @@ Do NOT repeat commands that have already been executed."""
             "name": "diagnostic_actions",
             "description": (
                 "A JSON object with an 'actions' array of diagnostic commands. "
-                "Use clickhouse_query FIRST to search logs. "
-                "Use generic_exec ONLY for pod-level system checks (ps, df, cat, ss)."
+                "Use clickhouse_query to search logs. Use generic_exec for pod-level "
+                "system checks. Use web_search for known errors, solutions, or case studies."
             ),
             "schema": {
                 "type": "object",
@@ -164,20 +165,20 @@ Do NOT repeat commands that have already been executed."""
                             "properties": {
                                 "tool": {
                                     "type": "string",
-                                    "enum": ["clickhouse_query", "generic_exec"],
-                                    "description": "clickhouse_query=search logs in ClickHouse, generic_exec=run shell command on pod"
+                                    "enum": ["clickhouse_query", "generic_exec", "web_search"],
+                                    "description": "clickhouse_query=search logs in ClickHouse, generic_exec=run shell command on pod, web_search=search internet for solutions/cases"
                                 },
                                 "command": {
                                     "type": "string",
-                                    "description": "SQL query (for clickhouse_query) or shell command (for generic_exec)"
+                                    "description": "SQL query (for clickhouse_query), shell command (for generic_exec), or search keywords (for web_search)"
                                 },
                                 "target_kind": {
                                     "type": "string",
-                                    "description": "clickhouse_cluster or k8s_cluster"
+                                    "description": "clickhouse_cluster or k8s_cluster (omit for web_search)"
                                 },
                                 "target_identity": {
                                     "type": "string",
-                                    "description": "database:logs or pod:<name>/namespace:<ns>"
+                                    "description": "database:logs or pod:<name>/namespace:<ns> (omit for web_search)"
                                 },
                                 "purpose": {
                                     "type": "string",

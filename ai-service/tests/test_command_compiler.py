@@ -57,7 +57,8 @@ class TestCompileCommand:
         assert "--query" in compiled.shell_command
         assert "SELECT" in compiled.shell_command
 
-    def test_clickhouse_query_escapes_single_quotes(self):
+    def test_clickhouse_query_uses_double_quotes_for_sql(self):
+        """SQL wrapped in double quotes to survive shlex.quote() round-trip."""
         spec = CommandSpec(
             tool=ToolType.CLICKHOUSE_QUERY,
             command="SELECT * FROM logs.events WHERE service_name='api'",
@@ -65,11 +66,10 @@ class TestCompileCommand:
             purpose="query with quotes",
         )
         compiled = compile_command(spec)
-        # The query value 'api' is preserved; single quotes are shell-escaped;
-        # wrapped with kubectl exec for exec-service compatibility
-        assert "service_name=" in compiled.shell_command
+        # SQL in double quotes; single quotes inside are preserved
+        assert '--query "' in compiled.shell_command
+        assert "service_name='api'" in compiled.shell_command
         assert "kubectl exec" in compiled.shell_command
-        assert "clickhouse-client --query" in compiled.shell_command
 
     def test_rejects_blocked_operators_in_generic_exec(self):
         spec = CommandSpec(

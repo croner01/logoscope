@@ -107,8 +107,9 @@ def evaluate_command(
         return SecurityDecision(allowed=False, reason="Empty command")
 
     # ClickHouse queries: SQL text, not shell commands — skip head check
-    if spec.tool == ToolType.CLICKHOUSE_QUERY:
-        # SQL is validated by the ClickHouse client, not by shell allowlist
+    # Web search: search keywords, not shell commands — skip head check
+    if spec.tool in (ToolType.CLICKHOUSE_QUERY, ToolType.WEB_SEARCH):
+        # SQL / search text is validated by the target, not by shell allowlist
         pass
     else:
         head = _extract_head(command)
@@ -121,7 +122,7 @@ def evaluate_command(
     # Check blocked operators.  | and && are allowed for diagnostic chaining.
     # Exact-token match for standalone operators; substring check for ; which
     # often appears attached to the preceding token (cmd1;cmd2).
-    if spec.tool != ToolType.CLICKHOUSE_QUERY:
+    if spec.tool not in (ToolType.CLICKHOUSE_QUERY, ToolType.WEB_SEARCH):
         tokens = command.split()
         for token in tokens:
             if token in BLOCKED_OPERATORS:

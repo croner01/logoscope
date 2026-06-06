@@ -69,8 +69,13 @@ def _parse_target_identity(target_identity: str) -> tuple[str, str]:
 
 
 def _escape_clickhouse_query(query: str) -> str:
-    """Escape single quotes in a ClickHouse query for use with clickhouse-client --query."""
-    return query.replace("'", "'\"'\"'")
+    """Escape a ClickHouse SQL query for use as a --query argument.
+
+    Uses double quotes to avoid single-quote escaping conflicts when
+    exec-service applies shlex.quote() to the outer kubectl exec command.
+    Only double quotes and backslashes in the SQL need escaping.
+    """
+    return query.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _resolve_clickhouse_target(namespace: str) -> str:
@@ -173,6 +178,16 @@ def compile_command(
             executor_profile="toolbox-k8s-readonly",
         )
 
+    if spec.tool == ToolType.WEB_SEARCH:
+        # Web search doesn't produce a shell command — the engine calls
+        # ToolAdapter.web_search() directly with the search query text.
+        return CompiledCommand(
+            spec=spec,
+            shell_command=command,  # the search query
+            route="web",
+            executor_profile="web-search",
+        )
+
     if spec.tool == ToolType.CLICKHOUSE_QUERY:
         # Wrap ClickHouse queries with kubectl exec so exec-service classifies
         # them as kubectl exec → toolbox-k8s-readonly → confirmation_required
@@ -180,7 +195,7 @@ def compile_command(
         # The toolbox-gateway sandbox has both kubectl and clickhouse-client.
         escaped = _escape_clickhouse_query(command)
         target = _resolve_clickhouse_target(namespace)
-        shell = f"kubectl exec {target} -- clickhouse-client --query '{escaped}'"
+        shell = f'kubectl exec {target} -- clickhouse-client --query "{escaped}"'
         return CompiledCommand(
             spec=spec,
             shell_command=shell,

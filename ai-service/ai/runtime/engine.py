@@ -265,6 +265,53 @@ async def run_diagnosis(
                         )
                     continue
 
+            # Web search — special path (no shell command, no exec-service)
+            if action.command_spec.tool == ToolType.WEB_SEARCH:
+                query = _as_str(action.command_spec.command).strip()
+                if logger:
+                    logger.info(
+                        "engine: session=%s action=%s web_search query=%s",
+                        state.run_id, action.action_id, query[:120],
+                    )
+                await event_emitter.emit(state.run_id, "tool_call_started", {
+                    "action_id": action.action_id,
+                    "command": f"web_search: {query[:100]}",
+                    "route": "web",
+                })
+                result = await tools.web_search(query)
+                await event_emitter.emit(state.run_id, "tool_call_finished", {
+                    "action_id": action.action_id,
+                    "status": result.status,
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout[:2000],
+                    "duration_ms": result.duration_ms,
+                })
+                if logger:
+                    logger.info(
+                        "engine: session=%s action=%s web_search status=%s dur=%dms results=%s",
+                        state.run_id, action.action_id,
+                        result.status, result.duration_ms,
+                        result.stdout[:120] if result.exit_code == 0 else result.stderr[:120],
+                    )
+                obs = Observation(
+                    action_id=action.action_id,
+                    status=result.status,
+                    exit_code=result.exit_code,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    duration_ms=result.duration_ms,
+                    channel=result.channel,
+                )
+                state.add_observation(action, obs)
+                memory.record(
+                    action.command_spec,
+                    exit_code=result.exit_code,
+                    summary=result.stdout[:120] if result.exit_code == 0 else f"failed: {result.stderr[:120]}",
+                    output_preview=result.stdout[:2000],
+                )
+                state.cost.commands_executed += 1
+                continue
+
             # Compile
             compiled = compile_command(action.command_spec)
             if not compiled.shell_command:

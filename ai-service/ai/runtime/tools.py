@@ -157,4 +157,48 @@ class ToolAdapter:
             )
 
 
+    async def web_search(self, query: str, max_results: int = 5) -> ToolResult:
+        """Search the web for diagnostic information (free, no API key).
+
+        Uses DuckDuckGo via the ddgs library.  Controlled by the
+        AI_FOLLOWUP_WEB_SEARCH_ENABLED env var.
+        """
+        started = time.monotonic()
+        enabled = _as_str(os.getenv("AI_FOLLOWUP_WEB_SEARCH_ENABLED"), "false").lower() == "true"
+        if not enabled:
+            return ToolResult(
+                success=False, status="disabled",
+                stderr="web search is disabled (AI_FOLLOWUP_WEB_SEARCH_ENABLED=false)",
+                channel="web",
+            )
+        try:
+            from ddgs import DDGS
+            results = await asyncio.to_thread(
+                lambda: list(DDGS().text(query, max_results=max(1, min(max_results, 10)))),
+            )
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if not results:
+                return ToolResult(
+                    success=True, status="completed", exit_code=0,
+                    stdout="(no results found)", duration_ms=duration_ms, channel="web",
+                )
+            lines = []
+            for r in results:
+                lines.append(f"**{_as_str(r.get('title', ''))}**")
+                lines.append(f"  URL: {_as_str(r.get('href', ''))}")
+                lines.append(f"  {_as_str(r.get('body', ''))[:300]}")
+                lines.append("")
+            return ToolResult(
+                success=True, status="completed", exit_code=0,
+                stdout="\n".join(lines)[:8000],
+                duration_ms=duration_ms, channel="web",
+            )
+        except Exception as e:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return ToolResult(
+                success=False, status="failed", exit_code=1,
+                error=_as_str(e), duration_ms=duration_ms, channel="web",
+            )
+
+
 __all__ = ["ToolAdapter", "ToolResult"]
