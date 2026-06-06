@@ -514,6 +514,15 @@ def _build_followup_subgoals(
     trace_id = _as_str(analysis_context.get("trace_id"))
     request_id = _as_str(analysis_context.get("request_id"))
 
+    # Check if any commands have actually been executed.  Without this, a
+    # subgoal backed only by NL-derived root_causes/solutions would be marked
+    # "completed", producing empty evidence_gaps and causing the diagnosis
+    # loop to exit before executing a single command.
+    _exec_cmds = _as_list(analysis_context.get("_runtime_executed_commands"))
+    _has_executed_commands = any(
+        _normalize_followup_command_line(cmd) for cmd in _exec_cmds
+    )
+
     data_flow = (
         result_dict.get("dataFlow")
         if result_dict.get("dataFlow") is not None
@@ -620,9 +629,12 @@ def _build_followup_subgoals(
         )
 
     if need_root:
-        if root_causes:
+        if root_causes and _has_executed_commands:
             status = "completed"
-            reason = "已有根因候选可直接展开"
+            reason = "已有根因候选且已验证"
+        elif root_causes:
+            status = "in_progress"
+            reason = "已有根因候选，但来自初始日志分析，需执行命令验证"
         elif evidence_count >= 2 or related_log_count > 0:
             status = "in_progress"
             reason = "已有日志片段与分析摘要，可推导根因但置信度一般"
@@ -654,9 +666,12 @@ def _build_followup_subgoals(
         )
 
     if need_fix:
-        if solutions:
+        if solutions and _has_executed_commands:
             status = "completed"
-            reason = "已有可执行方案，可直接给出优先级和步骤"
+            reason = "已有可执行方案且已验证"
+        elif solutions:
+            status = "in_progress"
+            reason = "已有候选方案，但未经命令验证，需补充证据后再给出优先级"
         elif root_causes or evidence_count >= 2:
             status = "in_progress"
             reason = "可先给止血方案，但中长期优化仍需更多证据"
