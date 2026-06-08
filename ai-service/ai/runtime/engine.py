@@ -301,6 +301,7 @@ async def run_diagnosis(
                     stderr=result.stderr,
                     duration_ms=result.duration_ms,
                     channel=result.channel,
+                    command=action.command_spec.command,
                 )
                 state.add_observation(action, obs)
                 memory.record(
@@ -376,6 +377,7 @@ async def run_diagnosis(
                 stderr=result.stderr,
                 duration_ms=result.duration_ms,
                 channel=result.channel,
+                command=action.command_spec.command,
             )
             state.add_observation(action, obs)
             memory.record(

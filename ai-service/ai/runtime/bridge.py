@@ -428,6 +428,8 @@ async def unified_diagnosis_bridge(
             "stderr": obs.stderr,
             "duration_ms": obs.duration_ms,
             "channel": obs.channel,
+            "command": obs.command or "",
+            "command_type": "query",
         })
 
     return {

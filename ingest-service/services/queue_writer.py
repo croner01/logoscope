@@ -444,8 +444,14 @@ def transform_single_otlp_log(resource_dict: dict, log_record: dict, metadata: D
     except (TypeError, ValueError):
         normalized_flags = 0
 
-    # 提取 source_cluster（由 fluent-bit-relay 的 modify filter 注入 OTLP attributes）
-    source_cluster = str(log_attrs_dict.get("relay_name", "") or resource_dict.get("relay_name", "") or "").strip()
+    # 提取 source_cluster（由 OTel gateway 的 attributes processor 注入 / fluent-bit-relay 旧方案）
+    source_cluster = str(
+        log_attrs_dict.get("source_cluster", "")
+        or resource_dict.get("source_cluster", "")
+        or log_attrs_dict.get("relay_name", "")
+        or resource_dict.get("relay_name", "")
+        or ""
+    ).strip()
 
     trace_id_source = "otlp" if trace_id else "missing"
     log_attrs_dict.setdefault("trace_id_source", trace_id_source)
@@ -513,13 +519,16 @@ def transform_fluent_bit_json(payload_dict: dict, metadata: Dict[str, Any]) -> D
     container_image = None
     k8s_labels = {}
 
-    # 提取 source_cluster（由 fluent-bit-relay 的 modify filter 注入）
+    # 提取 source_cluster（由 OTel gateway 注入 / fluent-bit-relay 旧方案）
     source_cluster = ""
-    relay_name_val = payload_dict.get("relay_name", "")
-    if not relay_name_val:
-        relay_name_val = payload_dict.get("attributes", {}).get("relay_name", "")
-    if relay_name_val and isinstance(relay_name_val, str):
-        source_cluster = relay_name_val.strip()
+    cluster_val = (
+        payload_dict.get("source_cluster", "")
+        or payload_dict.get("relay_name", "")
+        or payload_dict.get("attributes", {}).get("source_cluster", "")
+        or payload_dict.get("attributes", {}).get("relay_name", "")
+    )
+    if cluster_val and isinstance(cluster_val, str):
+        source_cluster = cluster_val.strip()
 
     # 从 attributes 提取
     attrs = payload_dict.get("attributes", {})

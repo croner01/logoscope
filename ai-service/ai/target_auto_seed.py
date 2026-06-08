@@ -4,14 +4,19 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-import clickhouse_connect
 import requests
+from clickhouse_driver import Client as ClickHouseClient
 
 logger = logging.getLogger(__name__)
 
 
 def _as_str(value: Any, default: str = "") -> str:
     return str(value) if isinstance(value, str) else default
+
+
+def get_ch_client(host: str = "localhost", port: int = 9000) -> ClickHouseClient:
+    """Create a ClickHouse native protocol client."""
+    return ClickHouseClient(host=host, port=port)
 
 
 def discover_new_clusters(ch_client) -> List[Dict[str, Any]]:
@@ -25,19 +30,19 @@ def discover_new_clusters(ch_client) -> List[Dict[str, Any]]:
         List of target dicts ready for registration via register_target().
     """
     # Get all distinct source_cluster values seen in logs
-    rows = ch_client.query("""
+    rows = ch_client.execute("""
         SELECT source_cluster, namespace, count() as cnt
         FROM logs.logs
         WHERE source_cluster != ''
         GROUP BY source_cluster, namespace
         ORDER BY cnt DESC
-    """).result_rows
+    """)
 
     # Get existing target identities from ClickHouse target table
-    existing = ch_client.query("""
+    existing = ch_client.execute("""
         SELECT target_identity FROM logs.ai_runtime_v4_targets
         WHERE target_kind = 'k8s_cluster'
-    """).result_rows
+    """)
     existing_set = {row[0] for row in existing}
 
     new_targets = []
@@ -71,15 +76,6 @@ def discover_new_clusters(ch_client) -> List[Dict[str, Any]]:
 
 
 def register_target(ai_service_url: str, target: Dict[str, Any]) -> bool:
-    """Register a new target via AI Service API.
-
-    Args:
-        ai_service_url: Base URL of the AI service (e.g. http://ai-service:8090)
-        target: Target dict from discover_new_clusters().
-
-    Returns:
-        True if registration succeeded (200/201), False otherwise.
-    """
     url = f"{ai_service_url.rstrip('/')}/api/v2/targets"
     try:
         r = requests.post(url, json=target, timeout=10)
@@ -98,14 +94,11 @@ def register_target(ai_service_url: str, target: Dict[str, Any]) -> bool:
 
 def run_auto_seed(
     ch_host: str = "localhost",
-    ch_port: int = 8123,
+    ch_port: int = 9000,
     ai_service_url: str = "http://localhost:8090",
 ) -> int:
-    """Run auto-seed once. Returns number of new targets registered.
-
-    Intended to be called as a periodic task (cron every 5 min).
-    """
-    client = clickhouse_connect.get_client(host=ch_host, port=ch_port)
+    """Run auto-seed once. Returns number of new targets registered."""
+    client = get_ch_client(host=ch_host, port=ch_port)
     new_targets = discover_new_clusters(client)
     registered = 0
     for target in new_targets:

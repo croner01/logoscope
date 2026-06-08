@@ -341,11 +341,19 @@ func transformSingleOTLPLog(resource map[string]any, logRecord map[string]any, m
 	}
 	logAttrs["trace_id_source"] = traceIDSource
 
+	sourceCluster := firstNonEmpty(
+		asString(logAttrs["source_cluster"]),
+		asString(logAttrs["relay_name"]),
+		asString(resource["source_cluster"]),
+		asString(resource["relay_name"]),
+	)
+
 	return map[string]any{
 		"log":             normalizedMessage,
 		"timestamp":       asString(logRecord["timeUnixNano"]),
 		"severity":        asString(logRecord["severityText"]),
 		"service.name":    serviceName,
+		"source_cluster":  sourceCluster,
 		"trace_id":        traceID,
 		"span_id":         spanID,
 		"flags":           flags,
@@ -464,12 +472,20 @@ func transformFluentBitJSON(payload map[string]any, metadata map[string]any) map
 	attributesPayload := payload
 	attributesPayload["log_meta"] = logMeta
 
+	sourceCluster := firstNonEmpty(
+		asString(payload["source_cluster"]),
+		asString(attrs["source_cluster"]),
+		asString(payload["relay_name"]),
+		asString(attrs["relay_name"]),
+	)
+
 	return map[string]any{
-		"log":          normalizedMessage,
-		"timestamp":    asString(payload["timestamp"]),
-		"severity":     firstNonEmpty(asString(payload["severity"]), asString(payload["level"])),
-		"service.name": serviceName,
-		"attributes":   attributesPayload,
+		"log":             normalizedMessage,
+		"timestamp":       asString(payload["timestamp"]),
+		"severity":        firstNonEmpty(asString(payload["severity"]), asString(payload["level"])),
+		"service.name":    serviceName,
+		"source_cluster":  sourceCluster,
+		"attributes":      attributesPayload,
 		"resource":     map[string]any{},
 		"kubernetes": map[string]any{
 			"pod":             podName,

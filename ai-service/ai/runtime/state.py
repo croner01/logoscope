@@ -25,6 +25,7 @@ class Observation:
     stderr: str = ""
     duration_ms: int = 0
     channel: str = ""
+    command: str = ""
 
 
 @dataclass
