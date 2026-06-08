@@ -37,6 +37,7 @@ class CommandSpec(BaseModel):
     command: str = ""
     target_kind: str = ""
     target_identity: str = ""
+    target_cluster_id: str = ""
     purpose: str = ""
     risk_level: RiskLevel = RiskLevel.LOW
     command_type: CommandType = CommandType.QUERY
