@@ -227,8 +227,10 @@ def _normalize_optional_int(value: Optional[Any], minimum: int, maximum: int) ->
 
 
 def _normalize_request_key_fields(
+    *,
     time_window: str,
     namespace: Optional[str] = None,
+    source_cluster: Optional[str] = None,
     confidence_threshold: float = 0.3,
     inference_mode: Optional[str] = None,
     message_target_enabled: Optional[Any] = None,
@@ -246,6 +248,7 @@ def _normalize_request_key_fields(
     return {
         "time_window": normalized_time_window,
         "namespace": _normalize_namespace(namespace),
+        "source_cluster": source_cluster,
         "confidence_threshold": normalized_confidence,
         "inference_mode": _normalize_inference_mode_for_key(inference_mode),
         "message_target_enabled": _normalize_message_target_enabled(message_target_enabled),
@@ -283,6 +286,7 @@ async def build_hybrid_topology_coalesced(
     *,
     time_window: str,
     namespace: Optional[str] = None,
+    source_cluster: Optional[str] = None,
     confidence_threshold: float = 0.3,
     inference_mode: Optional[str] = None,
     message_target_enabled: Optional[Any] = None,
@@ -296,6 +300,7 @@ async def build_hybrid_topology_coalesced(
     normalized_key_fields = _normalize_request_key_fields(
         time_window=time_window,
         namespace=namespace,
+        source_cluster=source_cluster,
         confidence_threshold=confidence_threshold,
         inference_mode=inference_mode,
         message_target_enabled=message_target_enabled,
@@ -306,6 +311,7 @@ async def build_hybrid_topology_coalesced(
     build_kwargs = {
         "time_window": time_window,
         "namespace": namespace,
+        "source_cluster": source_cluster,
         "confidence_threshold": confidence_threshold,
         "inference_mode": inference_mode,
         "message_target_enabled": message_target_enabled,

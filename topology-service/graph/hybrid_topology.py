@@ -154,6 +154,8 @@ class HybridTopologyBuilder:
         self.inference_scorer = InferenceScorer()
         self._metrics_namespace_column_exists_cache: Optional[bool] = None
         self._traces_namespace_column_exists_cache: Optional[bool] = None
+        self._traces_source_cluster_exists_cache: Optional[bool] = None
+        self._metrics_source_cluster_exists_cache: Optional[bool] = None
 
     @staticmethod
     def _parse_env_bool(name: str, default: bool) -> bool:
@@ -263,6 +265,38 @@ class HybridTopologyBuilder:
         except Exception:
             exists = False
         self._traces_namespace_column_exists_cache = exists
+        return exists
+
+    def _has_traces_source_cluster_column(self) -> bool:
+        """Detect if logs.traces has source_cluster column."""
+        cached = self._traces_source_cluster_exists_cache
+        if cached is not None:
+            return cached
+        try:
+            rows = self.storage.execute_query("""
+                SELECT name FROM system.columns
+                WHERE database = 'logs' AND table = 'traces' AND name = 'source_cluster'
+            """)
+            exists = len(rows) > 0
+        except Exception:
+            exists = False
+        self._traces_source_cluster_exists_cache = exists
+        return exists
+
+    def _has_metrics_source_cluster_column(self) -> bool:
+        """Detect if logs.metrics has source_cluster column."""
+        cached = self._metrics_source_cluster_exists_cache
+        if cached is not None:
+            return cached
+        try:
+            rows = self.storage.execute_query("""
+                SELECT name FROM system.columns
+                WHERE database = 'logs' AND table = 'metrics' AND name = 'source_cluster'
+            """)
+            exists = len(rows) > 0
+        except Exception:
+            exists = False
+        self._metrics_source_cluster_exists_cache = exists
         return exists
 
     @staticmethod
@@ -474,6 +508,7 @@ class HybridTopologyBuilder:
         self,
         time_window: str = "1 HOUR",
         namespace: str = None,
+        source_cluster: str = None,
         confidence_threshold: float = 0.3,
         inference_mode: Optional[str] = None,
         message_target_enabled: Optional[bool] = None,
@@ -511,7 +546,7 @@ class HybridTopologyBuilder:
 
             # 1. 从三个数据源收集数据
             try:
-                traces_data = self._get_traces_topology(safe_time_window, namespace)
+                traces_data = self._get_traces_topology(safe_time_window, namespace, source_cluster=source_cluster)
             except Exception:
                 logger.exception("Error in _get_traces_topology")
                 traces_data = {"nodes": [], "edges": []}
@@ -520,6 +555,7 @@ class HybridTopologyBuilder:
                 logs_data = self._get_logs_topology(
                     time_window=safe_time_window,
                     namespace=namespace,
+                    source_cluster=source_cluster,
                     inference_mode=inference_mode,
                     message_target_enabled=message_target_enabled,
                     message_target_patterns=message_target_patterns,
@@ -531,7 +567,7 @@ class HybridTopologyBuilder:
                 logs_data = {"nodes": [], "edges": []}
 
             try:
-                metrics_data = self._get_metrics_topology(safe_time_window, namespace)
+                metrics_data = self._get_metrics_topology(safe_time_window, namespace, source_cluster=source_cluster)
             except Exception:
                 logger.exception("Error in _get_metrics_topology")
                 metrics_data = {"nodes": [], "edges": []}
@@ -547,7 +583,7 @@ class HybridTopologyBuilder:
                 logger.warning(f"No data found in {safe_time_window}, expanding to 24 HOUR")
                 safe_time_window = "24 HOUR"
                 try:
-                    traces_data = self._get_traces_topology(safe_time_window, namespace)
+                    traces_data = self._get_traces_topology(safe_time_window, namespace, source_cluster=source_cluster)
                 except Exception as e:
                     logger.error(f"Error in _get_traces_topology (24H): {e}")
                     traces_data = {"nodes": [], "edges": []}
@@ -556,6 +592,7 @@ class HybridTopologyBuilder:
                     logs_data = self._get_logs_topology(
                         time_window=safe_time_window,
                         namespace=namespace,
+                        source_cluster=source_cluster,
                         inference_mode=inference_mode,
                         message_target_enabled=message_target_enabled,
                         message_target_patterns=message_target_patterns,
@@ -567,7 +604,7 @@ class HybridTopologyBuilder:
                     logs_data = {"nodes": [], "edges": []}
 
                 try:
-                    metrics_data = self._get_metrics_topology(safe_time_window, namespace)
+                    metrics_data = self._get_metrics_topology(safe_time_window, namespace, source_cluster=source_cluster)
                 except Exception as e:
                     logger.error(f"Error in _get_metrics_topology (24H): {e}")
                     metrics_data = {"nodes": [], "edges": []}
@@ -779,7 +816,8 @@ class HybridTopologyBuilder:
     def _get_traces_topology(
         self,
         time_window: str,
-        namespace: str = None
+        namespace: str = None,
+        source_cluster: str = None
     ) -> Dict[str, Any]:
         """
         从 traces 表获取精确的调用关系
@@ -795,6 +833,7 @@ class HybridTopologyBuilder:
             if not self.storage.ch_client:
                 return {"nodes": [], "edges": []}
             safe_namespace = self._escape_sql_literal(namespace) if namespace else None
+            safe_source_cluster = self._escape_sql_literal(source_cluster) if source_cluster else None
 
             has_traces_namespace_column = self._has_traces_namespace_column()
             namespace_expr = (
@@ -827,6 +866,8 @@ class HybridTopologyBuilder:
                 else:
                     where_clause = f"WHERE {namespace_expr} = '{safe_namespace}'"
                 span_namespace_select_expr = f"'{safe_namespace}'"
+            if source_cluster and self._has_traces_source_cluster_column():
+                prewhere_conditions.append(f"source_cluster = '{safe_source_cluster}'")
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
             window_minutes = self._interval_to_minutes(safe_time_window, default_minutes=60)
             trace_scan_limit = int(self.TRACES_SCAN_LIMIT)
@@ -1221,6 +1262,7 @@ class HybridTopologyBuilder:
         self,
         time_window: str,
         namespace: str = None,
+        source_cluster: str = None,
         inference_mode: Optional[str] = None,
         message_target_enabled: Optional[bool] = None,
         message_target_patterns: Optional[Any] = None,
@@ -1245,6 +1287,9 @@ class HybridTopologyBuilder:
             prewhere_conditions = [f"timestamp > now() - INTERVAL {safe_time_window}"]
             if namespace:
                 prewhere_conditions.append(f"namespace = '{self._escape_sql_literal(namespace)}'")
+            if source_cluster:
+                safe_source_cluster = self._escape_sql_literal(source_cluster)
+                prewhere_conditions.append(f"source_cluster = '{safe_source_cluster}'")
             prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
 
             query = f"""
@@ -1451,7 +1496,8 @@ class HybridTopologyBuilder:
     def _get_metrics_topology(
         self,
         time_window: str,
-        namespace: str = None
+        namespace: str = None,
+        source_cluster: str = None
     ) -> Dict[str, Any]:
         """
         从 metrics 表获取服务关系验证
@@ -1482,7 +1528,11 @@ class HybridTopologyBuilder:
             )
 
             # 查询服务列表
-            prewhere_clause = f"PREWHERE timestamp > now() - INTERVAL {safe_time_window}"
+            prewhere_conditions = [f"timestamp > now() - INTERVAL {safe_time_window}"]
+            if source_cluster and self._has_metrics_source_cluster_column():
+                safe_cluster = self._escape_sql_literal(source_cluster)
+                prewhere_conditions.append(f"source_cluster = '{safe_cluster}'")
+            prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
             where_clause = ""
             if namespace:
                 escaped_namespace = str(namespace).replace("'", "''")
@@ -1567,6 +1617,7 @@ class HybridTopologyBuilder:
         self,
         time_window: str,
         namespace: str = None,
+        source_cluster: str = None,
         inference_mode: Optional[str] = None,
         message_target_enabled: Optional[bool] = None,
         message_target_patterns: Optional[Any] = None,
@@ -1625,6 +1676,9 @@ class HybridTopologyBuilder:
         ]
         if namespace:
             prewhere_conditions.append(f"namespace = '{self._escape_sql_literal(namespace)}'")
+        if source_cluster:
+            safe_source_cluster = self._escape_sql_literal(source_cluster)
+            prewhere_conditions.append(f"source_cluster = '{safe_source_cluster}'")
         prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
 
         query = f"""

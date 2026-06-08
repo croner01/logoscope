@@ -48,6 +48,7 @@ class FakeHybridBuilder:
         self,
         time_window: str,
         namespace: str = None,
+        source_cluster: str = None,
         confidence_threshold: float = 0.3,
         inference_mode: str = None,
         message_target_enabled: bool = None,
@@ -130,6 +131,7 @@ class FakeEnhancedBuilder:
         self,
         time_window: str,
         namespace: str = None,
+        source_cluster: str = None,
         confidence_threshold: float = 0.3,
     ) -> Dict[str, Any]:
         _ = (time_window, namespace, confidence_threshold)
