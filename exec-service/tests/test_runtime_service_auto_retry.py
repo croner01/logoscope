@@ -154,6 +154,7 @@ def test_runtime_passes_resolved_target_context_to_dispatch(monkeypatch):
         executor_profile: str,
         target_kind: str,
         target_identity: str,
+        target_cluster_id: str = "",
         resolved_target_context=None,
         timeout_seconds: int,
         on_output=None,

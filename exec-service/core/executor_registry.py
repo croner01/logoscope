@@ -348,6 +348,7 @@ def resolve_executor(
     executor_profile: str,
     target_kind: str,
     target_identity: str,
+    target_cluster_id: str = "",
     resolved_target_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     raw_executor_type = as_str(executor_type, "local_process")
@@ -363,7 +364,19 @@ def resolve_executor(
         safe_target_kind = as_str(scope.get("target_kind"))
     if as_str(scope.get("target_identity")).strip():
         safe_target_identity = as_str(scope.get("target_identity"))
-    target_cluster_id = as_str(scope.get("cluster_id"))
+
+    # ── Routing priority: target_cluster_id parameter > resolved_target_context > fallback ──
+    if target_cluster_id:
+        # Priority 1: Explicit cluster_id from CommandSpec (highest precedence)
+        resolved_cluster_id = target_cluster_id
+    elif as_str(scope.get("cluster_id")):
+        # Priority 2: From resolved_target_context.execution_scope or metadata
+        resolved_cluster_id = as_str(scope.get("cluster_id"))
+    else:
+        # Priority 3: Default to local cluster (backward compatible)
+        resolved_cluster_id = "cluster-local"
+    # Override scope cluster_id with resolved value for template context
+    target_cluster_id = resolved_cluster_id
     target_namespace = as_str(scope.get("namespace"))
     target_node_name = as_str(scope.get("node_name"))
     safe_executor_profile = _select_effective_profile(
