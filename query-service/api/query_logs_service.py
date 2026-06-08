@@ -601,7 +601,8 @@ _LOGS_LIGHT_FIELDS = """
         labels,
         JSONExtractRaw(attributes_json, 'log_meta') AS log_meta,
         attributes_json,
-        host_ip
+        host_ip,
+        source_cluster
 """
 
 
@@ -1442,6 +1443,33 @@ def query_logs_facets(
     namespace_params["max_threads"] = max_threads
     namespace_rows = storage_adapter.execute_query(namespace_query, namespace_params)
 
+    # ===== clusters facet =====
+    cluster_query = f"""
+    SELECT
+        source_cluster AS value,
+        count() AS count
+    FROM logs.logs
+    {namespace_prewhere}
+    {namespace_where}
+        AND source_cluster != ''
+    GROUP BY value
+    ORDER BY count DESC, value ASC
+    LIMIT {{limit_clusters:Int32}}
+    SETTINGS optimize_use_projections = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
+    """
+    cluster_params = dict(namespace_params)
+    cluster_params["limit_clusters"] = 50
+    cluster_rows = storage_adapter.execute_query(cluster_query, cluster_params)
+
+    cluster_buckets = [
+        {
+            "value": str(row.get("value") or "").strip(),
+            "count": int(row.get("count") or 0),
+        }
+        for row in cluster_rows
+        if str(row.get("value") or "").strip()
+    ]
+
     merged_level_counts: Dict[str, int] = {}
     for row in level_rows:
         value = str(row.get("value") or "").upper()
@@ -1480,6 +1508,7 @@ def query_logs_facets(
         "services": service_buckets,
         "namespaces": namespace_buckets,
         "levels": level_buckets,
+        "clusters": cluster_buckets,
         "context": {
             "source_service": context.get("source_service"),
             "target_service": context.get("target_service"),
@@ -2567,7 +2596,8 @@ def query_log_detail(
         span_id,
         labels,
         attributes_json,
-        host_ip
+        host_ip,
+        source_cluster
     FROM logs.logs
     PREWHERE id = {log_id:String}
     LIMIT 1
