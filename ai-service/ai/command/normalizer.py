@@ -92,6 +92,24 @@ def normalize_command_spec(
     if not target_cluster_id and source_target:
         target_cluster_id = _as_str(source_target.get("cluster_id")).strip()
 
+    # Fallback: resolve cluster_id from target registry by namespace
+    if not target_cluster_id and source_target:
+        _ns = _as_str(source_target.get("namespace")).strip()
+        if _ns:
+            try:
+                from ai.runtime_v4.targets.service import get_runtime_v4_target_registry
+                _registry = get_runtime_v4_target_registry()
+                _t = _registry.find_target_by_identity(
+                    target_kind="k8s_cluster",
+                    target_identity=f"namespace:{_ns}",
+                )
+                if _t and isinstance(_t, dict):
+                    _meta = _t.get("metadata") or {}
+                    if isinstance(_meta, dict):
+                        target_cluster_id = _as_str(_meta.get("cluster_id")).strip()
+            except Exception:
+                pass
+
     # Backward-compat aliases
     _TOOL_ALIASES = {"kubectl_clickhouse_query": "clickhouse_query", "k8s_clickhouse_query": "clickhouse_query"}
     tool_str = _TOOL_ALIASES.get(tool_str, tool_str)

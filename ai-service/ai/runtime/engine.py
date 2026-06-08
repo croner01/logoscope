@@ -425,6 +425,9 @@ async def run_diagnosis(
             "command": a.command_spec.command,
             "purpose": a.purpose,
             "status": a.status,
+            "tool": a.command_spec.tool.value,
+            "command_type": a.command_spec.command_type.value,
+            "risk_level": a.command_spec.risk_level.value,
         } for a in state.actions],
     )
 

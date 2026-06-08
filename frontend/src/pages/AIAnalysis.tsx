@@ -178,6 +178,7 @@ interface LocationState {
     container_name?: string;
     labels?: Record<string, string>;
     attributes?: Record<string, unknown>;
+    source_cluster?: string;
   };
   traceId?: string;
   serviceName?: string;
@@ -1822,6 +1823,11 @@ const classifyFollowUpCommand = (command: string): ExtractedFollowUpCommand => {
 
   if (['helm', 'systemctl', 'service'].includes(head)) {
     return { command: normalized, commandType: 'repair', riskLevel: 'high' };
+  }
+
+  // Raw SQL (not wrapped in clickhouse-client)
+  if (['select', 'show', 'describe', 'desc', 'explain', 'with'].includes(head)) {
+    return { command: normalized, commandType: 'query', riskLevel: 'low' };
   }
 
   return { command: normalized, commandType: 'unknown', riskLevel: 'high' };
@@ -5444,6 +5450,7 @@ const AIAnalysis: React.FC = () => {
           container_name: sourceLogData.container_name,
           labels: sourceLogData.labels,
           service_name: sourceLogData.service_name,
+          source_cluster: sourceLogData.source_cluster,
         } : null,
       });
 

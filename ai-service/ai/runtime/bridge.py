@@ -415,9 +415,17 @@ async def unified_diagnosis_bridge(
         logger=logger,
     )
 
+    # Build action metadata lookup from result.actions
+    _action_meta: Dict[str, Dict[str, Any]] = {}
+    for _a in result.actions:
+        _aid = _a.get("id")
+        if _aid:
+            _action_meta[_aid] = _a
+
     # Convert to legacy format
     action_observations = []
     for obs in result.observations:
+        _a_meta = _action_meta.get(obs.action_id, {})
         action_observations.append({
             "action_id": obs.action_id,
             "status": obs.status,
@@ -429,7 +437,8 @@ async def unified_diagnosis_bridge(
             "duration_ms": obs.duration_ms,
             "channel": obs.channel,
             "command": obs.command or "",
-            "command_type": "query",
+            "command_type": _a_meta.get("command_type", "query"),
+            "risk_level": _a_meta.get("risk_level", "low"),
         })
 
     return {
