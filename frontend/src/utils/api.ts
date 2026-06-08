@@ -382,6 +382,7 @@ export interface Event {
   edge_side?: 'source' | 'target' | 'correlated';
   edge_match_kind?: 'source_mentions_target' | 'target_mentions_source' | 'dual_text' | 'source_service' | 'target_service' | 'correlated_text';
   correlation_kind?: 'seed' | 'expanded' | 'candidate';
+  source_cluster?: string;
 }
 
 /**
