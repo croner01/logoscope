@@ -65,3 +65,51 @@ class TestNormalizeCommandSpec:
         import pytest
         with pytest.raises(ValidationError):
             normalize_command_spec({})
+
+
+class TestNormalizeCommandSpecClusterId:
+    """target_cluster_id propagation from source_target."""
+
+    def test_cluster_id_from_source_target(self):
+        """cluster_id flows from source_target into CommandSpec."""
+        raw = {
+            "tool": "clickhouse_query",
+            "command": "SELECT 1",
+            "purpose": "test",
+        }
+        source_target = {"pod_name": "pod-0", "namespace": "test-ns", "cluster_id": "my-cluster"}
+        spec = normalize_command_spec(raw, source_target=source_target)
+        assert spec.target_cluster_id == "my-cluster"
+
+    def test_cluster_id_empty_when_not_in_source_target(self):
+        """When source_target has no cluster_id, target_cluster_id stays empty."""
+        raw = {
+            "tool": "clickhouse_query",
+            "command": "SELECT 1",
+            "purpose": "test",
+        }
+        source_target = {"pod_name": "pod-0", "namespace": "test-ns"}
+        spec = normalize_command_spec(raw, source_target=source_target)
+        assert spec.target_cluster_id == ""
+
+    def test_cluster_id_empty_when_no_source_target(self):
+        """When source_target is None, target_cluster_id stays empty."""
+        raw = {
+            "tool": "clickhouse_query",
+            "command": "SELECT 1",
+            "purpose": "test",
+        }
+        spec = normalize_command_spec(raw, source_target=None)
+        assert spec.target_cluster_id == ""
+
+    def test_raw_dict_overrides_source_target(self):
+        """When raw dict has target_cluster_id, it takes priority."""
+        raw = {
+            "tool": "clickhouse_query",
+            "command": "SELECT 1",
+            "purpose": "test",
+            "target_cluster_id": "from-llm",
+        }
+        source_target = {"pod_name": "pod-0", "namespace": "test-ns", "cluster_id": "from-source"}
+        spec = normalize_command_spec(raw, source_target=source_target)
+        assert spec.target_cluster_id == "from-llm"

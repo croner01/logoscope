@@ -87,6 +87,11 @@ def normalize_command_spec(
     if not target_identity and source_target:
         target_identity = _build_target_identity(source_target)
 
+    # Cluster ID from raw dict or source_target
+    target_cluster_id = _as_str(safe.get("target_cluster_id")).strip()
+    if not target_cluster_id and source_target:
+        target_cluster_id = _as_str(source_target.get("cluster_id")).strip()
+
     # Backward-compat aliases
     _TOOL_ALIASES = {"kubectl_clickhouse_query": "clickhouse_query", "k8s_clickhouse_query": "clickhouse_query"}
     tool_str = _TOOL_ALIASES.get(tool_str, tool_str)
@@ -106,6 +111,7 @@ def normalize_command_spec(
         command=command,
         target_kind=target_kind,
         target_identity=target_identity,
+        target_cluster_id=target_cluster_id,
         purpose=_as_str(safe.get("purpose")).strip(),
         command_type=cmd_type,
         timeout_seconds=int(safe.get("timeout_seconds", 20)),
