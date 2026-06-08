@@ -731,6 +731,7 @@ export interface LogsFacetResult {
   services: LogsFacetBucket[];
   namespaces: LogsFacetBucket[];
   levels: LogsFacetBucket[];
+  clusters?: LogsFacetBucket[];
   context?: Record<string, LooseAny>;
   generated_at?: string;
 }
@@ -746,6 +747,7 @@ export interface LogsFacetQueryParams extends LogsQueryParams {
   limit_services?: number;
   limit_namespaces?: number;
   limit_levels?: number;
+  limit_clusters?: number;
 }
 
 /**

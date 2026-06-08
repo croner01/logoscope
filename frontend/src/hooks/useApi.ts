@@ -356,6 +356,7 @@ export const useHybridTopology = createApiHook(
   {} as {
     time_window?: string;
     namespace?: string;
+    source_cluster?: string;
     confidence_threshold?: number;
     inference_mode?: 'rule' | 'hybrid_score';
     force_refresh?: boolean;
@@ -1126,6 +1127,7 @@ export interface UseRealtimeTopologyOptions {
   subscription?: {
     time_window?: string;
     namespace?: string | null;
+    source_cluster?: string;
     confidence_threshold?: number;
     inference_mode?: 'rule' | 'hybrid_score';
     message_target_enabled?: boolean;

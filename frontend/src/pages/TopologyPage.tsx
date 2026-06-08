@@ -1038,6 +1038,8 @@ const TopologyPage: React.FC = () => {
   }, [queryParams]);
 
   const [timeWindow, setTimeWindow] = useState('1 HOUR');
+  const [selectedCluster, setSelectedCluster] = useState<string>('');
+  const [availableClusters, setAvailableClusters] = useState<string[]>([]);
   const [selectedNode, setSelectedNode] = useState<TopologyNodeEntity | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<TopologyEdgeEntity | null>(null);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('swimlane');
@@ -1129,6 +1131,7 @@ const TopologyPage: React.FC = () => {
   const { data, loading, error, refetch } = useHybridTopology({
     time_window: timeWindow,
     namespace: queryNamespace,
+    source_cluster: selectedCluster || undefined,
     confidence_threshold: confidenceThreshold,
     inference_mode: inferenceMode,
     message_target_enabled: messageTargetEnabled,
@@ -1142,6 +1145,7 @@ const TopologyPage: React.FC = () => {
     subscription: {
       time_window: timeWindow,
       namespace: queryNamespace,
+      source_cluster: selectedCluster || undefined,
       confidence_threshold: confidenceThreshold,
       inference_mode: inferenceMode,
       message_target_enabled: messageTargetEnabled,
@@ -1419,6 +1423,22 @@ const TopologyPage: React.FC = () => {
       setFocusDepth(queryDepth);
     }
   }, [queryDepth]);
+
+  // 获取可用集群列表
+  useEffect(() => {
+    const fetchClusters = async () => {
+      try {
+        const result = await api.getLogFacets({ limit_clusters: 50 });
+        const clusters = (result?.clusters || [])
+          .map((c: { value: string }) => c.value)
+          .filter(Boolean);
+        setAvailableClusters(clusters);
+      } catch {
+        // 静默失败，不阻塞拓扑加载
+      }
+    };
+    void fetchClusters();
+  }, []);
 
   const filteredTopology = useMemo(() => {
     const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -3668,6 +3688,18 @@ const TopologyPage: React.FC = () => {
               <option key={window} value={window}>
                 {window}
               </option>
+            ))}
+          </select>
+
+          {/* 集群筛选 */}
+          <select
+            value={selectedCluster}
+            onChange={(e) => setSelectedCluster(e.target.value)}
+            className="rounded-lg border border-slate-600 bg-slate-900 px-3 py-1.5 text-xs text-slate-100"
+          >
+            <option value="">全部集群</option>
+            {availableClusters.map((cluster) => (
+              <option key={cluster} value={cluster}>{cluster}</option>
             ))}
           </select>
 
