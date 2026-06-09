@@ -624,10 +624,30 @@ class HybridTopologyBuilder:
                 namespace=namespace,
             )
 
+            # 4.1.5 计算数据质量状态（给降级展示用）
+            data_quality = self._compute_data_quality(
+                traces_data=traces_data,
+                logs_data=logs_data,
+                metrics_data=metrics_data,
+                edges=merged_edges,
+            )
+
+            # 回填降级质量分到 data_quality
+            logs_only_scores = [
+                e.get("metrics", {}).get("quality_score")
+                for e in merged_edges
+                if e.get("metrics", {}).get("quality_source") == "logs_only"
+            ]
+            if logs_only_scores:
+                data_quality["score_logs_only"] = round(
+                    sum(logs_only_scores) / len(logs_only_scores), 2
+                )
+
             # 4.2 统一契约转换（M1-01/M1-02）
             merged_nodes, merged_edges = self._apply_contract_schema(
                 nodes=merged_nodes,
-                edges=merged_edges
+                edges=merged_edges,
+                data_quality=data_quality,
             )
 
             # 5. 过滤低置信度的边
@@ -711,6 +731,7 @@ class HybridTopologyBuilder:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "contract_version": "topology-schema-v1",
                 "quality_version": "quality-score-v1",
+                "data_quality": data_quality,
                 "inference_quality": {
                     "coverage": round(avg_coverage, 3),
                     "inferred_ratio": round(inferred_ratio, 3),
@@ -2076,10 +2097,77 @@ class HybridTopologyBuilder:
             aggregated=aggregated,
         )
 
+    def _compute_data_quality(
+        self,
+        traces_data: Dict[str, Any],
+        logs_data: Dict[str, Any],
+        metrics_data: Dict[str, Any],
+        edges: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """计算当前拓扑的数据源可用性和各维度状态。
+
+        Returns:
+            dict: data_quality 结构，包含各数据源 availability 和 dimension_status。
+        """
+        traces_available = bool(traces_data.get("nodes") or traces_data.get("edges"))
+        logs_available = bool(logs_data.get("nodes"))
+        metrics_available = bool(metrics_data.get("nodes"))
+
+        # 判断是否有来自 traces 的延迟数据
+        has_traces_duration = False
+        has_traces_edges = bool(traces_data.get("edges"))
+        if has_traces_edges:
+            for edge in traces_data["edges"]:
+                em = edge.get("metrics") or {}
+                durations = em.get("durations") or []
+                if any(d > 0 for d in durations):
+                    has_traces_duration = True
+                    break
+                if float(em.get("p99") or 0) > 0 or float(em.get("p95") or 0) > 0:
+                    has_traces_duration = True
+                    break
+
+        has_inferred_edges = False
+        for edge in edges:
+            ds = str((edge.get("metrics") or {}).get("data_source") or "").strip().lower()
+            if ds in ("inferred", "logs_heuristic"):
+                has_inferred_edges = True
+                break
+
+        if has_traces_edges and has_traces_duration:
+            latency_status = "available"
+        else:
+            latency_status = "missing"
+
+        error_rate_edge_status = "available" if has_traces_edges else "missing"
+
+        if has_traces_edges:
+            call_volume_status = "available"
+        elif has_inferred_edges:
+            call_volume_status = "degraded"
+        else:
+            call_volume_status = "missing"
+
+        quality_mode = "full" if latency_status == "available" else "logs_only"
+
+        return {
+            "traces_available": traces_available,
+            "logs_available": logs_available,
+            "metrics_available": metrics_available,
+            "dimension_status": {
+                "latency": latency_status,
+                "error_rate_edge": error_rate_edge_status,
+                "call_volume": call_volume_status,
+                "quality_score": quality_mode,
+            },
+            "score_logs_only": None,  # 将在 confidence 重算后填入
+        }
+
     def _apply_contract_schema(
         self,
         nodes: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]]
+        edges: List[Dict[str, Any]],
+        data_quality: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         统一 Node/Edge 契约输出。
@@ -2089,13 +2177,36 @@ class HybridTopologyBuilder:
         - service(namespace/name/env)
         - evidence_type / coverage / quality_score
         - p95 / p99 / timeout_rate
+
+        当 data_quality 指示 traces 数据不可用时，将 p95/p99/error_rate 等置为 None。
         """
-        return hybrid_utils.apply_contract_schema(
+        contract_nodes, contract_edges = hybrid_utils.apply_contract_schema(
             nodes=nodes,
             edges=edges,
             apply_node_contract_fn=apply_node_contract,
             apply_edge_contract_fn=apply_edge_contract,
         )
+
+        # 根据数据质量状态，将无可靠数据源的字段设为 None
+        if data_quality:
+            dim_status = data_quality.get("dimension_status") or {}
+            latency_available = dim_status.get("latency") == "available"
+            error_rate_available = dim_status.get("error_rate_edge") == "available"
+
+            if not latency_available or not error_rate_available:
+                for edge in contract_edges:
+                    em = edge.setdefault("metrics", {})
+                    if not latency_available:
+                        em["p95"] = None
+                        em["p99"] = None
+                        em["timeout_rate"] = None
+                    if not error_rate_available:
+                        em["error_rate"] = None
+                        em["retries"] = None
+                        em["pending"] = None
+                        em["dlq"] = None
+
+        return contract_nodes, contract_edges
 
     def _is_service_pair_related(self, service1: str, service2: str) -> bool:
         """判断两个服务是否可能存在调用关系（启发式规则）"""
