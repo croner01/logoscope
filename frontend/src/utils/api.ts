@@ -509,6 +509,26 @@ export interface TopologyEdge {
   };
 }
 
+/** 拓扑数据维度状态 — 标记每个指标维度当前是否有效 */
+export type DimensionStatus = 'available' | 'missing' | 'degraded';
+
+/** 数据质量维度状态 */
+export interface DataQualityDimensionStatus {
+  latency: DimensionStatus;
+  error_rate_edge: DimensionStatus;
+  call_volume: DimensionStatus;
+  quality_score: 'full' | 'logs_only';
+}
+
+/** 数据质量元信息 */
+export interface DataQuality {
+  traces_available: boolean;
+  logs_available: boolean;
+  metrics_available: boolean;
+  dimension_status: DataQualityDimensionStatus;
+  score_logs_only: number | null;
+}
+
 /**
  * 拓扑图数据
  */
@@ -529,6 +549,7 @@ export interface TopologyGraph {
     generated_at: string;
     contract_version?: string;
     quality_version?: string;
+    data_quality?: DataQuality;
   };
 }
 
