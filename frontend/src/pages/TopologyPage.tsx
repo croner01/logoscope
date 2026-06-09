@@ -25,8 +25,9 @@ import { useNavigation } from '../hooks/useNavigation';
 import LoadingState from '../components/common/LoadingState';
 import ErrorState from '../components/common/ErrorState';
 import Tooltip from '../components/common/Tooltip';
+import DataQualityIndicator from '../components/topology/DataQualityIndicator';
 import { api } from '../utils/api';
-import type { Event, TopologyGraph } from '../utils/api';
+import type { Event, TopologyGraph, DataQuality } from '../utils/api';
 import { extractEventRequestIds, extractEventTraceIds } from '../utils/logCorrelation';
 import {
   computeEdgeIssueScore,
@@ -41,6 +42,8 @@ import {
   resolveEdgeProblemSummary,
   resolveIssueSummary,
   resolveNodeProblemSummary,
+  isTopologyDegraded,
+  computeDegradedEdgeIssueScore,
 } from '../utils/topologyProblemSummary';
 import { formatTime, formatTimeWindow, parseTimestamp } from '../utils/formatters';
 import { resolveCanonicalServiceName } from '../utils/serviceName';
@@ -842,7 +845,24 @@ function getNodePalette(node: TopologyNodeEntity, timeWindow: string): { from: s
   };
 }
 
-function getEdgeColor(edge: TopologyEdgeEntity): { stroke: string; marker: string; severity: 'danger' | 'warning' | 'normal'; meaning: string } {
+function getEdgeColor(
+  edge: TopologyEdgeEntity,
+  metadata?: unknown,
+): { stroke: string; marker: string; severity: 'danger' | 'warning' | 'normal'; meaning: string } {
+  const isDegraded = isTopologyDegraded(metadata);
+  if (isDegraded) {
+    const evidence = safeText(edge?.metrics?.evidence_type || edge?.evidence_type || 'observed');
+    const edgeMetrics = (edge?.metrics || {}) as Record<string, unknown>;
+    const nodeErrRate = Number(edgeMetrics.node_error_rate ?? 0);
+    if (nodeErrRate > 0.1) {
+      return { stroke: '#fb7185', marker: 'arrow-danger', severity: 'danger', meaning: '高风险(降级)' };
+    }
+    if (evidence === 'inferred') {
+      return { stroke: '#6b7280', marker: 'arrow-inferred', severity: 'normal', meaning: '推断链路(降级)' };
+    }
+    return { stroke: '#c4b5fd', marker: 'arrow-observed', severity: 'normal', meaning: '观测链路(降级)' };
+  }
+
   const summary = resolveEdgeProblemSummary(edge);
   if (summary.riskLevel === '高风险') {
     return { stroke: '#fb7185', marker: 'arrow-danger', severity: 'danger', meaning: '高风险链路' };
@@ -2363,19 +2383,26 @@ const TopologyPage: React.FC = () => {
 
   const topProblemEdges = useMemo<TopProblemEdge[]>(() => {
     const edges = visibleEdges || [];
-    let sorted = sortEdgesByIssueScore(edges);
-    if (edgeSortMode === 'error_rate') {
-      sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.error_rate ?? 0) - Number(a?.metrics?.error_rate ?? 0));
-    } else if (edgeSortMode === 'timeout_rate') {
-      sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.timeout_rate ?? b?.timeout_rate ?? 0) - Number(a?.metrics?.timeout_rate ?? a?.timeout_rate ?? 0));
-    } else if (edgeSortMode === 'p99') {
-      sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.p99 ?? b?.p99 ?? 0) - Number(a?.metrics?.p99 ?? a?.p99 ?? 0));
+    const metadata = topologyData?.metadata;
+    const isDegraded = isTopologyDegraded(metadata);
+
+    let sorted = sortEdgesByIssueScore(edges, metadata as Record<string, unknown> | undefined);
+    if (!isDegraded) {
+      if (edgeSortMode === 'error_rate') {
+        sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.error_rate ?? 0) - Number(a?.metrics?.error_rate ?? 0));
+      } else if (edgeSortMode === 'timeout_rate') {
+        sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.timeout_rate ?? b?.timeout_rate ?? 0) - Number(a?.metrics?.timeout_rate ?? a?.timeout_rate ?? 0));
+      } else if (edgeSortMode === 'p99') {
+        sorted = [...edges].sort((a: TopologyEdgeEntity, b: TopologyEdgeEntity) => Number(b?.metrics?.p99 ?? b?.p99 ?? 0) - Number(a?.metrics?.p99 ?? a?.p99 ?? 0));
+      }
     }
     return sorted.slice(0, 10).map((edge): TopProblemEdge => ({
       ...(edge as TopologyEdgeEntity),
-      issueScore: resolveEdgeIssueScore(edge),
+      issueScore: isDegraded
+        ? computeDegradedEdgeIssueScore(edge as Record<string, unknown>, metadata)
+        : resolveEdgeIssueScore(edge),
     }));
-  }, [edgeSortMode, visibleEdges]);
+  }, [edgeSortMode, visibleEdges, topologyData?.metadata]);
 
   const focusPathSummaries = useMemo(() => {
     if (!selectedNode?.id || !visibleEdges.length) {
@@ -3259,7 +3286,7 @@ const TopologyPage: React.FC = () => {
       const pairKey = edgePairKey(edge);
       const lifecycle = edgeLifecycle[pairKey] || 'active';
 
-      let color = getEdgeColor(edge);
+      let color = getEdgeColor(edge, topologyData?.metadata);
       let lifecycleDashArray: string | undefined;
 
       if (lifecycle === 'entering') {
@@ -3393,6 +3420,7 @@ const TopologyPage: React.FC = () => {
     edgeLifecycle,
     isFrozen,
     showGhostZone,
+    topologyData,
   ]);
 
   const interactiveEdgeData = useMemo(() => {
@@ -3965,6 +3993,14 @@ const TopologyPage: React.FC = () => {
           </div>
         </div>
 
+        {/* 数据完整性指示器 */}
+        {(() => {
+          const dq = (topologyData?.metadata as Record<string, unknown>)?.data_quality as DataQuality | undefined;
+          if (!dq) return null;
+          if (dq.traces_available && dq.logs_available && dq.metrics_available) return null;
+          return <DataQualityIndicator dataQuality={dq} />;
+        })()}
+
         <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
           <span className={`inline-flex items-center rounded-full border px-2.5 py-1 ${topologyRenderSource === 'realtime' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100' : 'border-slate-600 bg-slate-900 text-slate-300'}`}>
             来源: {topologyRenderSource === 'realtime' ? '实时推送' : '查询快照'}
@@ -4411,7 +4447,15 @@ const TopologyPage: React.FC = () => {
                       覆盖率 {Math.round(Number(hoverCard.node?.coverage ?? hoverCard.node?.metrics?.coverage ?? 0) * 100)}%
                     </div>
                     <div className="rounded border border-slate-700 bg-slate-900/70 px-1.5 py-1">
-                      质量分 {toNum(hoverCard.node?.quality_score ?? hoverCard.node?.metrics?.quality_score, 1)}
+                      质量分 {(() => {
+                        const qs = hoverCard.node?.quality_score ?? hoverCard.node?.metrics?.quality_score;
+                        const isDegraded = isTopologyDegraded(topologyData?.metadata);
+                        if (qs != null && !isDegraded) return toNum(qs, 1);
+                        const dq = (topologyData?.metadata as Record<string, unknown>)?.data_quality as DataQuality | undefined;
+                        const logsOnly = dq?.score_logs_only;
+                        if (logsOnly != null) return <>{toNum(logsOnly, 1)} <span className="text-[9px] text-amber-400">(降级)</span></>;
+                        return '--';
+                      })()}
                     </div>
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-1.5">
@@ -4481,10 +4525,29 @@ const TopologyPage: React.FC = () => {
                       超时率 {toPct(hoverCard.edge?.metrics?.timeout_rate ?? hoverCard.edge?.timeout_rate)}
                     </div>
                     <div className="rounded border border-slate-700 bg-slate-900/70 px-1.5 py-1">
-                      P95/P99 {toNum(hoverCard.edge?.metrics?.p95 ?? hoverCard.edge?.p95, 0)}/{toNum(hoverCard.edge?.metrics?.p99 ?? hoverCard.edge?.p99, 0)}ms
+                      {(() => {
+                        const p95 = hoverCard.edge?.metrics?.p95 ?? hoverCard.edge?.p95;
+                        const p99 = hoverCard.edge?.metrics?.p99 ?? hoverCard.edge?.p99;
+                        if (p95 != null && p99 != null) {
+                          return <>P95/P99 {toNum(p95, 0)}/{toNum(p99, 0)}ms</>;
+                        }
+                        return <span className="text-slate-600" title="无 Trace 数据">P95/P99 --/--</span>;
+                      })()}
                     </div>
                     <div className="rounded border border-slate-700 bg-slate-900/70 px-1.5 py-1">
-                      质量分 {toNum(hoverCard.edge?.metrics?.quality_score ?? hoverCard.edge?.quality_score, 1)}
+                      {(() => {
+                        const qs = hoverCard.edge?.metrics?.quality_score ?? hoverCard.edge?.quality_score;
+                        const isDegraded = isTopologyDegraded(topologyData?.metadata);
+                        if (qs != null && qs !== undefined && !isDegraded) {
+                          return <>质量分 {toNum(qs, 1)}</>;
+                        }
+                        const dq = (topologyData?.metadata as Record<string, unknown>)?.data_quality as DataQuality | undefined;
+                        const logsOnly = dq?.score_logs_only;
+                        if (logsOnly != null) {
+                          return <>质量分 {toNum(logsOnly, 1)} <span className="text-[9px] text-amber-400">(降级)</span></>;
+                        }
+                        return <span className="text-slate-600">质量分 --</span>;
+                      })()}
                     </div>
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-1.5">
@@ -4644,6 +4707,9 @@ const TopologyPage: React.FC = () => {
             <div className="flex cursor-move items-center justify-between border-b border-slate-700 px-3 py-2" onMouseDown={(e) => startPanelDrag('issues', e)}>
               <div className="flex items-center gap-2 text-xs font-semibold text-violet-200">
                 <GripHorizontal className="h-3.5 w-3.5" /> 链路情报看板
+                {isTopologyDegraded(topologyData?.metadata) && (
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] text-amber-300">降级模式</span>
+                )}
               </div>
               <select
                 value={edgeSortMode}
@@ -4651,9 +4717,24 @@ const TopologyPage: React.FC = () => {
                 className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-[10px] text-slate-200"
               >
                 <option value="anomaly">综合</option>
-                <option value="error_rate">错误率</option>
-                <option value="timeout_rate">超时率</option>
-                <option value="p99">P99</option>
+                {(() => {
+                  const isDegraded = isTopologyDegraded(topologyData?.metadata);
+                  const opts = [
+                    { value: 'error_rate' as const, label: '错误率' },
+                    { value: 'timeout_rate' as const, label: '超时率' },
+                    { value: 'p99' as const, label: 'P99' },
+                  ];
+                  return opts.map((opt) => (
+                    <option
+                      key={opt.value}
+                      value={opt.value}
+                      disabled={isDegraded}
+                      className={isDegraded ? 'text-slate-600' : ''}
+                    >
+                      {opt.label}{isDegraded ? ' (需 Trace)' : ''}
+                    </option>
+                  ));
+                })()}
               </select>
             </div>
 
@@ -4669,10 +4750,20 @@ const TopologyPage: React.FC = () => {
                       {edge.source} → {edge.target}
                     </div>
                     <div className="mt-1 grid grid-cols-4 gap-1 text-[10px] text-slate-400">
-                      <span>err {toPct(edge?.metrics?.error_rate)}</span>
-                      <span>p99 {toNum(edge?.metrics?.p99 ?? edge?.p99, 0)}ms</span>
-                      <span>to {toPct(edge?.metrics?.timeout_rate ?? edge?.timeout_rate)}</span>
-                      <span className="text-rose-300">score {edge.issueScore}</span>
+                      {(() => {
+                        const isDegraded = isTopologyDegraded(topologyData?.metadata);
+                        const errRate = edge?.metrics?.error_rate;
+                        const p99Val = edge?.metrics?.p99 ?? edge?.p99;
+                        const toVal = edge?.metrics?.timeout_rate ?? edge?.timeout_rate;
+                        return (
+                          <>
+                            <span>err {isDegraded && (errRate === null || errRate === undefined) ? '--' : toPct(errRate)}</span>
+                            <span>p99 {isDegraded && (p99Val === null || p99Val === undefined) ? '--' : toNum(p99Val, 0)}ms</span>
+                            <span>to {isDegraded && (toVal === null || toVal === undefined) ? '--' : toPct(toVal)}</span>
+                            <span className="text-rose-300">score {edge.issueScore}</span>
+                          </>
+                        );
+                      })()}
                     </div>
                   </button>
                 ))
