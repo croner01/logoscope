@@ -215,3 +215,40 @@ export function safeSummary(summary: ProblemSummary | null | undefined, fallback
   }
   return summary;
 }
+
+/**
+ * 检测当前拓扑是否为降级模式（无 Traces 数据）
+ */
+export function isTopologyDegraded(metadata: unknown): boolean {
+  const m = metadata as Record<string, unknown> | null;
+  const dq = m?.data_quality as Record<string, unknown> | null;
+  const dimStatus = dq?.dimension_status as Record<string, string> | null;
+  return dimStatus?.quality_score === 'logs_only';
+}
+
+/**
+ * 降级模式下计算边问题分（仅使用日志可用维度）
+ */
+export function computeDegradedEdgeIssueScore(
+  edge: Record<string, unknown>,
+  metadata: unknown,
+): number {
+  const edgeMetrics = (edge?.metrics as Record<string, unknown>) || {};
+  const nodeErrorRate = toNum(edgeMetrics.node_error_rate, 0);
+  const confidence = toNum(edgeMetrics.confidence, 0);
+  const isInferred =
+    String(edgeMetrics.data_source ?? '').toLowerCase() === 'inferred' ||
+    String(edgeMetrics.evidence_type ?? '').toLowerCase() === 'inferred';
+
+  const m = metadata as Record<string, unknown> | null;
+  const dq = m?.data_quality as Record<string, unknown> | null;
+  const scoreLogsOnly = toNum(dq?.score_logs_only, 100);
+
+  let score = 0;
+  score += Math.min(nodeErrorRate * 100, 1) * 35;
+  score += Math.max(0, (60 - scoreLogsOnly) / 60) * 25;
+  if (isInferred) score += 10;
+  if (confidence < 0.35) score += 5;
+
+  return Math.round(score * 100) / 100;
+}

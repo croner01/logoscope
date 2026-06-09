@@ -134,11 +134,35 @@ export function isolateNodeNeighborhood<TNode extends TopologyNodeLike, TEdge ex
   return filterGraphByFocusDepth(nodes, edges, centerNodeId, 1);
 }
 
-export function sortEdgesByIssueScore<TEdge extends TopologyEdgeLike>(edges: TEdge[]): TEdge[] {
-  return [...edges].sort((a, b) => computeEdgeIssueScore(b) - computeEdgeIssueScore(a));
+export function sortEdgesByIssueScore<TEdge extends TopologyEdgeLike>(
+  edges: TEdge[],
+  metadata?: Record<string, unknown>,
+): TEdge[] {
+  return [...edges].sort((a, b) => computeEdgeIssueScore(b, metadata) - computeEdgeIssueScore(a, metadata));
 }
 
-export function computeEdgeIssueScore(edge: TopologyEdgeLike): number {
+export function computeEdgeIssueScore(
+  edge: TopologyEdgeLike,
+  metadata?: Record<string, unknown>,
+): number {
+  // 降级模式分支：无 Traces 时使用日志维度
+  const dq = metadata?.data_quality as Record<string, unknown> | undefined;
+  const dimStatus = dq?.dimension_status as Record<string, string> | undefined;
+  if (dimStatus?.quality_score === 'logs_only') {
+    const edgeMetrics = (edge?.metrics || {}) as Record<string, unknown>;
+    const nodeErrorRate = toNumber(edgeMetrics.node_error_rate, 0);
+    const confidence = toNumber(edgeMetrics.confidence, 0);
+    const scoreLogsOnly = toNumber(dq?.score_logs_only, 100);
+    const isInferred = resolveEdgeEvidence(edge) === 'inferred';
+
+    let score = 0;
+    score += Math.min(nodeErrorRate * 100, 1) * 35;
+    score += Math.max(0, (60 - scoreLogsOnly) / 60) * 25;
+    if (isInferred) score += 10;
+    if (confidence < 0.35) score += 5;
+    return round2(score);
+  }
+
   const problemSummary = toRecord(edge?.problem_summary);
   const metricsProblemSummary = toRecord(edge?.metrics?.problem_summary);
   const backendIssueScore = toNumber(
