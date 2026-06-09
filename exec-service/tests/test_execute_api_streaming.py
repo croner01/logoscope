@@ -993,28 +993,28 @@ def test_precheck_non_whitelist_query_requires_confirmation(monkeypatch):
     asyncio.run(_run())
 
 
-def test_precheck_kubectl_exec_query_requires_confirmation(monkeypatch):
+def test_precheck_kubectl_exec_readonly_whitelisted(monkeypatch):
+    """kubectl exec with a read-only remote command should be whitelisted and auto-approved."""
     monkeypatch.setenv("EXEC_ALLOWED_HEADS", "kubectl,clickhouse-client")
 
     async def _run() -> None:
         payload = await precheck_command(
             PrecheckRequest(
-                session_id="sess-kubectl-exec-approval-001",
-                message_id="msg-kubectl-exec-approval-001",
-                action_id="act-kubectl-exec-approval-001",
+                session_id="sess-kubectl-exec-readonly-001",
+                message_id="msg-kubectl-exec-readonly-001",
+                action_id="act-kubectl-exec-readonly-001",
                 command=(
                     "kubectl -n islap exec pod/clickhouse-0 -- "
                     "clickhouse-client --query \"DESCRIBE TABLE logs.traces\""
                 ),
-                purpose="kubectl exec 必须审批",
+                purpose="kubectl exec 只读命令应自动放行",
             )
         )
-        assert payload["status"] == "confirmation_required"
+        assert payload["status"] == "ok"
         assert payload["command_type"] == "query"
-        assert payload["requires_confirmation"] is True
+        assert payload["requires_confirmation"] is False
         assert payload["requires_elevation"] is False
-        assert payload["whitelist_match"] is False
-        assert "kubectl exec" in str(payload.get("whitelist_reason") or "").lower()
+        assert payload["whitelist_match"] is True
 
     asyncio.run(_run())
 
@@ -1133,14 +1133,37 @@ def test_precheck_non_permissive_allows_subshell_shape_for_kubectl_exec(monkeypa
                     "-o jsonpath='{.items[0].metadata.name}') -- clickhouse-client --query "
                     "\"DESCRIBE TABLE logs.traces\""
                 ),
-                purpose="$() 形态应进入审批而非直接拦截",
+                purpose="$() 形态应自动放行（只读 remote command）",
             )
         )
-        assert payload["status"] == "confirmation_required"
+        assert payload["status"] == "ok"
         assert payload["command_type"] == "query"
         assert payload["requires_elevation"] is False
-        assert "blocked fragments/operators" not in str(payload.get("message") or "").lower()
-        assert "kubectl exec" in str(payload.get("whitelist_reason") or "").lower()
+        assert payload["whitelist_match"] is True
+        assert payload["executor_profile"] == "toolbox-k8s-readonly"
+
+    asyncio.run(_run())
+
+
+def test_precheck_kubectl_exec_write_remote_still_requires_approval(monkeypatch):
+    """kubectl exec with a write/mutating remote command must still require approval."""
+    monkeypatch.setenv("EXEC_ALLOWED_HEADS", "kubectl,cat,rm")
+
+    async def _run() -> None:
+        payload = await precheck_command(
+            PrecheckRequest(
+                session_id="sess-kubectl-exec-write-001",
+                message_id="msg-kubectl-exec-write-001",
+                action_id="act-kubectl-exec-write-001",
+                command=(
+                    "kubectl -n islap exec pod/data-0 -- "
+                    "rm -rf /tmp/cache"
+                ),
+                purpose="kubectl exec 写入命令仍须审批",
+            )
+        )
+        assert payload["status"] in {"permission_required", "confirmation_required"}
+        assert payload["whitelist_match"] is False
 
     asyncio.run(_run())
 
@@ -1165,7 +1188,7 @@ def test_precheck_allows_pipeline_operator(monkeypatch):
     asyncio.run(_run())
 
 
-def test_precheck_permissive_mode_subshell_enters_confirmation_and_repairs_spacing(monkeypatch):
+def test_precheck_permissive_mode_subshell_repairs_spacing_and_whitelists_exec(monkeypatch):
     monkeypatch.setenv("EXEC_ALLOWED_HEADS", "kubectl,clickhouse-client")
     monkeypatch.setenv("EXEC_COMMAND_TEST_PERMISSIVE", "true")
 
@@ -1179,15 +1202,16 @@ def test_precheck_permissive_mode_subshell_enters_confirmation_and_repairs_spaci
                 purpose="测试阶段放通与空格断句修复",
             )
         )
-        assert payload["status"] == "confirmation_required"
+        assert payload["status"] == "ok"
         assert payload["command_type"] == "query"
         assert payload["requires_elevation"] is False
-        assert payload["approval_policy"] == "confirmation_required"
+        assert payload["approval_policy"] == "auto_execute"
         assert payload["rewrite_applied"] is False
         assert payload["executor_type"] == "sandbox_pod"
         assert payload["executor_profile"] == "toolbox-k8s-readonly"
         assert payload["target_kind"] == "k8s_cluster"
         assert payload["dispatch_requires_template"] is True
+        assert payload["whitelist_match"] is True
         assert "-n islap exec" in str(payload["command"])
         assert "-n islap get pods" in str(payload["command"])
         assert " exec $(" in str(payload["command"])
@@ -1212,7 +1236,7 @@ def test_precheck_permissive_mode_repairs_glued_kubectl_tokens(monkeypatch):
             )
         )
         command = str(payload["command"])
-        assert payload["status"] == "confirmation_required"
+        assert payload["status"] == "ok"
         assert payload["command_type"] == "query"
         assert payload["executor_profile"] == "toolbox-k8s-readonly"
         assert payload["dispatch_requires_template"] is True
@@ -1262,8 +1286,9 @@ def test_precheck_permissive_mode_repairs_namespace_and_subshell_glued_tokens(mo
             )
         )
         command = str(payload["command"])
-        assert payload["status"] == "confirmation_required"
+        assert payload["status"] == "ok"
         assert payload["command_type"] == "query"
+        assert payload["whitelist_match"] is True
         assert "kubectl -n islap exec $(" in command
         assert " -i " not in command
         assert "kubectl -n islap get pods -l app=clickhouse -o jsonpath=" in command
@@ -1291,8 +1316,9 @@ def test_precheck_repairs_compact_clickhouse_query_keywords(monkeypatch):
             )
         )
         command = str(payload["command"])
-        assert payload["status"] == "confirmation_required"
+        assert payload["status"] == "ok"
         assert payload["command_type"] == "query"
+        assert payload["whitelist_match"] is True
         assert "-n islap exec $(" in command
         assert " -i " not in command
         assert (

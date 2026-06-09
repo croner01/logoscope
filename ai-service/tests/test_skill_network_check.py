@@ -92,9 +92,10 @@ class TestNetworkConnectivitySkill:
             for step in steps
         ]
         assert commands
-        assert all("|" not in command for command in commands)
-        assert all("&&" not in command for command in commands)
-        assert all(">" not in command for command in commands)
+        # Semicolon (;) is blocked — it allows chaining independent commands
+        assert all(";" not in command for command in commands)
+        # Pipe (|) and conditional (&&) are allowed for diagnostic chaining
+        # 2>/dev/null (embedded stderr redirect) is allowed
 
     def test_step_ids_are_unique(self, skill):
         ctx = _ctx()

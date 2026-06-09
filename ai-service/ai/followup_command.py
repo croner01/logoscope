@@ -988,6 +988,26 @@ def _classify_followup_command(parts: List[str]) -> Dict[str, Any]:
             "reason": "该命令可能触发配置或运行状态变更",
         }
 
+    # Raw SQL (not wrapped in clickhouse-client)
+    _sql_readonly_heads = {"select", "show", "describe", "desc", "explain", "with"}
+    _sql_mutating_heads = {"insert", "alter", "create", "drop", "truncate", "optimize", "system", "delete", "update", "rename", "grant", "revoke"}
+    if head in _sql_readonly_heads:
+        return {
+            "command_type": "query",
+            "risk_level": "low",
+            "requires_write_permission": False,
+            "supported": True,
+            "reason": "SQL 只读查询命令",
+        }
+    if head in _sql_mutating_heads:
+        return {
+            "command_type": "repair",
+            "risk_level": "high",
+            "requires_write_permission": True,
+            "supported": True,
+            "reason": "SQL 变更命令，可能修改数据或结构",
+        }
+
     return {
         "command_type": "unknown",
         "risk_level": "high",

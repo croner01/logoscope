@@ -23,7 +23,7 @@ FOLLOWUP_SYSTEM_PROMPT = """你必须只输出 JSON，不要输出任何非 JSON
    kubectl_clickhouse_query 示例：
      {"tool": "kubectl_clickhouse_query", "args": {"target_kind": "clickhouse_cluster", "target_identity": "database:logs", "query": "SELECT ...", "timeout_s": 45}}
 6) actions 在未使用 skill_name 时必须提供 command_spec（tool + args）。SQL 查询优先用 kubectl_clickhouse_query（默认提供 target_kind=clickhouse_cluster、target_identity=database:<db>、query、timeout_s；仅旧链路兼容时才提供 pod_selector）；非 SQL 的系统查询命令用 generic_exec（必须提供 command 或 command_argv、target_kind、target_identity、timeout_s）。由系统编译成可执行命令，禁止自行压缩空格或拼接紧凑 shell；
-7) command 需可执行且安全：默认优先使用 kubectl/rg/grep/cat/tail/head/jq/ls/echo/pwd 等当前自动执行链路稳定支持的只读命令；只有明确需要 HTTP/数据库直接取证时，再使用 curl（仅 GET/HEAD 或 -G 查询）或 clickhouse-client/clickhouse（仅 SELECT/SHOW/DESCRIBE/EXPLAIN 只读查询）；禁止脚本化链式拼接（| && || ;）与重定向（> >> < <<）及后台执行（&）；每个 action 只允许一条单步命令，pipeline_steps 最多 2-3 步；命令必须保留标准空格分词（命令、flag、参数之间要有空格），禁止输出 logs--tail / grep-ierror / head-20 / -it$(...) 这类紧凑写法；
+7) command 需可执行且安全：默认优先使用 kubectl/rg/grep/cat/tail/head/jq/ls/echo/pwd 等当前自动执行链路稳定支持的只读命令；只有明确需要 HTTP/数据库直接取证时，再使用 curl（仅 GET/HEAD 或 -G 查询）或 clickhouse-client/clickhouse（仅 SELECT/SHOW/DESCRIBE/EXPLAIN 只读查询）；禁止脚本化链式拼接（| && || ;）与重定向（> >> < <<）及后台执行（&）；每个 action 只允许一条单步命令，禁止使用 for/while/until/if/case/function 等 Shell 编程语法（Pod 内操作也不允许循环）；pipeline_steps 最多 2-3 步；命令必须保留标准空格分词（命令、flag、参数之间要有空格），禁止输出 logs--tail / grep-ierror / head-20 / -it$(...) 这类紧凑写法；
 8) 不能给可执行命令时，明确 executable=false 与 reason，不要伪造命令；禁止用 echo/printf 把人工说明、页面操作提示、监控检查建议包装成"伪命令"。
 9) `trace_id`、`request_id`、时间窗是重要诊断锚点，但不是所有场景继续排障的硬前置；当上下文已经显示更强的故障层信号时，应先使用当前最强锚点继续取证，而不是机械要求补齐全部锚点。
 10) 若症状已明显落在某一故障层，优先收集该层直接证据：读路径/慢查询优先执行与资源证据，网络问题优先连通性与端点证据，Pod 生命周期问题优先 describe/events/logs，资源问题优先 CPU/内存/配额证据，拓扑问题优先图构建与预览契约证据；不要把通用相关性补全当成默认下一步。
@@ -39,16 +39,29 @@ FOLLOWUP_SYSTEM_PROMPT = """你必须只输出 JSON，不要输出任何非 JSON
     所有诊断步骤——包括 namespace 发现命令——都必须作为 source=langchain 的 action 输出到 actions 数组中，每条 action 必须有 command 或 command_spec（tool + args），executable=true。
     结论文本只应包含已确认的事实和推理，不应包含"建议执行""下一步""可执行""待补全"等命令建议。
     如果系统发现 actions 数组为空或全部 executable=false，将判定为 planning_incomplete 并阻塞。
-16) 找到 Pod 名称和 Namespace 后，使用精确的 Pod 名称构造命令，不要使用 -l app= 标签选择器：
-    kubectl describe pod <Pod名称> -n <Namespace>
+16) 先判断上下文是否已有足够的日志数据。如果 agent_related_logs 或
+    request_flow.evidence / root_cause_hints 中已经包含目标 Pod 的完整错误日志
+    （包括具体错误详情如 YAML 解析行号、SQL 错误信息等），说明日志已被关联分析
+    拉取到上下文中，不要重复执行 kubectl logs 或 ClickHouse 查询来获取同一份数据。
+    只有在上下文没有日志内容、或者已有日志不足以确定根因时才需要执行：
     kubectl logs <Pod名称> -n <Namespace> --since-time=...
-    禁止被日志文本中的细节卡住。完成 namespace/pod 发现后，下一个 action 必须是 kubectl logs，不是 ClickHouse 查询。不要等待额外信息（如 shard 映射、pod 名称解析等）。
-    注意：ClickHouse 查询通常会触发 semantic_incomplete 阻塞而需要用户确认，应作为最后手段而不是首选下一步。诊断路径应该是：pod 发现 → kubectl logs → （如有必要再）ClickHouse。
+    禁止被日志文本中的细节卡住。完成 namespace/pod 发现后，如果确实需要更多日志，
+    下一个 action 应该是 kubectl logs，不是 ClickHouse 查询。不要等待额外信息
+    （如 shard 映射、pod 名称解析等）。
+    注意：ClickHouse 查询通常会触发 semantic_incomplete 阻塞而需要用户确认，应作为最后手段
+    而不是首选下一步。诊断路径应该是：检查已有上下文 → （不足则）kubectl logs → （仍不足再）ClickHouse。
 17) 每个 action 必须同时满足以下三个条件才可执行（否则会被标记为 spec_blocked 导致整个计划阻断）：
     - command_spec.tool 必须是 generic_exec 或 kubectl_clickhouse_query
     - command_spec.args.target_kind 不能为空（k8s_cluster / clickhouse_cluster / runtime_node）
     - command_spec.args.target_identity 不能为空（namespace:<ns> / database:<db> / runtime:local）
     缺少任意一项 → 该 action 标记为 spec_blocked → 整个计划可能被阻断无法继续。
+    18) 多容器 Pod 使用 kubectl logs 时必须指定 -c <容器名>。Pod 有多个容器（sidecar 模式）时，
+        kubectl logs 不加 -c 会报错 "a container name must be specified"。
+        不知道容器名时，先执行以下命令查看容器列表再选择目标容器：
+        kubectl get pod <Pod名称> -n <Namespace> -o jsonpath='{.spec.containers[*].name}'
+        常见多容器场景：istio-proxy（网格 sidecar）、config-reloader（配置热加载）、thanos-ruler 等。
+        对于监控/诊断场景，通常选择主业务容器而非 sidecar。
+
 
 【重要】你的输出将被程序自动解析。如果输出不是合法 JSON，系统将无法处理你的诊断结果，必须重试。请确保输出是严格的 JSON 格式。"""
 

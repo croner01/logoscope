@@ -123,7 +123,7 @@ def _resolve_llm_model(provider: str) -> str:
         return configured_model
 
     if provider == "deepseek":
-        return os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     if provider == "local":
         return os.getenv("LOCAL_MODEL_NAME", "qwen2.5:7b")
 
@@ -361,6 +361,10 @@ class OpenAIProvider(BaseLLMProvider):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
+            # Pre-filling: force the model to continue from a specific prefix
+            assistant_prefix = kwargs.get("assistant_prefix", "")
+            if assistant_prefix:
+                messages.append({"role": "assistant", "content": assistant_prefix})
 
             create_kwargs = dict(
                 model=kwargs.get("model", self.config.model),
@@ -375,6 +379,10 @@ class OpenAIProvider(BaseLLMProvider):
             response = await client.chat.completions.create(**create_kwargs)
 
             content = response.choices[0].message.content
+            # If we pre-filled, the model's response starts from our prefix;
+            # prepend the prefix to reconstruct the full output
+            if assistant_prefix and content:
+                content = assistant_prefix + content
             latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
             self._set_cache(cache_key, content)
@@ -601,6 +609,10 @@ class LocalModelProvider(BaseLLMProvider):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
+            # Pre-filling support (same pattern as OpenAIProvider)
+            assistant_prefix = kwargs.get("assistant_prefix", "")
+            if assistant_prefix:
+                messages.append({"role": "assistant", "content": assistant_prefix})
 
             response = await client.chat.completions.create(
                 model=kwargs.get("model", self.config.model),
@@ -610,6 +622,8 @@ class LocalModelProvider(BaseLLMProvider):
             )
 
             content = response.choices[0].message.content
+            if assistant_prefix and content:
+                content = assistant_prefix + content
             latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             self._set_cache(cache_key, content)
 
@@ -893,6 +907,7 @@ class LLMService:
         message: str,
         context: Dict[str, Any] = None,
         response_format: Optional[Dict[str, Any]] = None,
+        assistant_prefix: str = "",
     ) -> str:
         """通用对话"""
         system_prompt = "你是一个专业的可观测性和日志分析助手。"
@@ -902,7 +917,9 @@ class LLMService:
             prompt = f"上下文信息:\n{json.dumps(context, ensure_ascii=False)}\n\n{message}"
 
         response = await self._provider.generate(
-            prompt, system_prompt, response_format=response_format or self.config.response_format,
+            prompt, system_prompt,
+            response_format=response_format or self.config.response_format,
+            assistant_prefix=assistant_prefix,
         )
         return response.content
 

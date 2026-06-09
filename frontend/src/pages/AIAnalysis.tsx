@@ -178,6 +178,7 @@ interface LocationState {
     container_name?: string;
     labels?: Record<string, string>;
     attributes?: Record<string, unknown>;
+    source_cluster?: string;
   };
   traceId?: string;
   serviceName?: string;
@@ -918,6 +919,85 @@ const buildFollowUpThoughtFromStreamEvent = (
       status: 'warning',
       title: command ? `待审批命令: ${command}` : '检测到需提权审批的命令',
       detail: message || undefined,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  // ── Engine events: command execution lifecycle ──────────────────────
+  if (eventName === 'tool_call_started') {
+    const command = truncateFollowUpThoughtText(data.command, 100);
+    const route = String(data.route || '').trim();
+    const routeLabel = route ? ` [${route}]` : '';
+    return {
+      phase: 'action',
+      status: 'info',
+      title: command ? `执行${routeLabel}: ${command}` : '执行诊断命令',
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_finished') {
+    const exitCode = Number(data.exit_code);
+    const stdoutPreview = truncateFollowUpThoughtText(data.stdout, 200);
+    const stderrPreview = truncateFollowUpThoughtText(data.stderr, 120);
+    const durMs = Number(data.duration_ms);
+    const durLabel = Number.isFinite(durMs) ? ` (${durMs}ms)` : '';
+    const ok = exitCode === 0;
+    const detailParts: string[] = [];
+    if (stdoutPreview) detailParts.push(stdoutPreview);
+    if (stderrPreview) detailParts.push(`stderr: ${stderrPreview}`);
+    return {
+      phase: 'observation',
+      status: ok ? 'success' : 'warning',
+      title: ok
+        ? `命令完成${durLabel}`
+        : `命令失败 (exit=${exitCode})${durLabel}`,
+      detail: detailParts.join(' | ') || undefined,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_blocked') {
+    const command = truncateFollowUpThoughtText(data.command, 80);
+    const reason = String(data.reason || '安全策略拒绝').trim();
+    return {
+      phase: 'observation',
+      status: 'warning',
+      title: command ? `已阻止: ${command}` : '命令被安全策略阻止',
+      detail: reason,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_skipped_duplicate') {
+    const reason = String(data.reason || '已执行过').trim();
+    return {
+      phase: 'observation',
+      status: 'info',
+      title: `跳过重复命令`,
+      detail: reason,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_compile_failed') {
+    const command = truncateFollowUpThoughtText(data.command, 80);
+    return {
+      phase: 'observation',
+      status: 'error',
+      title: command ? `编译失败: ${command}` : '命令编译失败',
+      detail: `工具: ${String(data.tool || 'unknown')}`,
+      timestamp,
+      iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
+    };
+  }
+  if (eventName === 'tool_call_normalize_failed') {
+    const reason = String(data.reason || '格式不合法').trim();
+    return {
+      phase: 'observation',
+      status: 'error',
+      title: `命令解析失败`,
+      detail: reason,
       timestamp,
       iteration: Number.isFinite(Number(data.iteration)) ? Number(data.iteration) : undefined,
     };
@@ -1745,6 +1825,11 @@ const classifyFollowUpCommand = (command: string): ExtractedFollowUpCommand => {
     return { command: normalized, commandType: 'repair', riskLevel: 'high' };
   }
 
+  // Raw SQL (not wrapped in clickhouse-client)
+  if (['select', 'show', 'describe', 'desc', 'explain', 'with'].includes(head)) {
+    return { command: normalized, commandType: 'query', riskLevel: 'low' };
+  }
+
   return { command: normalized, commandType: 'unknown', riskLevel: 'high' };
 };
 
@@ -1899,6 +1984,7 @@ const AIAnalysis: React.FC = () => {
   const [activeRightTab, setActiveRightTab] = useState<'result' | 'kb' | 'actions' | 'executor'>('result');
   // 拖拽调整尺寸：输入卡片高度 & 右侧面板宽度
   const [inputPanelHeight, setInputPanelHeight] = useState<number>(320);
+  const [inputPanelCollapsed, setInputPanelCollapsed] = useState<boolean>(true);
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(320);
   const vDragStartY = useRef<number>(0);
   const vDragStartH = useRef<number>(0);
@@ -5364,6 +5450,7 @@ const AIAnalysis: React.FC = () => {
           container_name: sourceLogData.container_name,
           labels: sourceLogData.labels,
           service_name: sourceLogData.service_name,
+          source_cluster: sourceLogData.source_cluster,
         } : null,
       });
 
@@ -6203,10 +6290,14 @@ const AIAnalysis: React.FC = () => {
         {/* ── 中间工作区 ── */}
         <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
 
-          {/* 输入卡片（高度可拖拽）*/}
-          <div className="bg-white rounded-lg border border-gray-200 shadow-sm shrink-0 overflow-auto" style={{ height: `${inputPanelHeight}px` }}>
+          {/* 输入卡片（高度可拖拽，可折叠）*/}
+          <div
+            className={`bg-white rounded-lg border border-gray-200 shadow-sm shrink-0 overflow-auto ${inputPanelCollapsed ? 'input-panel-collapsed' : ''}`}
+            style={{ height: `${inputPanelHeight}px` }}
+            onClick={() => { if (inputPanelCollapsed) setInputPanelCollapsed(false); }}
+          >
             {/* 分析类型 tabs + LLM 开关 */}
-            <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-slate-50">
+            <div className={`flex items-center justify-between px-4 py-2 ${inputPanelCollapsed ? '' : 'border-b border-gray-100'} bg-slate-50 input-panel-tabs`}>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setAnalysisType('log')}
@@ -6242,6 +6333,14 @@ const AIAnalysis: React.FC = () => {
                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${useLLM ? 'translate-x-5' : 'translate-x-1'}`} />
                   </button>
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setInputPanelCollapsed(true)}
+                  className="ml-1 p-1 rounded hover:bg-slate-200 text-gray-400 hover:text-gray-600 transition-colors"
+                  title="折叠输入区"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 15l-6-6-6 6"/></svg>
+                </button>
               </div>
             </div>
 
@@ -6727,9 +6826,12 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.role === 'assistant' && messageSubgoals.length > 0 && (
-                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2">
-                          <div className="text-[11px] font-medium text-sky-700 mb-1">子目标拆解</div>
-                          <div className="space-y-1.5">
+                        <details className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2 group" open>
+                          <summary className="cursor-pointer text-[11px] font-medium text-sky-700 list-none flex items-center gap-1">
+                            <svg className="w-3 h-3 text-sky-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                            子目标拆解
+                          </summary>
+                          <div className="mt-1.5 space-y-1.5">
                             {messageSubgoals.map((goal, goalIndex) => (
                               <div key={`${msg.message_id || index}:subgoal:${goal.id || goalIndex}`} className="rounded border border-sky-100 bg-white p-1.5">
                                 <div className="flex items-center justify-between gap-2">
@@ -6747,10 +6849,15 @@ const AIAnalysis: React.FC = () => {
                               </div>
                             ))}
                           </div>
-                        </div>
+                        </details>
                       )}
                       {msg.role === 'assistant' && messageReflection && (
-                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2">
+                        <details className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2 group" open>
+                          <summary className="cursor-pointer text-[11px] font-medium text-violet-700 list-none flex items-center gap-1">
+                            <svg className="w-3 h-3 text-violet-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                            反思 & 缺口
+                          </summary>
+                          <div className="mt-1.5 space-y-1.5">
                           <div className="text-[11px] font-medium text-violet-700 mb-1">反思闭环</div>
                           <div className="flex flex-wrap gap-2 text-[11px] text-violet-700">
                             <span>迭代: {Number(messageReflection.iterations || 0)}</span>
@@ -6764,6 +6871,7 @@ const AIAnalysis: React.FC = () => {
                             <div className="mt-1 text-[11px] text-violet-700">下一步：{reflectionActions.slice(0, 3).join('；')}</div>
                           )}
                         </div>
+                        </details>
                       )}
                       {msg.role === 'assistant' && messageActions.length > 0 && (
                         <div className="mt-1.5 w-full max-w-[85%] rounded border border-emerald-200 bg-emerald-50 p-2">
@@ -7101,20 +7209,26 @@ const AIAnalysis: React.FC = () => {
               )}
             </div>
 
-            {/* 快捷追问建议 */}
+            {/* 快捷追问建议 - 可折叠 */}
             {followUpSuggestions.length > 0 && (
-              <div className="px-3 py-2 border-t border-gray-100 bg-slate-50 flex flex-wrap gap-1.5 shrink-0">
-                {followUpSuggestions.map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    type="button"
-                    onClick={() => setFollowUpQuestion(suggestion)}
-                    className="px-2 py-0.5 text-[11px] rounded bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-                  >
-                    {suggestion}
-                  </button>
-                ))}
-              </div>
+              <details className="px-3 py-1.5 border-t border-gray-100 bg-slate-50 shrink-0 group" open>
+                <summary className="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-500 hover:text-gray-700 list-none">
+                  <svg className="w-3 h-3 text-gray-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                  <span>快捷追问 ({followUpSuggestions.length})</span>
+                </summary>
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {followUpSuggestions.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => setFollowUpQuestion(suggestion)}
+                      className="px-2 py-0.5 text-[11px] rounded bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              </details>
             )}
 
             {/* 横向日志注入工具 */}

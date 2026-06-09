@@ -1983,6 +1983,10 @@ const LogsExplorer: React.FC = () => {
     const host = extractHost(log);
     const container = extractContainer(log);
     const namespace = extractNamespace(log);
+    const sourceCluster = pickText(
+      log.source_cluster,
+      asRecord(log.attributes).source_cluster,
+    );
     const normalizedHost = normalizeK8sFilterValue(host);
     const normalizedContainer = normalizeK8sFilterValue(container);
     const normalizedNamespace = normalizeK8sFilterValue(namespace);
@@ -2416,6 +2420,25 @@ const LogsExplorer: React.FC = () => {
                       </button>
                     </div>
                   </div>
+                  {/* 所属集群 */}
+                  {sourceCluster && sourceCluster !== '-' && (
+                    <div>
+                      <span className="text-[11px] uppercase" style={{ color: 'var(--app-text-subtle)' }}>所属集群</span>
+                      <div className="mt-1 flex items-center gap-2">
+                        <span
+                          className="text-xs font-medium inline-flex items-center gap-1 px-2 py-0.5 rounded"
+                          style={{
+                            background: 'var(--color-info-soft)',
+                            color: 'var(--color-info-dark)',
+                            border: '1px solid var(--color-info-border)',
+                          }}
+                        >
+                          <Server className="w-3 h-3" />
+                          {sourceCluster}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

@@ -31,7 +31,7 @@ def test_get_llm_service_auto_selects_deepseek(monkeypatch):
     assert service.config.provider == "deepseek"
     assert service.config.api_key == "deepseek-test-key"
     assert service.config.api_base == "https://api.deepseek.com/v1"
-    assert service.config.model == "deepseek-chat"
+    assert service.config.model == "deepseek-v4-flash"
 
     _reset_singleton()
 

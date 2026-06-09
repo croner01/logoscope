@@ -18,12 +18,8 @@ from ai.agent_runtime.command_bridge import (
     bridge_exec_run_stream_to_runtime,
     build_approval_required_payload,
 )
-from ai.agent_runtime.command_router import CommandRouter
-from ai.agent_runtime.cost_preflight import CostPreflight, Decision
 from ai.agent_runtime.exec_client import ExecServiceClientError, cancel_command_run, create_command_run
-from ai.agent_runtime.execution_journal import ExecutionJournal
 from ai.agent_runtime.models import AgentRun, RunEvent, build_id, utc_now_iso
-from ai.agent_runtime.query_client import QueryServiceClient, QueryServiceClientError
 from ai.agent_runtime.recovery import attempt_command_recovery
 from ai.agent_runtime.status import (
     RUN_STATUS_BLOCKED,
@@ -382,9 +378,6 @@ class AgentRuntimeService:
         self._subscribers: Dict[str, List[asyncio.Queue]] = {}
         self._background_tasks: Dict[str, List[asyncio.Task]] = {}
         self._pending_action_timers: Dict[str, asyncio.Task] = {}
-        self._command_router = CommandRouter()
-        self._cost_preflight = CostPreflight()
-        self._query_client = QueryServiceClient()
 
     def attach_storage(self, storage_adapter: Any) -> None:
         self.store.attach_storage(storage_adapter)
@@ -879,26 +872,6 @@ class AgentRuntimeService:
             event_protocol.ASSISTANT_MESSAGE_FINALIZED,
             payload,
         )
-
-    def _summarize_command_result(self, exec_result: Dict[str, Any], purpose: str) -> str:
-        """Generate a one-line summary of a command result."""
-        status = _as_str(exec_result.get("status", "completed")).strip().lower()
-        exit_code = _as_int(exec_result.get("exit_code"), 0)
-        stdout = _as_str(exec_result.get("stdout", "")).strip()
-        stderr = _as_str(exec_result.get("stderr", "")).strip()
-
-        if status in {"failed", "cancelled", "timed_out"}:
-            err = stderr or _as_str(exec_result.get("error_detail", ""))
-            return f"失败 ({status}): {err[:120]}" if err else f"失败 ({status})"
-
-        if exit_code != 0:
-            return f"退出码 {exit_code}: {stderr[:120]}" if stderr else f"退出码 {exit_code}"
-
-        # Success — extract key info from output
-        lines = [l for l in stdout.split("\n") if l.strip()]
-        if not lines:
-            return f"完成: {purpose[:120]}"
-        return f"输出 {len(lines)} 行: {lines[0][:120]}"
 
     def finish_run(
         self,
@@ -2087,33 +2060,6 @@ class AgentRuntimeService:
                 command_fingerprint,
                 max_items=400,
             )
-        # ExecutionJournal: record completed/failed commands for session dedup
-        if terminal_status:
-            journal = ExecutionJournal.from_summary(dict(run.summary_json or {}))
-            result_summary = self._summarize_command_result(
-                result if isinstance(result, dict) else {},
-                _as_str(active_command_request.get("purpose")).strip() or _as_str(purpose),
-            )
-            journal.record(
-                fingerprint=_as_str(active_command_request.get("command_execution_key", "")),
-                command=_normalize_command_for_history(
-                    _as_str(active_command_request.get("command")).strip()
-                    or _as_str(command)
-                    or _as_str((result or {}).get("command"))
-                ),
-                target_kind=_as_str(active_command_request.get("target_kind")).strip(),
-                target_identity=_as_str(active_command_request.get("target_identity")).strip(),
-                exit_code=final_exit_code,
-                summary=result_summary,
-                output_preview=_as_str((result or {}).get("stdout", ""))[:2000],
-            )
-            summary_updates["execution_journal"] = journal.to_list()
-            # Increment cost tracker command count
-            cost_tracker = run.get_cost_tracker()
-            if isinstance(cost_tracker, dict):
-                cost_tracker["commands_executed"] = cost_tracker.get("commands_executed", 0) + 1
-                summary_updates["cost_tracker"] = cost_tracker
-
         if terminal_status and timed_out:
             runtime_options = self._runtime_options(run)
             timeout_recovery = attempt_timeout_recovery(
@@ -2289,15 +2235,6 @@ class AgentRuntimeService:
         )
         if gate_result is not None:
             return gate_result
-
-        # Stage 2.5: Cost preflight gate
-        cost_result = self._stage_cost_preflight_gate(
-            run_id=run_id,
-            tool_name=tool_name,
-            context=context,
-        )
-        if cost_result is not None:
-            return cost_result
 
         idempotency_result = self._stage_check_command_idempotency(
             run_id=run_id,
@@ -2777,81 +2714,6 @@ class AgentRuntimeService:
         context["command_meta"] = command_meta if isinstance(command_meta, dict) else {}
         return None
 
-    def _stage_cost_preflight_gate(
-        self,
-        *,
-        run_id: str,
-        tool_name: str,
-        context: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        """Evaluate command cost and optionally block for approval."""
-        run = context["run"]
-        safe_tool_call_id = context["safe_tool_call_id"]
-        safe_title = context["safe_title"]
-        safe_action_id = context["safe_action_id"]
-        safe_purpose = context["safe_purpose"]
-        safe_command = context.get("safe_command", "")
-        safe_command_spec = context.get("safe_command_spec", {})
-
-        cost_tracker = run.get_cost_tracker()
-        result = self._cost_preflight.evaluate(
-            safe_command_spec if isinstance(safe_command_spec, dict) else {},
-            cost_tracker,
-        )
-
-        if result.decision == Decision.AUTO:
-            return None
-
-        # BLOCK → emit approval_required and wait
-        approval_payload = build_approval_required_payload(
-            tool_call_id=safe_tool_call_id,
-            action_id=safe_action_id,
-            command=safe_command,
-            purpose=f"[Cost Gate] {result.reason}",
-            precheck={
-                "status": "confirmation_required",
-                "message": result.reason,
-                "command_type": "query",
-                "risk_level": "medium",
-                "command_family": "unknown",
-                "approval_policy": "cost_gate",
-                "target_kind": _as_str(context.get("target_kind", "")),
-                "target_identity": _as_str(context.get("target_identity", "")),
-                "requires_confirmation": True,
-                "requires_elevation": False,
-                "confirmation_ticket": "",
-            },
-        )
-        self._append_approval_context(run, approval_payload)
-        self._update_run_summary(
-            run,
-            pending_action_kind="cost_gate_approval",
-            pending_action_id=safe_action_id,
-        )
-        self.append_event(
-            run.run_id,
-            event_protocol.APPROVAL_REQUIRED,
-            approval_payload,
-        )
-        self.append_event(
-            run.run_id,
-            event_protocol.ACTION_WAITING_APPROVAL,
-            {
-                "tool_call_id": safe_tool_call_id,
-                "action_id": safe_action_id,
-                "command": safe_command,
-                "purpose": safe_purpose,
-                "reason": result.reason,
-                "gate": "cost_preflight",
-            },
-        )
-        return {
-            "status": "waiting_approval",
-            "tool_call_id": safe_tool_call_id,
-            "run": run,
-            "reason": result.reason,
-        }
-
     def _stage_check_command_idempotency(
         self,
         *,
@@ -2896,37 +2758,6 @@ class AgentRuntimeService:
                 "command_run_id": active_command_run_id,
                 "run": run,
             }
-
-        # Check ExecutionJournal for cached results with summaries
-        journal = ExecutionJournal.from_summary(summary)
-        journal_fp = journal.fingerprint(safe_command_spec if isinstance(safe_command_spec, dict) else {})
-        cached = journal.lookup(journal_fp)
-        if cached is not None:
-            self.append_event(
-                run.run_id,
-                event_protocol.TOOL_CALL_SKIPPED_DUPLICATE,
-                {
-                    "tool_call_id": safe_tool_call_id,
-                    "tool_name": _as_str(tool_name, "command.exec"),
-                    "title": safe_title,
-                    "status": "skipped_duplicate",
-                    "reason_code": "journal_cache_hit",
-                    "action_id": safe_action_id,
-                    "command": safe_command,
-                    "purpose": safe_purpose,
-                    "message": f"已执行过相同命令: {_as_str(cached.get('summary')).strip()}",
-                    "cached_summary": _as_str(cached.get("summary")).strip(),
-                    "evidence_reuse": True,
-                    "evidence_outcome": "reused",
-                },
-            )
-            return {
-                "status": "skipped_duplicate",
-                "tool_call_id": safe_tool_call_id,
-                "run": run,
-                "cached_summary": _as_str(cached.get("summary")).strip(),
-            }
-        context["journal_fingerprint"] = journal_fp
 
         command_run_index = _normalize_command_run_index(summary.get("command_run_index"), max_items=400)
         indexed_entry = (

@@ -81,6 +81,7 @@ export function buildRuntimeFollowUpContext(params: {
     container_name?: string | null;
     labels?: Record<string, string> | null;
     service_name?: string | null;
+    source_cluster?: string | null;
   } | null;
 }): Record<string, unknown> {
   const followupRelatedMeta = compactRecord(asRecord(params.followupRelatedMeta));
@@ -180,6 +181,7 @@ export function buildRuntimeFollowUpContext(params: {
       params.sourceTarget.pod_name
       || params.sourceTarget.namespace
       || params.sourceTarget.node_name
+      || params.sourceTarget.source_cluster
     ) ? compactRecord({
       pod_name: firstText(params.sourceTarget.pod_name),
       namespace: firstText(params.sourceTarget.namespace),
@@ -190,6 +192,7 @@ export function buildRuntimeFollowUpContext(params: {
         ? params.sourceTarget.labels
         : undefined,
       service_name: firstText(params.sourceTarget.service_name),
+      cluster_id: firstText(params.sourceTarget.source_cluster),
     }) : undefined,
   };
 

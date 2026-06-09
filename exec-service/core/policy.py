@@ -2011,7 +2011,16 @@ def _validate_kubectl_query_template(parts: List[str]) -> tuple[bool, str]:
     )
 
     if verb == "exec":
-        return False, "kubectl exec must go through approval"
+        remote_parts = _extract_kubectl_exec_command(parts)
+        if not remote_parts:
+            return False, "kubectl exec missing remote command"
+        remote_head = as_str(remote_parts[0]).strip().lower()
+        # Allow exec when the remote command is read-only by calling
+        # classify_command on the remote portion.
+        remote_meta = classify_command(" ".join(shlex.quote(item) for item in remote_parts).strip())
+        if bool(remote_meta.get("supported")) and not bool(remote_meta.get("requires_write_permission")):
+            return True, "kubectl exec read-only remote command whitelisted"
+        return False, "kubectl exec remote command not whitelisted or requires write permission"
 
     if verb == "rollout" and sub_verb not in rollout_query_subverbs:
         return False, "kubectl rollout query only allows status/history"

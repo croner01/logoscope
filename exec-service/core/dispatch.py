@@ -41,6 +41,7 @@ async def dispatch_command(
     executor_profile: str,
     target_kind: str,
     target_identity: str,
+    target_cluster_id: str = "",
     resolved_target_context: Optional[Dict[str, Any]] = None,
     timeout_seconds: int = 20,
     on_output: Optional[Callable[[str, str], Awaitable[None] | None]] = None,
@@ -53,6 +54,7 @@ async def dispatch_command(
         executor_profile=executor_profile,
         target_kind=target_kind,
         target_identity=target_identity,
+        target_cluster_id=target_cluster_id,
         resolved_target_context=resolved_target_context,
     )
     if on_dispatch_resolved is not None:

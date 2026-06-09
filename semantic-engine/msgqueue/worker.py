@@ -483,7 +483,7 @@ class LogWorker:
                         "id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name, "
                         "pod_id, container_name, container_id, container_image, level, severity_number, "
                         "message, trace_id, span_id, flags, labels, attributes_json, host_ip, "
-                        "cpu_limit, cpu_request, memory_limit, memory_request"
+                        "cpu_limit, cpu_request, memory_limit, memory_request, source_cluster"
                     ),
                     async_insert_settings=async_insert_settings,
                 )
@@ -1064,6 +1064,7 @@ class LogWorker:
                 resources.get("cpu_request", "") or "",
                 resources.get("memory_limit", "") or "",
                 resources.get("memory_request", "") or "",
+                event.get("source_cluster", "") or "",
             ]
             return row, k8s_context, host, host_ip
         except Exception as e:

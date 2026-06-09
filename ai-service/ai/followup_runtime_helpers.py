@@ -187,39 +187,55 @@ async def _build_followup_long_term_memory(
     request_id = _as_str(analysis_context.get("request_id"))
     keyword_hint = _as_str(question)[:60]
 
+    # Per-query timeout to avoid a single slow ClickHouse call consuming the
+    # entire long_term_memory budget.  Individual queries that exceed this are
+    # skipped; the function returns whatever was fast enough to complete.
+    _PER_QUERY_TIMEOUT = 2.5
+
+    async def _safe_list_sessions(**kwargs: Any) -> list:
+        """Run a single list_sessions call with a short timeout; return [] on failure."""
+        try:
+            result = await asyncio.wait_for(
+                run_blocking(session_store.list_sessions, **kwargs),
+                timeout=_PER_QUERY_TIMEOUT,
+            )
+            return _as_list(result)
+        except (asyncio.TimeoutError, Exception):
+            return []
+
     candidate_sessions: List[Any] = []
     if service_name:
-        by_service = await run_blocking(
-            session_store.list_sessions,
-            limit=session_limit * 2,
-            offset=0,
-            analysis_type="log",
-            service_name=service_name,
-            include_archived=False,
-            search_query="",
-            pinned_first=True,
-            sort_by="updated_at",
-            sort_order="desc",
+        candidate_sessions.extend(
+            await _safe_list_sessions(
+                limit=session_limit * 2,
+                offset=0,
+                analysis_type="log",
+                service_name=service_name,
+                include_archived=False,
+                search_query="",
+                pinned_first=True,
+                sort_by="updated_at",
+                sort_order="desc",
+            )
         )
-        candidate_sessions.extend(_as_list(by_service))
 
     for search_query in [trace_id, request_id, keyword_hint]:
         search_text = _as_str(search_query)
         if not search_text:
             continue
-        by_search = await run_blocking(
-            session_store.list_sessions,
-            limit=session_limit,
-            offset=0,
-            analysis_type="",
-            service_name="",
-            include_archived=False,
-            search_query=search_text,
-            pinned_first=True,
-            sort_by="updated_at",
-            sort_order="desc",
+        candidate_sessions.extend(
+            await _safe_list_sessions(
+                limit=session_limit,
+                offset=0,
+                analysis_type="",
+                service_name="",
+                include_archived=False,
+                search_query=search_text,
+                pinned_first=True,
+                sort_by="updated_at",
+                sort_order="desc",
+            )
         )
-        candidate_sessions.extend(_as_list(by_search))
 
     deduped: List[Any] = []
     seen_session_ids = set()

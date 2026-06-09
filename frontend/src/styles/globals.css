@@ -730,3 +730,16 @@ code {
   transition: background var(--transition-fast);
 }
 .resize-handle-h:hover > div { background: var(--brand-primary); }
+
+/* 输入卡片折叠状态 - 仅显示顶部栏，点击可展开 */
+.input-panel-collapsed {
+  height: 40px !important;
+  overflow: hidden;
+  cursor: pointer;
+}
+.input-panel-collapsed:hover {
+  border-color: var(--brand-primary);
+}
+.input-panel-collapsed .input-panel-tabs {
+  border-bottom: none;
+}

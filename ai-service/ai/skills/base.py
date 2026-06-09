@@ -161,6 +161,16 @@ class SkillStep:
             "status": "pending",
         }
 
+    def to_command_spec(self, source_target: Dict[str, Any] | None = None):
+        """Convert this step's command_spec dict to a validated CommandSpec.
+
+        Uses the unified ai.command.spec.CommandSpec model.
+        """
+        from ai.skills.builtin._helpers import build_command_spec
+
+        spec_dict = self.command_spec if isinstance(self.command_spec, dict) else {}
+        return build_command_spec(spec_dict, purpose=self.purpose, source_target=source_target)
+
 
 @dataclass
 class SkillMatchDetails:

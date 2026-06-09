@@ -36,6 +36,7 @@ from ai.followup_command import (
 )
 from ai.langchain_runtime import run_followup_langchain
 from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
+from ai.runtime.bridge import unified_diagnosis_bridge, _is_unified_engine_enabled
 from ai.knowledge_provider import get_knowledge_gateway, shutdown_knowledge_gateway, reload_knowledge_gateway
 from ai.followup_prompt_helpers import (
     _build_followup_planner_prompt,
@@ -1837,6 +1838,114 @@ async def _run_followup_runtime_task(
             "stderr": _as_str(summary_payload.get("last_command_error_detail")),
             "message": last_error_detail,
         })
+    # === Execute OpenHands preview tool calls as initial analysis commands ===
+    # The RuntimeV4OrchestrationBridge.create_run() calls OpenHandsBackend.run()
+    # which produces tool_calls_preview, but these are only stored in the summary
+    # as informational metadata — they are NEVER fed into the execution pipeline.
+    # This block bridges that gap by executing the preview commands here so that
+    # _run_follow_up_analysis_core sees the results as prior context.
+    _inner_backend = summary_payload.get("inner_backend")
+    _inner_backend_dict = _inner_backend if isinstance(_inner_backend, dict) else {}
+    tool_calls_preview = _as_list(_inner_backend_dict.get("tool_calls_preview"))
+    if tool_calls_preview:
+        logger.info(
+            "runtime_task: run=%s executing %d preview tool call(s)",
+            run_id, len(tool_calls_preview),
+        )
+        for i, preview in enumerate(tool_calls_preview):
+            try:
+                command = _as_str(preview.get("command")).strip()
+                if not command:
+                    continue
+                normalized = _normalize_followup_command_line(command)
+                if normalized and normalized in previous_executed_commands:
+                    continue
+
+                purpose = _as_str(preview.get("purpose"), f"OpenHands preview {i+1}")
+                action_id = _as_str(preview.get("action_id")) or f"preview-{i}"
+                _cs_raw = preview.get("command_spec")
+                cs = _cs_raw if isinstance(_cs_raw, dict) else {}
+                _cs_args_raw = cs.get("args")
+                cs_args = _cs_args_raw if isinstance(_cs_args_raw, dict) else {}
+                target_kind = _as_str(cs_args.get("target_kind", "k8s_cluster"))
+                target_identity = _as_str(cs_args.get("target_identity", "namespace:islap"))
+
+                # Precheck to classify the command
+                precheck = await precheck_controlled_command(
+                    session_id=run_id,
+                    message_id=run_id,
+                    action_id=action_id,
+                    command=command,
+                    purpose=purpose,
+                    target_kind=target_kind,
+                    target_identity=target_identity,
+                )
+                precheck_status = _as_str(precheck.get("status")).lower()
+                permission_blocked = precheck_status == "permission_required"
+                needs_elevation = bool(precheck.get("requires_elevation"))
+
+                # Auto-confirm readonly commands; skip hard-denied or elevation
+                if permission_blocked or needs_elevation:
+                    logger.info(
+                        "runtime_task: run=%s preview[%d] skipped (precheck=%s, elevation=%s) cmd=%s",
+                        run_id, i, precheck_status, needs_elevation, command[:80],
+                    )
+                    continue
+
+                ticket = _as_str(precheck.get("confirmation_ticket"))
+                confirmed = precheck_status in {"ok", "confirmation_required"}
+
+                # Execute the command
+                result = await execute_controlled_command(
+                    session_id=run_id,
+                    message_id=run_id,
+                    action_id=action_id,
+                    command=command,
+                    command_spec=cs if isinstance(cs, dict) else {},
+                    purpose=purpose,
+                    confirmed=confirmed,
+                    elevated=False,
+                    confirmation_ticket=ticket,
+                    timeout_seconds=int(float(_as_str(cs_args.get("timeout_s", "20")) or "20")),
+                    target_kind=target_kind,
+                    target_identity=target_identity,
+                )
+
+                run_data = result.get("run") if isinstance(result.get("run"), dict) else result
+                exit_code = int(run_data.get("exit_code", 0))
+                status = _as_str(run_data.get("status", "completed"))
+
+                observation = {
+                    "action_id": action_id,
+                    "command": command,
+                    "status": status,
+                    "exit_code": exit_code,
+                    "timed_out": bool(run_data.get("timed_out", False)),
+                    "auto_executed": True,
+                    "stdout": _as_str(run_data.get("stdout")),
+                    "stderr": _as_str(run_data.get("stderr")),
+                    "message": _as_str(run_data.get("error_detail")),
+                }
+                previous_action_observations.append(observation)
+                if normalized:
+                    previous_executed_commands.append(normalized)
+                logger.info(
+                    "runtime_task: run=%s preview[%d] exit=%d cmd=%s",
+                    run_id, i, exit_code, command[:80],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "runtime_task: run=%s preview[%d] failed: %s",
+                    run_id, i, exc,
+                )
+
+    # Persist preview execution results so subsequent followup tasks can see them
+    if tool_calls_preview:
+        runtime_service._update_run_summary(  # noqa: SLF001
+            run,
+            executed_commands=previous_executed_commands[-300:],
+            action_observations=previous_action_observations[-200:],
+        )
     runtime_service._update_run_summary(  # noqa: SLF001
         run,
         followup_runtime_worker="running",
@@ -6508,23 +6617,45 @@ async def _run_follow_up_analysis_core(
             return None
         return new_actions_raw
 
-    react_exec_bundle = await _run_followup_auto_exec_react_loop(
-        session_id=analysis_session_id,
-        message_id=assistant_message_id,
-        actions=followup_actions,
-        analysis_context=analysis_context,
-        allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
-        executed_commands=executed_commands_set,
-        initial_action_observations=prior_action_observations,
-        initial_evidence_gaps=evidence_gap_queue_for_execution,
-        initial_summary=answer_summary_seed,
-        emit_iteration_thoughts=bool(show_thought),
-        run_blocking=_run_blocking,
-        build_react_loop_fn=_build_followup_react_loop,
-        event_callback=event_callback,
-        logger=logger,
-        llm_replan_callback=_llm_replan_callback,
-    )
+    # ── Unified engine path (opt-in via env var) ──────────────────────────
+    if _is_unified_engine_enabled():
+        llm_service = get_llm_service()
+        react_exec_bundle = await unified_diagnosis_bridge(
+            session_id=analysis_session_id,
+            message_id=assistant_message_id,
+            actions=followup_actions,
+            analysis_context=analysis_context,
+            allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
+            executed_commands=executed_commands_set,
+            initial_action_observations=prior_action_observations,
+            initial_evidence_gaps=evidence_gap_queue_for_execution,
+            initial_summary=answer_summary_seed,
+            emit_iteration_thoughts=bool(show_thought),
+            run_blocking=_run_blocking,
+            build_react_loop_fn=_build_followup_react_loop,
+            event_callback=event_callback,
+            logger=logger,
+            llm_replan_callback=_llm_replan_callback,
+            llm_service=llm_service,
+        )
+    else:
+        react_exec_bundle = await _run_followup_auto_exec_react_loop(
+            session_id=analysis_session_id,
+            message_id=assistant_message_id,
+            actions=followup_actions,
+            analysis_context=analysis_context,
+            allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
+            executed_commands=executed_commands_set,
+            initial_action_observations=prior_action_observations,
+            initial_evidence_gaps=evidence_gap_queue_for_execution,
+            initial_summary=answer_summary_seed,
+            emit_iteration_thoughts=bool(show_thought),
+            run_blocking=_run_blocking,
+            build_react_loop_fn=_build_followup_react_loop,
+            event_callback=event_callback,
+            logger=logger,
+            llm_replan_callback=_llm_replan_callback,
+        )
     promoted_actions = [
         item
         for item in _as_list(react_exec_bundle.get("actions"))

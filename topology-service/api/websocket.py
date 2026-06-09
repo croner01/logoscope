@@ -58,6 +58,10 @@ class TopologyConnectionManager:
         namespace = str(namespace).strip() if namespace is not None else None
         if namespace == "":
             namespace = None
+        source_cluster = payload.get("source_cluster")
+        source_cluster = str(source_cluster).strip() if source_cluster is not None else None
+        if source_cluster == "":
+            source_cluster = None
         try:
             confidence_threshold = float(payload.get("confidence_threshold", 0.3))
         except (TypeError, ValueError):
@@ -101,6 +105,7 @@ class TopologyConnectionManager:
         return {
             "time_window": time_window,
             "namespace": namespace,
+            "source_cluster": source_cluster,
             "confidence_threshold": confidence_threshold,
             "inference_mode": inference_mode,
             "message_target_enabled": normalized_message_target_enabled,
@@ -112,6 +117,7 @@ class TopologyConnectionManager:
     def _subscription_key(self, params: Optional[Dict[str, Any]] = None) -> str:
         normalized = self._normalize_subscription(params)
         namespace = normalized["namespace"] or "*"
+        source_cluster = normalized.get("source_cluster") or "*"
         threshold = f"{normalized['confidence_threshold']:.3f}"
         inference_mode = normalized.get("inference_mode", "rule")
         enabled = "default" if normalized.get("message_target_enabled") is None else str(bool(normalized.get("message_target_enabled"))).lower()
@@ -120,7 +126,7 @@ class TopologyConnectionManager:
         max_per_log = normalized.get("message_target_max_per_log")
         min_text = "default" if min_support is None else str(min_support)
         max_text = "default" if max_per_log is None else str(max_per_log)
-        return f"{normalized['time_window']}|{namespace}|{threshold}|{inference_mode}|{enabled}|{patterns}|{min_text}|{max_text}"
+        return f"{normalized['time_window']}|{namespace}|{source_cluster}|{threshold}|{inference_mode}|{enabled}|{patterns}|{min_text}|{max_text}"
 
     def _cleanup_stale_topology_cache_keys(self) -> None:
         """Remove cached topology entries that no active subscription references."""
@@ -496,6 +502,7 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
                             hybrid_builder,
                             time_window=normalized.get("time_window", "1 HOUR"),
                             namespace=normalized.get("namespace"),
+                            source_cluster=normalized.get("source_cluster"),
                             confidence_threshold=normalized.get("confidence_threshold", 0.3),
                             inference_mode=normalized.get("inference_mode", "rule"),
                             message_target_enabled=normalized.get("message_target_enabled"),
@@ -517,6 +524,7 @@ async def topology_websocket_endpoint(websocket: WebSocket, hybrid_builder):
                             hybrid_builder,
                             time_window=subscription.get("time_window", "1 HOUR"),
                             namespace=subscription.get("namespace"),
+                            source_cluster=subscription.get("source_cluster"),
                             confidence_threshold=subscription.get("confidence_threshold", 0.3),
                             inference_mode=subscription.get("inference_mode", "rule"),
                             message_target_enabled=subscription.get("message_target_enabled"),

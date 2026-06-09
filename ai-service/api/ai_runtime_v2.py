@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from ai.runtime_v4 import get_runtime_v4_bridge
+from ai.runtime.bridge import _is_unified_engine_enabled
 from ai.runtime_v4.adapter.event_mapper import map_run_snapshot
 from ai.runtime_v4.api_models import (
     ApprovalResolveRequest,
@@ -1064,6 +1065,20 @@ async def execute_run_command_action(run_id: str, request: CommandActionRequest)
             step_id=_as_str(payload.get("step_id")).strip(),
         )
     payload["command_spec"] = command_spec
+    # Unified engine: validate + normalize command_spec through new pipeline
+    if _is_unified_engine_enabled():
+        try:
+            from ai.command.normalizer import normalize_command_spec
+            from ai.command.security import evaluate_command, SessionCostState
+            spec = normalize_command_spec(command_spec)
+            decision = evaluate_command(spec, session_cost=SessionCostState())
+            if not decision.allowed:
+                raise HTTPException(status_code=400, detail=decision.reason)
+            payload["command_spec"] = spec.model_dump()
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Fall through to legacy path on normalization failure
     # Backward-compatible alias: keep one token field that runtime can consume as confirmation_ticket.
     if _as_str(payload.get("approval_token")).strip() and not _as_str(payload.get("confirmation_ticket")).strip():
         payload["confirmation_ticket"] = _as_str(payload.get("approval_token"))
