@@ -311,6 +311,48 @@ class ConfidenceCalculator:
             "breakdown": {key: round(value, 3) for key, value in penalties.items()},
         }
 
+    @staticmethod
+    def calculate_logs_only_quality_score(
+        log_count: float = 0.0,
+        error_rate_node: float = 0.0,
+        is_inferred: bool = False,
+        call_count: Optional[int] = None,
+        confidence: float = 0.0,
+    ) -> float:
+        """计算仅基于 Logs 数据的替代质量分（无 Traces 时用）。
+
+        Args:
+            log_count: 源节点的日志量
+            error_rate_node: 源节点的日志错误率
+            is_inferred: 是否为推断边
+            call_count: 调用次数（推断边为 None）
+            confidence: 边的置信度
+
+        Returns:
+            float: 质量分 (0-100)
+        """
+        score = 100.0
+
+        # 1. 错误率惩罚（从源节点的日志错误率）
+        score -= min(max(error_rate_node, 0.0) * 100.0 * 0.50, 35.0)
+
+        # 2. 样本不足惩罚
+        effective_samples = max(float(call_count or 0), max(log_count, 0.0))
+        if effective_samples < 100.0:
+            score -= 10.0
+        elif effective_samples < 500.0:
+            score -= 5.0
+
+        # 3. 推断边额外惩罚
+        if is_inferred:
+            score -= 8.0
+
+        # 4. 低置信度惩罚
+        if confidence < 0.4:
+            score -= 5.0
+
+        return max(0.0, min(100.0, round(score, 2)))
+
     def recalculate_topology_confidence(
         self,
         topology: Dict[str, Any]
@@ -376,6 +418,7 @@ class ConfidenceCalculator:
             }
 
         # 重新计算边置信度
+        node_metrics_map = {node.get("id"): node.get("metrics", {}) for node in nodes}
         for edge in edges:
             edge_metrics = edge.get("metrics", {})
 
@@ -412,16 +455,37 @@ class ConfidenceCalculator:
             )
 
             edge_metrics["confidence"] = round(new_confidence, 3)
-            quality = self.calculate_edge_quality_score(edge_metrics)
-            edge_metrics["quality_score"] = quality["score"]
+            edge["node_metrics"] = node_metrics_map.get(edge.get("source"), {})
+
+            # 检查数据源是否包含 traces，决定使用哪种 quality_score
+            ds_list = edge_metrics.get("data_sources") or []
+            has_traces = any(
+                str(s).strip().lower() == "traces" for s in ds_list
+            )
+            if has_traces:
+                quality = self.calculate_edge_quality_score(edge_metrics)
+                edge_metrics["quality_score"] = quality["score"]
+                edge_metrics["quality_details"] = {
+                    "breakdown": quality["breakdown"],
+                    "calculated_at": self.reference_time.isoformat()
+                }
+            else:
+                node_metrics = edge.get("node_metrics") or {}
+                logs_only_score = self.calculate_logs_only_quality_score(
+                    log_count=float(node_metrics.get("log_count") or 0),
+                    error_rate_node=float(node_metrics.get("error_rate") or 0),
+                    is_inferred=str(edge_metrics.get("data_source") or "").strip().lower()
+                    in ("inferred", "logs_heuristic"),
+                    call_count=edge_metrics.get("call_count"),
+                    confidence=edge_metrics.get("confidence") or 0.0,
+                )
+                edge_metrics["quality_score"] = logs_only_score
+                edge_metrics["quality_source"] = "logs_only"
+
             edge_metrics["confidence_details"] = {
                 "error_rate": edge_metrics.get("error_rate", 0),
                 "call_count": edge_metrics.get("call_count", 0),
                 "data_sources": data_sources,
-                "calculated_at": self.reference_time.isoformat()
-            }
-            edge_metrics["quality_details"] = {
-                "breakdown": quality["breakdown"],
                 "calculated_at": self.reference_time.isoformat()
             }
 
