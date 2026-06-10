@@ -836,7 +836,7 @@ const LogsExplorer: React.FC = () => {
   const stableEventsRef = useRef<LogEvent[]>([]);
   const effectiveDefaultTimeWindow = autoExpandedWindow ? FALLBACK_LOGS_TIME_WINDOW : DEFAULT_LOGS_TIME_WINDOW;
 
-  // 筛选参数防抖：300ms 内合并多次变化
+  // 筛选参数防抖：300ms 内合并多次变化（时间参数不需防抖，用户操作是主动确认的）
   const debouncedSelectedLevels = useDebounce(selectedLevels, 300);
   const debouncedSelectedServices = useDebounce(selectedServices, 300);
   const debouncedSelectedNamespaces = useDebounce(selectedNamespaces, 300);
@@ -844,9 +844,6 @@ const LogsExplorer: React.FC = () => {
   const debouncedTraceIdFilter = useDebounce(traceIdFilter, 300);
   const debouncedRequestIdFilter = useDebounce(requestIdFilter, 300);
   const debouncedPodNameFilter = useDebounce(podNameFilter, 300);
-  const debouncedStartTime = useDebounce(startTime, 300);
-  const debouncedEndTime = useDebounce(endTime, 300);
-  const debouncedExcludeHealthCheck = useDebounce(excludeHealthCheck, 300);
 
   const applyTimeRange = useCallback((nextStart: string, nextEnd: string) => {
     const normalized = normalizeTimeRange(nextStart, nextEnd);
@@ -966,22 +963,22 @@ const LogsExplorer: React.FC = () => {
     if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
     if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
-    if (debouncedStartTime) params.start_time = debouncedStartTime;
-    if (debouncedEndTime) params.end_time = debouncedEndTime;
-    if (debouncedExcludeHealthCheck) params.exclude_health_check = true;
+    if (startTime) params.start_time = startTime;
+    if (endTime) params.end_time = endTime;
+    if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
       if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
       if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
-    } else if (!debouncedStartTime && !debouncedEndTime) {
+    } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     return params;
-  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, debouncedStartTime, debouncedEndTime, debouncedExcludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
+  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
 
   const { data, loading, error, refetch } = useEvents(apiParams);
   const aggregatedParams = useMemo(() => {
@@ -1005,18 +1002,18 @@ const LogsExplorer: React.FC = () => {
     if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
     if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
-    if (debouncedStartTime) params.start_time = debouncedStartTime;
-    if (debouncedEndTime) params.end_time = debouncedEndTime;
-    if (debouncedExcludeHealthCheck) params.exclude_health_check = true;
+    if (startTime) params.start_time = startTime;
+    if (endTime) params.end_time = endTime;
+    if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
       if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
       if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
-    } else if (!debouncedStartTime && !debouncedEndTime) {
+    } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     return params;
@@ -1032,9 +1029,9 @@ const LogsExplorer: React.FC = () => {
     correlationRequestIds,
     debouncedPodNameFilter,
     debouncedSearchQuery,
-    debouncedStartTime,
-    debouncedEndTime,
-    debouncedExcludeHealthCheck,
+    startTime,
+    endTime,
+    excludeHealthCheck,
     anchorTime,
     topologyJumpContext,
     effectiveDefaultTimeWindow,
@@ -1051,22 +1048,40 @@ const LogsExplorer: React.FC = () => {
   );
   const facetParams = useMemo(() => {
     const params: LogsFacetQueryParams = {};
-    // Facet 只反应时间窗口内的全量数据分布，不传递级别/服务等筛选。
-    // 这样用户切换筛选时面板计数保持稳定，反映窗口内真实分布。
+    // 保持 facet 与 events 查询范围一致，带上筛选参数。
+    // 防抖（Task 2）已确保快速连点筛选不会过度触发请求。
+    if (debouncedSelectedLevels.length === 1) params.level = debouncedSelectedLevels[0];
+    if (debouncedSelectedLevels.length > 1) params.levels = debouncedSelectedLevels.join(',');
+    if (debouncedSelectedServices.length === 1) params.service_name = debouncedSelectedServices[0];
+    if (debouncedSelectedServices.length > 1) params.service_names = debouncedSelectedServices.join(',');
+    if (debouncedSelectedNamespaces.length === 1) params.namespace = debouncedSelectedNamespaces[0];
+    if (debouncedSelectedNamespaces.length > 1) params.namespaces = debouncedSelectedNamespaces.join(',');
+    if (debouncedSelectedContainers.length === 1) params.container_name = debouncedSelectedContainers[0];
+    if (debouncedTraceIdFilter) params.trace_id = debouncedTraceIdFilter;
+    if (correlationTraceIds.length > 0) params.trace_ids = correlationTraceIds.join(',');
+    if (debouncedRequestIdFilter) params.request_id = debouncedRequestIdFilter;
+    if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
+    if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
-    if (debouncedStartTime) params.start_time = debouncedStartTime;
-    if (debouncedEndTime) params.end_time = debouncedEndTime;
+    if (startTime) params.start_time = startTime;
+    if (endTime) params.end_time = endTime;
+    if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
-      if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
-    } else if (!debouncedStartTime && !debouncedEndTime) {
+      if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
+      if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
+      if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
+      if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
+      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
+    } else if (!startTime && !endTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     params.limit_services = 300;
     params.limit_namespaces = 300;
     params.limit_levels = 20;
     return params;
-  }, [debouncedSearchQuery, debouncedStartTime, debouncedEndTime, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
+  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
   const { data: facetsData } = useLogFacets(facetParams);
 
   useEffect(() => {
@@ -1100,8 +1115,8 @@ const LogsExplorer: React.FC = () => {
     namespace: debouncedSelectedNamespaces.length === 1 ? debouncedSelectedNamespaces[0] : undefined,
     container_name: debouncedSelectedContainers.length === 1 ? debouncedSelectedContainers[0] : undefined,
     level: debouncedSelectedLevels.length === 1 ? debouncedSelectedLevels[0] : undefined,
-    exclude_health_check: debouncedExcludeHealthCheck,
-  }), [debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedSelectedLevels, debouncedExcludeHealthCheck]);
+    exclude_health_check: excludeHealthCheck,
+  }), [debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedSelectedLevels, excludeHealthCheck]);
 
   const {
     logs: realtimeLogs,
