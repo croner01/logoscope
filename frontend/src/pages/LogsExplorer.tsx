@@ -1051,30 +1051,14 @@ const LogsExplorer: React.FC = () => {
   );
   const facetParams = useMemo(() => {
     const params: LogsFacetQueryParams = {};
-    if (debouncedSelectedLevels.length === 1) params.level = debouncedSelectedLevels[0];
-    if (debouncedSelectedLevels.length > 1) params.levels = debouncedSelectedLevels.join(',');
-    if (debouncedSelectedServices.length === 1) params.service_name = debouncedSelectedServices[0];
-    if (debouncedSelectedServices.length > 1) params.service_names = debouncedSelectedServices.join(',');
-    if (debouncedSelectedNamespaces.length === 1) params.namespace = debouncedSelectedNamespaces[0];
-    if (debouncedSelectedNamespaces.length > 1) params.namespaces = debouncedSelectedNamespaces.join(',');
-    if (debouncedSelectedContainers.length === 1) params.container_name = debouncedSelectedContainers[0];
-    if (debouncedTraceIdFilter) params.trace_id = debouncedTraceIdFilter;
-    if (correlationTraceIds.length > 0) params.trace_ids = correlationTraceIds.join(',');
-    if (debouncedRequestIdFilter) params.request_id = debouncedRequestIdFilter;
-    if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
-    if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
+    // Facet 只反应时间窗口内的全量数据分布，不传递级别/服务等筛选。
+    // 这样用户切换筛选时面板计数保持稳定，反映窗口内真实分布。
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
     if (debouncedStartTime) params.start_time = debouncedStartTime;
     if (debouncedEndTime) params.end_time = debouncedEndTime;
-    if (debouncedExcludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
-      if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
-      if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
-      if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
-      if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
       if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
-      if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
     } else if (!debouncedStartTime && !debouncedEndTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
@@ -1082,7 +1066,7 @@ const LogsExplorer: React.FC = () => {
     params.limit_namespaces = 300;
     params.limit_levels = 20;
     return params;
-  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, debouncedStartTime, debouncedEndTime, debouncedExcludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
+  }, [debouncedSearchQuery, debouncedStartTime, debouncedEndTime, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
   const { data: facetsData } = useLogFacets(facetParams);
 
   useEffect(() => {
