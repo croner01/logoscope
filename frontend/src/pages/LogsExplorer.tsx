@@ -833,6 +833,7 @@ const LogsExplorer: React.FC = () => {
   const [autoExpandedWindow, setAutoExpandedWindow] = useState(false);
   const loadingMoreRef = useRef(false);
   const dataUpdatedAfterAutoExpandRef = useRef(true);
+  const stableEventsRef = useRef<LogEvent[]>([]);
   const effectiveDefaultTimeWindow = autoExpandedWindow ? FALLBACK_LOGS_TIME_WINDOW : DEFAULT_LOGS_TIME_WINDOW;
 
   // 筛选参数防抖：300ms 内合并多次变化
@@ -1136,9 +1137,27 @@ const LogsExplorer: React.FC = () => {
     clearRealtimeLogs();
   }, [isPatternMode, realtimeMode, clearRealtimeLogs]);
 
+  // 加载时保留旧数据：ref 保存上一次成功加载的数据
+  useEffect(() => {
+    if (pagedEvents.length > 0 && (!loading || !data)) {
+      stableEventsRef.current = pagedEvents;
+    }
+  }, [pagedEvents, loading, data]);
+
+  // 加载中时展示 ref 中的旧数据，避免闪烁
+  const displayEvents = useMemo<LogEvent[]>(() => {
+    if (!loading && pagedEvents.length > 0) {
+      return pagedEvents;
+    }
+    if (loading && stableEventsRef.current.length > 0) {
+      return stableEventsRef.current;
+    }
+    return pagedEvents;
+  }, [loading, pagedEvents]);
+
   // 合并实时日志和静态日志
   const allEvents = useMemo(() => {
-    const staticEvents = pagedEvents;
+    const staticEvents = displayEvents;
     if (!realtimeMode || realtimeLogs.length === 0) {
       return staticEvents;
     }
@@ -1152,7 +1171,7 @@ const LogsExplorer: React.FC = () => {
     });
 
     return Array.from(merged.values()).sort(compareLogEventsDesc);
-  }, [realtimeMode, realtimeLogs, pagedEvents]);
+  }, [realtimeMode, realtimeLogs, displayEvents]);
 
   // 获取当前选中日志的上下文
   const currentSelectedLog = useMemo(() => {
