@@ -15,6 +15,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback, useDeferredValue } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useEvents, useLogFacets, useLogContext, useAnalyzeLog, useRealtimeLogs, useAggregatedLogs } from '../hooks/useApi';
+import { useDebounce } from '../hooks/useDebounce';
 import { useNavigation } from '../hooks/useNavigation';
 import LoadingState from '../components/common/LoadingState';
 import ErrorState from '../components/common/ErrorState';
@@ -834,6 +835,18 @@ const LogsExplorer: React.FC = () => {
   const dataUpdatedAfterAutoExpandRef = useRef(true);
   const effectiveDefaultTimeWindow = autoExpandedWindow ? FALLBACK_LOGS_TIME_WINDOW : DEFAULT_LOGS_TIME_WINDOW;
 
+  // 筛选参数防抖：300ms 内合并多次变化
+  const debouncedSelectedLevels = useDebounce(selectedLevels, 300);
+  const debouncedSelectedServices = useDebounce(selectedServices, 300);
+  const debouncedSelectedNamespaces = useDebounce(selectedNamespaces, 300);
+  const debouncedSelectedContainers = useDebounce(selectedContainers, 300);
+  const debouncedTraceIdFilter = useDebounce(traceIdFilter, 300);
+  const debouncedRequestIdFilter = useDebounce(requestIdFilter, 300);
+  const debouncedPodNameFilter = useDebounce(podNameFilter, 300);
+  const debouncedStartTime = useDebounce(startTime, 300);
+  const debouncedEndTime = useDebounce(endTime, 300);
+  const debouncedExcludeHealthCheck = useDebounce(excludeHealthCheck, 300);
+
   const applyTimeRange = useCallback((nextStart: string, nextEnd: string) => {
     const normalized = normalizeTimeRange(nextStart, nextEnd);
     setStartTime(normalized.start);
@@ -939,35 +952,35 @@ const LogsExplorer: React.FC = () => {
 
   const apiParams = useMemo(() => {
     const params: LogsQueryParams = { limit: PAGE_SIZE };
-    if (selectedLevels.length === 1) params.level = selectedLevels[0];
-    if (selectedLevels.length > 1) params.levels = selectedLevels.join(',');
-    if (selectedServices.length === 1) params.service_name = selectedServices[0];
-    if (selectedServices.length > 1) params.service_names = selectedServices.join(',');
-    if (selectedNamespaces.length === 1) params.namespace = selectedNamespaces[0];
-    if (selectedNamespaces.length > 1) params.namespaces = selectedNamespaces.join(',');
-    if (selectedContainers.length === 1) params.container_name = selectedContainers[0];
-    if (traceIdFilter) params.trace_id = traceIdFilter;
+    if (debouncedSelectedLevels.length === 1) params.level = debouncedSelectedLevels[0];
+    if (debouncedSelectedLevels.length > 1) params.levels = debouncedSelectedLevels.join(',');
+    if (debouncedSelectedServices.length === 1) params.service_name = debouncedSelectedServices[0];
+    if (debouncedSelectedServices.length > 1) params.service_names = debouncedSelectedServices.join(',');
+    if (debouncedSelectedNamespaces.length === 1) params.namespace = debouncedSelectedNamespaces[0];
+    if (debouncedSelectedNamespaces.length > 1) params.namespaces = debouncedSelectedNamespaces.join(',');
+    if (debouncedSelectedContainers.length === 1) params.container_name = debouncedSelectedContainers[0];
+    if (debouncedTraceIdFilter) params.trace_id = debouncedTraceIdFilter;
     if (correlationTraceIds.length > 0) params.trace_ids = correlationTraceIds.join(',');
-    if (requestIdFilter) params.request_id = requestIdFilter;
+    if (debouncedRequestIdFilter) params.request_id = debouncedRequestIdFilter;
     if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
-    if (podNameFilter) params.pod_name = podNameFilter;
+    if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
-    if (startTime) params.start_time = startTime;
-    if (endTime) params.end_time = endTime;
-    if (excludeHealthCheck) params.exclude_health_check = true;
+    if (debouncedStartTime) params.start_time = debouncedStartTime;
+    if (debouncedEndTime) params.end_time = debouncedEndTime;
+    if (debouncedExcludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
       if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
       if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
-    } else if (!startTime && !endTime) {
+    } else if (!debouncedStartTime && !debouncedEndTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     return params;
-  }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
+  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, debouncedStartTime, debouncedEndTime, debouncedExcludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
 
   const { data, loading, error, refetch } = useEvents(apiParams);
   const aggregatedParams = useMemo(() => {
@@ -978,49 +991,49 @@ const LogsExplorer: React.FC = () => {
       max_patterns: isPatternMode ? 120 : 1,
       max_samples: isPatternMode ? 5 : 1,
     };
-    if (selectedLevels.length === 1) params.level = selectedLevels[0];
-    if (selectedLevels.length > 1) params.levels = selectedLevels.join(',');
-    if (selectedServices.length === 1) params.service_name = selectedServices[0];
-    if (selectedServices.length > 1) params.service_names = selectedServices.join(',');
-    if (selectedNamespaces.length === 1) params.namespace = selectedNamespaces[0];
-    if (selectedNamespaces.length > 1) params.namespaces = selectedNamespaces.join(',');
-    if (selectedContainers.length === 1) params.container_name = selectedContainers[0];
-    if (traceIdFilter) params.trace_id = traceIdFilter;
+    if (debouncedSelectedLevels.length === 1) params.level = debouncedSelectedLevels[0];
+    if (debouncedSelectedLevels.length > 1) params.levels = debouncedSelectedLevels.join(',');
+    if (debouncedSelectedServices.length === 1) params.service_name = debouncedSelectedServices[0];
+    if (debouncedSelectedServices.length > 1) params.service_names = debouncedSelectedServices.join(',');
+    if (debouncedSelectedNamespaces.length === 1) params.namespace = debouncedSelectedNamespaces[0];
+    if (debouncedSelectedNamespaces.length > 1) params.namespaces = debouncedSelectedNamespaces.join(',');
+    if (debouncedSelectedContainers.length === 1) params.container_name = debouncedSelectedContainers[0];
+    if (debouncedTraceIdFilter) params.trace_id = debouncedTraceIdFilter;
     if (correlationTraceIds.length > 0) params.trace_ids = correlationTraceIds.join(',');
-    if (requestIdFilter) params.request_id = requestIdFilter;
+    if (debouncedRequestIdFilter) params.request_id = debouncedRequestIdFilter;
     if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
-    if (podNameFilter) params.pod_name = podNameFilter;
+    if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
-    if (startTime) params.start_time = startTime;
-    if (endTime) params.end_time = endTime;
-    if (excludeHealthCheck) params.exclude_health_check = true;
+    if (debouncedStartTime) params.start_time = debouncedStartTime;
+    if (debouncedEndTime) params.end_time = debouncedEndTime;
+    if (debouncedExcludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
       if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
       if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
-    } else if (!startTime && !endTime) {
+    } else if (!debouncedStartTime && !debouncedEndTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     return params;
   }, [
     isPatternMode,
-    selectedLevels,
-    selectedServices,
-    selectedNamespaces,
-    selectedContainers,
-    traceIdFilter,
+    debouncedSelectedLevels,
+    debouncedSelectedServices,
+    debouncedSelectedNamespaces,
+    debouncedSelectedContainers,
+    debouncedTraceIdFilter,
     correlationTraceIds,
-    requestIdFilter,
+    debouncedRequestIdFilter,
     correlationRequestIds,
-    podNameFilter,
+    debouncedPodNameFilter,
     debouncedSearchQuery,
-    startTime,
-    endTime,
-    excludeHealthCheck,
+    debouncedStartTime,
+    debouncedEndTime,
+    debouncedExcludeHealthCheck,
     anchorTime,
     topologyJumpContext,
     effectiveDefaultTimeWindow,
@@ -1037,38 +1050,38 @@ const LogsExplorer: React.FC = () => {
   );
   const facetParams = useMemo(() => {
     const params: LogsFacetQueryParams = {};
-    if (selectedLevels.length === 1) params.level = selectedLevels[0];
-    if (selectedLevels.length > 1) params.levels = selectedLevels.join(',');
-    if (selectedServices.length === 1) params.service_name = selectedServices[0];
-    if (selectedServices.length > 1) params.service_names = selectedServices.join(',');
-    if (selectedNamespaces.length === 1) params.namespace = selectedNamespaces[0];
-    if (selectedNamespaces.length > 1) params.namespaces = selectedNamespaces.join(',');
-    if (selectedContainers.length === 1) params.container_name = selectedContainers[0];
-    if (traceIdFilter) params.trace_id = traceIdFilter;
+    if (debouncedSelectedLevels.length === 1) params.level = debouncedSelectedLevels[0];
+    if (debouncedSelectedLevels.length > 1) params.levels = debouncedSelectedLevels.join(',');
+    if (debouncedSelectedServices.length === 1) params.service_name = debouncedSelectedServices[0];
+    if (debouncedSelectedServices.length > 1) params.service_names = debouncedSelectedServices.join(',');
+    if (debouncedSelectedNamespaces.length === 1) params.namespace = debouncedSelectedNamespaces[0];
+    if (debouncedSelectedNamespaces.length > 1) params.namespaces = debouncedSelectedNamespaces.join(',');
+    if (debouncedSelectedContainers.length === 1) params.container_name = debouncedSelectedContainers[0];
+    if (debouncedTraceIdFilter) params.trace_id = debouncedTraceIdFilter;
     if (correlationTraceIds.length > 0) params.trace_ids = correlationTraceIds.join(',');
-    if (requestIdFilter) params.request_id = requestIdFilter;
+    if (debouncedRequestIdFilter) params.request_id = debouncedRequestIdFilter;
     if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
-    if (podNameFilter) params.pod_name = podNameFilter;
+    if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
     if (debouncedSearchQuery) params.search = debouncedSearchQuery;
-    if (startTime) params.start_time = startTime;
-    if (endTime) params.end_time = endTime;
-    if (excludeHealthCheck) params.exclude_health_check = true;
+    if (debouncedStartTime) params.start_time = debouncedStartTime;
+    if (debouncedEndTime) params.end_time = debouncedEndTime;
+    if (debouncedExcludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
     if (topologyJumpContext) {
       if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
       if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
       if (topologyJumpContext.sourceNamespace) params.source_namespace = topologyJumpContext.sourceNamespace;
       if (topologyJumpContext.targetNamespace) params.target_namespace = topologyJumpContext.targetNamespace;
-      if (topologyJumpContext.timeWindow && !startTime && !endTime) params.time_window = topologyJumpContext.timeWindow;
+      if (topologyJumpContext.timeWindow && !debouncedStartTime && !debouncedEndTime) params.time_window = topologyJumpContext.timeWindow;
       if (topologyJumpContext.correlationMode) params.correlation_mode = topologyJumpContext.correlationMode;
-    } else if (!startTime && !endTime) {
+    } else if (!debouncedStartTime && !debouncedEndTime) {
       params.time_window = effectiveDefaultTimeWindow;
     }
     params.limit_services = 300;
     params.limit_namespaces = 300;
     params.limit_levels = 20;
     return params;
-  }, [selectedLevels, selectedServices, selectedNamespaces, selectedContainers, traceIdFilter, correlationTraceIds, requestIdFilter, correlationRequestIds, podNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
+  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, debouncedStartTime, debouncedEndTime, debouncedExcludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
   const { data: facetsData } = useLogFacets(facetParams);
 
   useEffect(() => {
@@ -1098,12 +1111,12 @@ const LogsExplorer: React.FC = () => {
 
   // 实时日志流
   const realtimeFilters = useMemo(() => ({
-    service_name: selectedServices.length === 1 ? selectedServices[0] : undefined,
-    namespace: selectedNamespaces.length === 1 ? selectedNamespaces[0] : undefined,
-    container_name: selectedContainers.length === 1 ? selectedContainers[0] : undefined,
-    level: selectedLevels.length === 1 ? selectedLevels[0] : undefined,
-    exclude_health_check: excludeHealthCheck,
-  }), [selectedServices, selectedNamespaces, selectedContainers, selectedLevels, excludeHealthCheck]);
+    service_name: debouncedSelectedServices.length === 1 ? debouncedSelectedServices[0] : undefined,
+    namespace: debouncedSelectedNamespaces.length === 1 ? debouncedSelectedNamespaces[0] : undefined,
+    container_name: debouncedSelectedContainers.length === 1 ? debouncedSelectedContainers[0] : undefined,
+    level: debouncedSelectedLevels.length === 1 ? debouncedSelectedLevels[0] : undefined,
+    exclude_health_check: debouncedExcludeHealthCheck,
+  }), [debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedSelectedLevels, debouncedExcludeHealthCheck]);
 
   const {
     logs: realtimeLogs,
@@ -2353,7 +2366,6 @@ const LogsExplorer: React.FC = () => {
                 <div className="p-3">
                   <pre
                     className={`text-sm font-mono p-3 rounded-xl ${
-                      true ? '' : ''} ${
                       wordWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-auto'
                     }`}
                   >
