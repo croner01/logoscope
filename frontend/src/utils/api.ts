@@ -733,6 +733,7 @@ export interface LogsQueryParams {
   time_window?: string;
   cursor?: string;
   anchor_time?: string;
+  order_direction?: string;
 }
 
 export interface LogsQueryResult {

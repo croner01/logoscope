@@ -57,6 +57,7 @@ import {
   FileJson,
   FileSpreadsheet,
   GripVertical,
+  ArrowUpDown,
 } from 'lucide-react';
 
 type LogLevel = Event['level'];
@@ -582,7 +583,7 @@ function extractTraceIdFromLog(event: LogEvent | null | undefined): string {
   return extractEventTraceIds(event as Event | null | undefined)[0] || '';
 }
 
-function compareLogEventsDesc(a: LogEvent, b: LogEvent): number {
+function compareLogEvents(a: LogEvent, b: LogEvent, direction: 'desc' | 'asc' = 'desc'): number {
   const aTimestamp = String(a?.timestamp || '');
   const bTimestamp = String(b?.timestamp || '');
   const aTs = Date.parse(aTimestamp);
@@ -591,20 +592,24 @@ function compareLogEventsDesc(a: LogEvent, b: LogEvent): number {
   const bValid = Number.isFinite(bTs);
 
   if (aValid && bValid && aTs !== bTs) {
-    return bTs - aTs;
+    return direction === 'asc' ? aTs - bTs : bTs - aTs;
   }
   if (aValid !== bValid) {
     return aValid ? -1 : 1;
   }
 
   if (!aValid && !bValid && aTimestamp !== bTimestamp) {
-    return bTimestamp.localeCompare(aTimestamp);
+    return direction === 'asc'
+      ? aTimestamp.localeCompare(bTimestamp)
+      : bTimestamp.localeCompare(aTimestamp);
   }
 
   const aId = String(a?.id || '');
   const bId = String(b?.id || '');
   if (aId !== bId) {
-    return bId.localeCompare(aId);
+    return direction === 'asc'
+      ? aId.localeCompare(bId)
+      : bId.localeCompare(aId);
   }
 
   return 0;
@@ -749,6 +754,15 @@ const LogsExplorer: React.FC = () => {
   // 实时模式状态
   const [realtimeMode, setRealtimeMode] = useState(false);
   const [logsViewMode, setLogsViewMode] = useState<'stream' | 'pattern'>('stream');
+
+  // 排序状态（主列表）
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+  // 侧栏上下文独立排序（不影响主列表，不触发 API 请求）
+  const [contextSortOrder, setContextSortOrder] = useState<'desc' | 'asc'>('desc');
+  // 打开侧栏时同步当前主列表排序方向
+  const syncContextSortOrder = useCallback(() => {
+    setContextSortOrder(sortOrder);
+  }, [sortOrder]);
   
   // 搜索和筛选状态
   const [searchQuery, setSearchQuery] = useState('');
@@ -967,6 +981,7 @@ const LogsExplorer: React.FC = () => {
     if (endTime) params.end_time = endTime;
     if (excludeHealthCheck) params.exclude_health_check = true;
     if (anchorTime) params.anchor_time = anchorTime;
+    params.order_direction = sortOrder;
     if (topologyJumpContext) {
       if (topologyJumpContext.sourceService) params.source_service = topologyJumpContext.sourceService;
       if (topologyJumpContext.targetService) params.target_service = topologyJumpContext.targetService;
@@ -978,7 +993,7 @@ const LogsExplorer: React.FC = () => {
       params.time_window = effectiveDefaultTimeWindow;
     }
     return params;
-  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow]);
+  }, [debouncedSelectedLevels, debouncedSelectedServices, debouncedSelectedNamespaces, debouncedSelectedContainers, debouncedTraceIdFilter, correlationTraceIds, debouncedRequestIdFilter, correlationRequestIds, debouncedPodNameFilter, debouncedSearchQuery, startTime, endTime, excludeHealthCheck, anchorTime, topologyJumpContext, effectiveDefaultTimeWindow, sortOrder]);
 
   const { data, loading, error, refetch } = useEvents(apiParams);
   const aggregatedParams = useMemo(() => {
@@ -1169,8 +1184,8 @@ const LogsExplorer: React.FC = () => {
       }
     });
 
-    return Array.from(merged.values()).sort(compareLogEventsDesc);
-  }, [realtimeMode, realtimeLogs, displayEvents]);
+    return Array.from(merged.values()).sort((a, b) => compareLogEvents(a, b, sortOrder));
+  }, [realtimeMode, realtimeLogs, displayEvents, sortOrder]);
 
   // 获取当前选中日志的上下文
   const currentSelectedLog = useMemo(() => {
@@ -1551,6 +1566,7 @@ const LogsExplorer: React.FC = () => {
     setExpandedLogId(logId);
     setShowSidebar(true);
     setSidebarTab('context');
+    syncContextSortOrder();
   };
 
   const selectPatternSampleLog = (log: LogEvent) => {
@@ -1689,7 +1705,7 @@ const LogsExplorer: React.FC = () => {
             merged.set(key, event);
           }
         });
-        return Array.from(merged.values()).sort(compareLogEventsDesc);
+        return Array.from(merged.values()).sort((a, b) => compareLogEvents(a, b, sortOrder));
       });
       setNextCursor(result.next_cursor || null);
       if (result.anchor_time) {
@@ -1705,7 +1721,7 @@ const LogsExplorer: React.FC = () => {
       loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [nextCursor, apiParams, anchorTime]);
+  }, [nextCursor, apiParams, anchorTime, sortOrder]);
 
   // host/label 为前端过滤条件：当当前页无命中但后续仍有分页时，自动继续拉取直到命中或分页结束。
   useEffect(() => {
@@ -2133,6 +2149,17 @@ const LogsExplorer: React.FC = () => {
                   </select>
                   <span className="text-xs" style={{ color: 'var(--app-text-subtle)' }}>条</span>
                 </div>
+                {/* 上下文排序切换（独立状态，不影响主列表） */}
+                <button
+                  onClick={() => setContextSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors ${
+                    contextSortOrder === 'asc' ? 'bg-blue-100 text-blue-700' : 'btn-ghost'
+                  }`}
+                  title={contextSortOrder === 'desc' ? '切换为从旧到新' : '切换为从新到旧'}
+                >
+                  <ArrowUpDown className="w-3 h-3" />
+                  {contextSortOrder === 'desc' ? '新→旧' : '旧→新'}
+                </button>
                 {logContextLoading && (
                   <span className="text-xs text-blue-600">加载中...</span>
                 )}
@@ -2141,7 +2168,7 @@ const LogsExplorer: React.FC = () => {
               {/* 上下文日志列表 - 优先 log_id 精确锚定，pod_name + timestamp 兜底 */}
               <div className="space-y-1">
                 {/* 前文日志 */}
-                {logContextData?.before?.map((ctxLog, idx: number) => (
+                {(contextSortOrder === 'asc' ? (logContextData?.before || []) : [...(logContextData?.before || [])].reverse()).map((ctxLog, idx: number) => (
                   <div
                     key={`before-${idx}`}
                     className="p-3 rounded-xl transition-colors"
@@ -2205,7 +2232,7 @@ const LogsExplorer: React.FC = () => {
                   </div>
                 </div>
 
-                {contextCurrentMatches.slice(1).map((ctxLog, idx: number) => {
+                {(contextSortOrder === 'desc' ? contextCurrentMatches.slice(1) : contextCurrentMatches.slice(1).reverse()).map((ctxLog, idx: number) => {
                   const level = normalizeDisplayLevel(ctxLog.level);
                   const colors = LEVEL_COLORS[level] || LEVEL_COLORS.INFO;
                   return (
@@ -2227,7 +2254,7 @@ const LogsExplorer: React.FC = () => {
                 })}
                 
                 {/* 后文日志 */}
-                {logContextData?.after?.map((ctxLog, idx: number) => (
+                {(contextSortOrder === 'asc' ? (logContextData?.after || []) : [...(logContextData?.after || [])].reverse()).map((ctxLog, idx: number) => (
                   <div
                     key={`after-${idx}`}
                     className="p-3 rounded-xl transition-colors"
@@ -2912,6 +2939,19 @@ const LogsExplorer: React.FC = () => {
               title="刷新"
             >
               <RefreshCw className="w-4 h-4" />
+            </button>
+
+            {/* 排序切换按钮 */}
+            <button
+              onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+              disabled={realtimeMode}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors btn btn-ghost text-sm ${
+                sortOrder === 'asc' && !realtimeMode ? 'bg-blue-100 text-blue-700' : ''
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
+              title={realtimeMode ? '实时模式下仅支持最新优先' : (sortOrder === 'desc' ? '当前：最新优先，点击切换为最早优先' : '当前：最早优先，点击切换为最新优先')}
+            >
+              <ArrowUpDown className="w-4 h-4" />
+              <span className="text-sm">{sortOrder === 'desc' ? '最新' : '最早'}</span>
             </button>
 
             {/* 上传按钮 */}

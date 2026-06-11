@@ -775,8 +775,13 @@ def query_logs(
     trace_ids: Optional[List[str]] = None,
     request_ids: Optional[List[str]] = None,
     correlation_mode: Optional[str] = None,
+    order_direction: str = "desc",
 ) -> Dict[str, Any]:
-    """Query logs with filters and keyset pagination."""
+    """Query logs with filters and keyset pagination.
+
+    Args:
+        order_direction: Sort order — "desc" (newest first, default) or "asc" (oldest first).
+    """
     prewhere_conditions: List[str] = []
     where_conditions: List[str] = []
     params: Dict[str, Any] = {}
@@ -911,6 +916,8 @@ def query_logs(
         effective_anchor_time = str(effective_end_time)
     else:
         effective_anchor_time = datetime.now(timezone.utc).isoformat()
+    # 锚点始终作为上限（<=），防止分页期间新数据漂移页面。
+    # ORDER BY 和游标比较符号（cursor_cmp）负责排序方向，锚点不参与。
     prewhere_conditions.append("timestamp <= toDateTime64({anchor_time:String}, 9, 'UTC')")
     params["anchor_time"] = convert_timestamp_fn(effective_anchor_time)
 
@@ -938,23 +945,25 @@ def query_logs(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}") from exc
         cursor_timestamp_text = str(cursor_timestamp or "").strip()
+        # 根据排序方向选择比较符号：DESC 取更旧的，ASC 取更新的
+        cursor_cmp = ">" if order_direction == "asc" else "<"
         # 游标兼容两种格式：
         # 1) 旧格式: 时间字符串（微秒级）
         # 2) 新格式: 纳秒 epoch 整数（避免 DateTime64(9) 边界漏数）
         if cursor_timestamp_text.isdigit():
             prewhere_conditions.append(
-                "("
-                "toUnixTimestamp64Nano(timestamp) < {cursor_ts_ns:Int64} "
-                "OR (toUnixTimestamp64Nano(timestamp) = {cursor_ts_ns:Int64} AND id < {cursor_id:String})"
-                ")"
+                f"("
+                f"toUnixTimestamp64Nano(timestamp) {cursor_cmp} {{cursor_ts_ns:Int64}} "
+                f"OR (toUnixTimestamp64Nano(timestamp) = {{cursor_ts_ns:Int64}} AND id {cursor_cmp} {{cursor_id:String}})"
+                f")"
             )
             params["cursor_ts_ns"] = int(cursor_timestamp_text)
         else:
             prewhere_conditions.append(
-                "("
-                "timestamp < toDateTime64({cursor_timestamp:String}, 9, 'UTC') "
-                "OR (timestamp = toDateTime64({cursor_timestamp:String}, 9, 'UTC') AND id < {cursor_id:String})"
-                ")"
+                f"("
+                f"timestamp {cursor_cmp} toDateTime64({{cursor_timestamp:String}}, 9, 'UTC') "
+                f"OR (timestamp = toDateTime64({{cursor_timestamp:String}}, 9, 'UTC') AND id {cursor_cmp} {{cursor_id:String}})"
+                f")"
             )
             params["cursor_timestamp"] = convert_timestamp_fn(cursor_timestamp_text)
         params["cursor_id"] = cursor_id
@@ -977,13 +986,14 @@ def query_logs(
 
     prewhere_clause = f"PREWHERE {' AND '.join(prewhere_conditions)}" if prewhere_conditions else ""
     where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
+    order_dir = "ASC" if order_direction == "asc" else "DESC"
     query = f"""
     SELECT
 {_LOGS_LIGHT_FIELDS}
     FROM logs.logs
     {prewhere_clause}
     {where_clause}
-    ORDER BY timestamp DESC, id DESC
+    ORDER BY timestamp {order_dir}, id {order_dir}
     LIMIT {{limit_plus_one:Int32}}
     SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1, max_threads = {{max_threads:Int32}}, max_bytes_before_external_sort = 2000000000, max_bytes_before_external_group_by = 2000000000, max_temporary_data_on_disk_size_for_query = 5000000000
     """

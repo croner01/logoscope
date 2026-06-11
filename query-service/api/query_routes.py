@@ -1091,6 +1091,7 @@ async def query_logs(
     time_window: Optional[str] = Query(None, description="拓扑上下文: 时间窗口（如 1 HOUR）"),
     cursor: Optional[str] = Query(None, description="分页游标（用于加载下一页）"),
     anchor_time: Optional[str] = Query(None, description="查询锚点时间，分页期间保持稳定"),
+    order_direction: str = Query("desc", description="排序方向: asc（最早在前）或 desc（最新在前，默认）"),
 ) -> Dict[str, Any]:
     """
     查询日志数据
@@ -1135,6 +1136,9 @@ async def query_logs(
         normalized_time_window = _normalize_optional_str(time_window)
         normalized_cursor = _normalize_optional_str(cursor)
         normalized_anchor_time = _normalize_optional_str(anchor_time)
+        normalized_order_direction = str(order_direction or "").strip().lower()
+        if normalized_order_direction not in ("asc", "desc"):
+            normalized_order_direction = "desc"
         return await _run_blocking(
             logs_query_utils.query_logs,
             storage_adapter=_STORAGE_ADAPTER,
@@ -1163,6 +1167,7 @@ async def query_logs(
             time_window=normalized_time_window,
             cursor=normalized_cursor,
             anchor_time=normalized_anchor_time,
+            order_direction=normalized_order_direction,
             normalize_optional_str_fn=_normalize_optional_str,
             normalize_topology_context_fn=_normalize_topology_context,
             normalize_optional_str_list_fn=_normalize_optional_str_list,
