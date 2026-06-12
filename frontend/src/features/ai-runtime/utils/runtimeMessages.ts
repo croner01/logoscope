@@ -308,6 +308,25 @@ export const buildRuntimeAnalysisFollowUpMessage = (params: {
     confirmation_ticket: item.approvalId,
   }));
 
+  // Build actions from existing metadata or synthesize from command runs.
+  // This ensures the inline rendering block (messageActions) always finds entries
+  // even before assistant_message_finalized arrives with the backend's action list.
+  const builtActions: Array<Record<string, unknown>> = Array.isArray(assistantMetadata.actions)
+    ? assistantMetadata.actions as Array<Record<string, unknown>>
+    : commandRuns.length > 0
+      ? commandRuns.map((item, i) => ({
+          id: item.actionId || item.commandRunId || `cmd-${i}`,
+          title: item.command ? `执行: ${item.command.substring(0, 80)}` : `诊断命令 ${i + 1}`,
+          purpose: `诊断步骤 ${i + 1}`,
+          command: item.command,
+          command_type: item.commandType,
+          risk_level: item.riskLevel,
+          status: item.status,
+        }))
+      : [];
+
+  const latestCommandRun = commandRuns.length > 0 ? commandRuns[commandRuns.length - 1] : null;
+
   let content = String(assistantMessage?.content || '').trim();
   if (!content) {
     if (pendingUserInput) {
@@ -324,6 +343,31 @@ export const buildRuntimeAnalysisFollowUpMessage = (params: {
           pendingApproval.command ? `command: ${pendingApproval.command}` : '',
           pendingApproval.message ? `message: ${pendingApproval.message}` : '存在待审批动作，确认后可继续执行。',
         ].filter(Boolean).join('\n');
+      } else if (latestCommandRun) {
+        // Show actual command info instead of abstract phase name
+        const cmd = latestCommandRun.command || '';
+        const cmdStatus = String(latestCommandRun.status || '').trim().toLowerCase();
+        const out = String(latestCommandRun.stdout || '').trim();
+        const err = String(latestCommandRun.stderr || '').trim();
+        if (cmdStatus === 'completed' && (out || err)) {
+          const msgParts: string[] = [];
+          if (cmd) msgParts.push('```bash', cmd, '```');
+          if (out) msgParts.push('', '**stdout:**', '', '```', out, '```');
+          if (err) msgParts.push('', '**stderr:**', '', '```', err, '```');
+          if (typeof latestCommandRun.exitCode === 'number') {
+            msgParts.push('', `> exit: ${latestCommandRun.exitCode}`);
+          }
+          content = msgParts.join('\n').trim();
+        } else if (cmdStatus === 'running') {
+          content = `正在执行诊断命令...\n${cmd}`;
+        } else if (cmd && cmdStatus !== 'pending') {
+          content = `命令执行 ${cmdStatus}\n${cmd}`;
+        } else {
+          const currentPhase = String(runtimeState.runMeta?.currentPhase || runtimeState.runMeta?.status || '').trim();
+          content = currentPhase
+            ? `正在分析...\nphase: ${currentPhase}`
+            : '正在分析...';
+        }
       } else {
         const currentPhase = String(runtimeState.runMeta?.currentPhase || runtimeState.runMeta?.status || '').trim();
         content = currentPhase
@@ -357,6 +401,7 @@ export const buildRuntimeAnalysisFollowUpMessage = (params: {
       source_message_id: params.session.sourceMessageId,
       stream_loading: runtimeState.streaming,
       stream_stage: runtimeState.runMeta?.currentPhase || runtimeState.runMeta?.status,
+      actions: builtActions,
       action_observations: mergedObservations,
       approval_required: mergedApprovals,
       thoughts: params.thoughtTimeline,

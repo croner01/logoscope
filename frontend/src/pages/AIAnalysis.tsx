@@ -4102,32 +4102,25 @@ const AIAnalysis: React.FC = () => {
     payload: Record<string, unknown>,
     fallbackCommand: string,
   ): string => {
-    const status = String(payload.status || 'unknown');
     const command = String(payload.command || fallbackCommand || '').trim();
-    const message = String(payload.message || '').trim();
     const stdout = String(payload.stdout || '').trim();
     const stderr = String(payload.stderr || '').trim();
     const exitCode = Number(payload.exit_code);
-    const durationMs = Number(payload.duration_ms);
-    const outputTruncated = Boolean(payload.output_truncated);
-    const lines: string[] = [
-      `命令执行状态: ${status}`,
-      command ? `command: ${command}` : '',
-      Number.isFinite(exitCode) ? `exit_code: ${exitCode}` : '',
-      Number.isFinite(durationMs) ? `duration_ms: ${durationMs}` : '',
-      message ? `message: ${message}` : '',
-    ].filter(Boolean);
+    const parts: string[] = [];
 
+    if (command) {
+      parts.push('```bash', command, '```');
+    }
     if (stdout) {
-      lines.push(`stdout:\n${stdout}`);
+      parts.push('', '**stdout:**', '', '```', stdout, '```');
     }
     if (stderr) {
-      lines.push(`stderr:\n${stderr}`);
+      parts.push('', '**stderr:**', '', '```', stderr, '```');
     }
-    if (outputTruncated) {
-      lines.push('note: 输出较长，已截断');
+    if (Number.isFinite(exitCode)) {
+      parts.push('', `> exit: ${exitCode}`);
     }
-    return lines.join('\n').trim();
+    return parts.join('\n').trim();
   };
 
   const executeFollowUpCommandWithRecovery = useCallback(async (
@@ -6994,6 +6987,34 @@ const AIAnalysis: React.FC = () => {
                                     {action.requires_write_permission && <span>写权限: 是</span>}
                                     {action.requires_elevation && <span>提权: 必需</span>}
                                   </div>
+                                  {observation && (
+                                    (() => {
+                                      const out = String(observation.stdout || '').trim();
+                                      const err = String(observation.stderr || '').trim();
+                                      if (!out && !err) return null;
+                                      return (
+                                        <div className="mt-1.5 rounded bg-slate-900 p-2 font-mono text-[10px] leading-5">
+                                          {out && (
+                                            <>
+                                              <div className="mb-0.5 text-[9px] font-medium uppercase tracking-wide text-slate-500">
+                                                stdout
+                                              </div>
+                                              <pre className="whitespace-pre-wrap break-all text-green-300">{out}</pre>
+                                            </>
+                                          )}
+                                          {err && (
+                                            <>
+                                              {out && <div className="mt-1" />}
+                                              <div className="mb-0.5 text-[9px] font-medium uppercase tracking-wide text-red-400">
+                                                stderr
+                                              </div>
+                                              <pre className="whitespace-pre-wrap break-all text-red-300">{err}</pre>
+                                            </>
+                                          )}
+                                        </div>
+                                      );
+                                    })()
+                                  )}
                                   {action.reason && (
                                     <div className="mt-1 text-[10px] text-emerald-600">说明：{action.reason}</div>
                                   )}
@@ -7061,6 +7082,64 @@ const AIAnalysis: React.FC = () => {
                           <div className="mt-1 text-[10px] text-emerald-600">
                             查询命令默认自动执行；可用 `/exec &lt;command&gt;` 或 `执行命令: &lt;command&gt;` 手动重试/补充执行。
                           </div>
+                        </div>
+                      )}
+                      {msg.role === 'assistant' && messageActions.length === 0 && messageObservations.length > 0 && (
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-slate-200 bg-slate-50 p-2">
+                          <div className="text-[11px] font-medium text-slate-600 mb-1">命令执行结果</div>
+                          <div className="space-y-1.5">
+                            {messageObservations.slice(-3).reverse().map((obs, obsIndex) => {
+                              const out = String((obs as Record<string, unknown>).stdout || '').trim();
+                              const err = String((obs as Record<string, unknown>).stderr || '').trim();
+                              const cmd = String((obs as Record<string, unknown>).command || '').trim();
+                              const obsStatus = String((obs as Record<string, unknown>).status || '').trim().toLowerCase();
+                              const isRunning = obsStatus === 'running' || obsStatus === 'pending';
+                              return (
+                                <div key={`obs-${obsIndex}`} className="rounded border border-slate-200 bg-white p-1.5">
+                                  {cmd && (
+                                    <div className="text-[11px] font-mono text-slate-800 break-all mb-1">
+                                      <code className="rounded bg-slate-100 px-1 py-0.5">{cmd}</code>
+                                      <span className={`ml-2 inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] ${
+                                        isRunning
+                                          ? 'border border-amber-200 bg-amber-50 text-amber-700'
+                                          : obsStatus === 'completed'
+                                          ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+                                          : 'border border-rose-200 bg-rose-50 text-rose-700'
+                                      }`}>
+                                        {isRunning && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                                        {obsStatus === 'completed' ? '成功' : obsStatus === 'running' ? '运行中' : obsStatus}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {(out || err) && (
+                                    <div className="rounded bg-slate-900 p-2 font-mono text-[10px] leading-5">
+                                      {out && (
+                                        <>
+                                          <div className="mb-0.5 text-[9px] font-medium uppercase tracking-wide text-slate-500">stdout</div>
+                                          <pre className="whitespace-pre-wrap break-all text-green-300">{out}</pre>
+                                        </>
+                                      )}
+                                      {err && (
+                                        <>
+                                          {out && <div className="mt-1" />}
+                                          <div className="mb-0.5 text-[9px] font-medium uppercase tracking-wide text-red-400">stderr</div>
+                                          <pre className="whitespace-pre-wrap break-all text-red-300">{err}</pre>
+                                        </>
+                                      )}
+                                    </div>
+                                  )}
+                                  {!out && !err && !isRunning && (
+                                    <div className="text-[10px] text-slate-500 italic">（该命令无输出）</div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {messageObservations.length > 3 && (
+                            <div className="mt-1 text-[10px] text-slate-500">
+                              共 {messageObservations.length} 条命令结果，仅显示最近 3 条
+                            </div>
+                          )}
                         </div>
                       )}
                       {msg.role === 'assistant' && messageApprovals.length > 0 && (
