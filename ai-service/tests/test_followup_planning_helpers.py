@@ -1341,3 +1341,82 @@ def test_build_llm_replan_context_contains_evidence_gaps():
     assert "clickhouse日志" in context
     assert "剩余迭代: 1 轮" in context
     assert "10s" in context
+
+
+def test_build_llm_replan_context_failed_command_includes_stderr():
+    """失败命令的 stderr 应出现在重规划上下文中。"""
+    from ai.followup_planning_helpers import _build_llm_replan_context
+    observations = [
+        {
+            "command": "SELECT * FROM logs.logs WHERE level = 'ERROR'",
+            "status": "executed",
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "Code: 60. DB::Exception: Table logs.logs does not exist.",
+            "message": "query failed",
+        }
+    ]
+    context = _build_llm_replan_context(
+        original_question="排查服务错误",
+        analysis_context=None,
+        all_observations=observations,
+        executed_commands=set(),
+        current_evidence_gaps=[],
+        remaining_iterations=2,
+        remaining_timeout=60,
+    )
+    assert "Table logs.logs does not exist" in context, \
+        "stderr 内容应出现在重规划上下文中"
+    assert "exit=1" in context, "exit_code 应出现在重规划上下文中"
+    assert "失败" in context, "失败命令应标注为失败"
+
+
+def test_build_llm_replan_context_success_command_no_failure_marker():
+    """成功命令不应包含失败标记。"""
+    from ai.followup_planning_helpers import _build_llm_replan_context
+    observations = [
+        {
+            "command": "SELECT count() FROM logs.logs",
+            "status": "executed",
+            "exit_code": 0,
+            "stdout": "1000\n",
+            "stderr": "",
+        }
+    ]
+    context = _build_llm_replan_context(
+        original_question="test",
+        analysis_context=None,
+        all_observations=observations,
+        executed_commands=set(),
+        current_evidence_gaps=[],
+        remaining_iterations=2,
+        remaining_timeout=60,
+    )
+    assert "成功" in context, "成功命令应标注为成功"
+    assert "失败" not in context, "成功命令不应包含失败标记"
+
+
+def test_build_llm_replan_context_fallback_when_no_stderr():
+    """当 stderr 和 message 都为空时，至少显示状态和 exit_code。"""
+    from ai.followup_planning_helpers import _build_llm_replan_context
+    observations = [
+        {
+            "command": "kubectl get pods",
+            "status": "failed",
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": "",
+            "message": "",
+        }
+    ]
+    context = _build_llm_replan_context(
+        original_question="test",
+        analysis_context=None,
+        all_observations=observations,
+        executed_commands=set(),
+        current_evidence_gaps=[],
+        remaining_iterations=2,
+        remaining_timeout=60,
+    )
+    assert "exit=127" in context, "无错误信息时至少显示 exit_code"
+    assert "failed" in context or "失败" in context, "应有状态指示"
