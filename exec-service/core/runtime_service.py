@@ -18,7 +18,7 @@ from core.policy import classify_command_with_auto_rewrite
 from core.run_store import CommandRunStore
 
 
-MAX_OUTPUT_CHARS = max(512, int(os.getenv("EXEC_COMMAND_MAX_OUTPUT_CHARS", "12000")))
+MAX_OUTPUT_CHARS = max(512, int(os.getenv("EXEC_COMMAND_MAX_OUTPUT_CHARS", "100000")))
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 BACKEND_UNAVAILABLE_RETRY_MAX = max(
     0,
@@ -189,6 +189,7 @@ class ExecRuntimeService:
         executor_profile: str,
         target_kind: str,
         target_identity: str,
+        target_cluster_id: str = "",
         timeout_seconds: int,
         resolved_target_context: Optional[Dict[str, Any]] = None,
         target_metadata_contract: Optional[Dict[str, Any]] = None,
@@ -217,6 +218,7 @@ class ExecRuntimeService:
             "executor_profile": as_str(executor_profile, "local-default"),
             "target_kind": as_str(target_kind, "runtime_node"),
             "target_identity": as_str(target_identity, "runtime:local"),
+            "target_cluster_id": as_str(target_cluster_id),
             "resolved_target_context": dict(_safe_dict(resolved_target_context)),
             "target_metadata_contract": dict(_safe_dict(target_metadata_contract)),
             "effective_executor_type": None,
