@@ -93,6 +93,7 @@ class ToolAdapter:
                     "purpose": compiled.spec.purpose,
                     "target_kind": compiled.spec.target_kind,
                     "target_identity": compiled.spec.target_identity,
+                    "target_cluster_id": compiled.spec.target_cluster_id,
                 },
                 timeout=(3, 30),
             )
@@ -126,6 +127,7 @@ class ToolAdapter:
                     "purpose": compiled.spec.purpose,
                     "target_kind": compiled.spec.target_kind,
                     "target_identity": compiled.spec.target_identity,
+                    "target_cluster_id": compiled.spec.target_cluster_id,
                     "timeout_seconds": compiled.spec.timeout_seconds,
                     "confirmed": is_readonly,
                     "elevated": False,
@@ -140,8 +142,8 @@ class ToolAdapter:
                 success=resp.ok and run_data.get("exit_code", 1) == 0,
                 status=run_data.get("status", "completed"),
                 exit_code=run_data.get("exit_code", 0),
-                stdout=_as_str(run_data.get("stdout", ""))[:10000],
-                stderr=_as_str(run_data.get("stderr", ""))[:2000],
+                stdout=_as_str(run_data.get("stdout", ""))[:100000],
+                stderr=_as_str(run_data.get("stderr", ""))[:10000],
                 duration_ms=duration_ms,
                 channel="remote",
             )
