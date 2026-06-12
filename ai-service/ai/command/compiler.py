@@ -99,7 +99,11 @@ def _normalize_clickhouse_query(query: str) -> str:
 
 
 def _ensure_clickhouse_limit(query: str, default_limit: int = 1000) -> str:
-    """Auto-append LIMIT {default_limit} to SELECT queries without one."""
+    """Auto-append LIMIT {default_limit} to SELECT queries without one.
+
+    Skips GROUP BY queries because aggregate results are bounded by the
+    distinct group count — adding LIMIT would silently truncate output.
+    """
     stripped = query.strip()
     upper = stripped.upper()
     if not upper.startswith("SELECT"):
