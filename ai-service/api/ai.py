@@ -1292,6 +1292,70 @@ async def _emit_followup_runtime_event(
         )
         return
 
+    if safe_name == "tool_call_started":
+        action_id = str(safe_payload.get("action_id") or "").strip()
+        command = str(safe_payload.get("command") or "").strip()
+        if not action_id:
+            return
+        tool_call_ids = state.setdefault("tool_call_ids", {})
+        tool_call_id = str(tool_call_ids.get(action_id) or "").strip()
+        if not tool_call_id:
+            tool_call_id = f"tool-auto-{len(tool_call_ids) + 1:04d}"
+            tool_call_ids[action_id] = tool_call_id
+        started = state.setdefault("started_tool_calls", set())
+        if tool_call_id in started:
+            return
+        started.add(tool_call_id)
+        runtime_service.append_event(
+            run_id,
+            event_protocol.TOOL_CALL_STARTED,
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": "command.exec",
+                "title": (command[:80] or "执行命令"),
+                "status": "running",
+                "action_id": action_id,
+                "command": command,
+            },
+        )
+        return
+
+    if safe_name == "tool_call_finished":
+        action_id = str(safe_payload.get("action_id") or "").strip()
+        command = str(safe_payload.get("command") or "").strip()
+        if not action_id:
+            return
+        tool_call_ids = state.setdefault("tool_call_ids", {})
+        tool_call_id = str(tool_call_ids.get(action_id) or "").strip()
+        if not tool_call_id:
+            tool_call_id = f"tool-auto-{len(tool_call_ids) + 1:04d}"
+            tool_call_ids[action_id] = tool_call_id
+        status = str(safe_payload.get("status") or "").strip().lower()
+        exit_code = int(float(str(safe_payload.get("exit_code") or 0)))
+        stdout = str(safe_payload.get("stdout") or "")
+        stderr = str(safe_payload.get("stderr") or "")
+        finished_key = f"{tool_call_id}|{status or 'completed'}|{action_id}"
+        finished_tool_calls = state.setdefault("finished_tool_calls", set())
+        if finished_key in finished_tool_calls:
+            return
+        finished_tool_calls.add(finished_key)
+        runtime_service.append_event(
+            run_id,
+            event_protocol.TOOL_CALL_FINISHED,
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": "command.exec",
+                "title": (command[:80] or "执行命令"),
+                "status": "completed" if status in {"executed", "completed", ""} else status or "completed",
+                "action_id": action_id,
+                "command": command,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+            },
+        )
+        return
+
     if safe_name == "observation":
         action_id = str(safe_payload.get("action_id") or "").strip()
         command = str(safe_payload.get("command") or "").strip()
@@ -1972,6 +2036,15 @@ async def _run_followup_runtime_task(
             runtime_state,
         )
 
+    _runtime_task_deadline = max(
+        int(
+            _as_float(
+                os.getenv("AI_RUNTIME_FOLLOWUP_DEADLINE_SECONDS"),
+                _resolve_followup_timeout_profile().get("request_deadline_seconds", 150),
+            )
+        ),
+        int(_as_float(os.getenv("AI_RUNTIME_FOLLOWUP_MIN_DEADLINE_SECONDS"), "60")),
+    )
     try:
         followup_request = _build_followup_request_from_ai_run(run, runtime_options)
         knowledge_updates = _build_project_knowledge_summary_updates(followup_request.analysis_context)
@@ -1987,9 +2060,13 @@ async def _run_followup_runtime_task(
                 **(followup_request.analysis_context or {}),
                 "_runtime_prior_action_observations": previous_action_observations[-200:],
             }
-        result = await _run_follow_up_analysis_core(
-            followup_request,
-            event_callback=_runtime_event_callback,
+
+        result = await asyncio.wait_for(
+            _run_follow_up_analysis_core(
+                followup_request,
+                event_callback=_runtime_event_callback,
+            ),
+            timeout=_runtime_task_deadline,
         )
         latest_run = runtime_service.get_run_fresh(run_id) if hasattr(runtime_service, "get_run_fresh") else runtime_service.get_run(run_id)
         if latest_run is None or is_terminal_run_status(latest_run.status):
@@ -2307,6 +2384,20 @@ async def _run_followup_runtime_task(
     except _RuntimePauseForPendingAction:
         # 当前 run 已进入 waiting_approval / waiting_user_input，暂停等待用户动作后再继续。
         return
+    except asyncio.TimeoutError:
+        latest_run = runtime_service.get_run_fresh(run_id) if hasattr(runtime_service, "get_run_fresh") else runtime_service.get_run(run_id)
+        if latest_run is not None and not is_terminal_run_status(latest_run.status):
+            logger.warning("AI runtime follow-up task timed out (run_id=%s, deadline=%ss)", run_id, _runtime_task_deadline)
+            runtime_service.fail_run(
+                run_id,
+                error_code="followup_runtime_timeout",
+                error_detail=f"follow-up runtime task exceeded {_runtime_task_deadline}s deadline",
+                summary_updates={
+                    "current_phase": "timed_out",
+                },
+                payload={"message": "follow-up runtime task timed out"},
+            )
+        return
     except Exception as exc:
         latest_run = runtime_service.get_run_fresh(run_id) if hasattr(runtime_service, "get_run_fresh") else runtime_service.get_run(run_id)
         if latest_run is None or is_terminal_run_status(latest_run.status):
@@ -2322,13 +2413,16 @@ async def _run_followup_runtime_task(
             payload={"message": "follow-up runtime task failed"},
         )
     finally:
-        latest_run = runtime_service.get_run_fresh(run_id) if hasattr(runtime_service, "get_run_fresh") else runtime_service.get_run(run_id)
-        if latest_run is not None:
-            runtime_service._update_run_summary(  # noqa: SLF001
-                latest_run,
-                followup_runtime_worker="idle",
-                followup_runtime_last_finished_at=_utc_now_iso(),
-            )
+        try:
+            latest_run = runtime_service.get_run_fresh(run_id) if hasattr(runtime_service, "get_run_fresh") else runtime_service.get_run(run_id)
+            if latest_run is not None:
+                runtime_service._update_run_summary(  # noqa: SLF001
+                    latest_run,
+                    followup_runtime_worker="idle",
+                    followup_runtime_last_finished_at=_utc_now_iso(),
+                )
+        except Exception:
+            logger.exception("AI runtime follow-up task finally block failed (run_id=%s)", run_id)
 
 
 def _maybe_start_ai_run_runtime(
@@ -6576,13 +6670,15 @@ async def _run_follow_up_analysis_core(
             remaining_iterations=remaining_iterations,
             remaining_timeout=remaining_timeout,
         )
-        augmented_context = dict(analysis_context) if analysis_context else {}
-        augmented_context["_llm_replan_context"] = replan_context
         try:
             replan_llm_service = get_llm_service()
         except Exception as exc:
             logger and logger.warning("LLM replan: failed to get llm service: %s", exc)
             return None
+
+        # ── 首次调用 ──────────────────────────────────────────────────────────
+        augmented_context = dict(analysis_context) if analysis_context else {}
+        augmented_context["_llm_replan_context"] = replan_context
         try:
             replan_bundle = await asyncio.wait_for(
                 run_followup_langchain(
@@ -6612,10 +6708,57 @@ async def _run_follow_up_analysis_core(
         except Exception as exc:
             logger and logger.warning("LLM replan failed: %s", exc)
             return None
+
         new_actions_raw = _as_list(replan_bundle.get("langchain_actions"))
-        if not new_actions_raw:
+        if new_actions_raw:
+            return new_actions_raw
+
+        # ── 重试：空动作时附带反馈再次调用 ────────────────────────────────────
+        logger and logger.warning(
+            "LLM replan returned empty actions (question=%s), retrying with feedback",
+            original_question[:80],
+        )
+        retry_context = replan_context + (
+            "\n\n【反馈】\n"
+            "上一轮你返回了空动作列表。请基于已执行命令的失败信息，"
+            "生成具体的下一步诊断命令（ClickHouse 查询或 kubectl 命令）。"
+            "不要输出空列表。"
+        )
+        augmented_context_retry = dict(analysis_context) if analysis_context else {}
+        augmented_context_retry["_llm_replan_context"] = retry_context
+        _retry_timeout = min(_replan_llm_timeout, 25)
+        try:
+            replan_bundle_retry = await asyncio.wait_for(
+                run_followup_langchain(
+                    question=f"[重规划] {original_question[:200]}",
+                    analysis_context=augmented_context_retry,
+                    compacted_history=[],
+                    compacted_summary="",
+                    references=[],
+                    subgoals=[],
+                    reflection={},
+                    long_term_memory={"enabled": False, "hits": 0, "summary": "", "items": []},
+                    llm_enabled=llm_enabled,
+                    llm_requested=True,
+                    token_budget=min(token_budget, 4000),
+                    token_warning=False,
+                    llm_timeout_seconds=_retry_timeout,
+                    llm_first_token_timeout_seconds=15,
+                    llm_service=replan_llm_service,
+                    fallback_builder=lambda *args, **kwargs: _build_followup_fallback_answer(*args, **kwargs),
+                    stream_token_callback=None,
+                ),
+                timeout=_retry_timeout,
+            )
+        except (asyncio.TimeoutError, Exception):
+            logger and logger.warning("LLM replan retry also failed")
             return None
-        return new_actions_raw
+
+        new_actions_retry = _as_list(replan_bundle_retry.get("langchain_actions"))
+        if not new_actions_retry:
+            logger and logger.warning("LLM replan retry also returned empty actions")
+            return None
+        return new_actions_retry
 
     # ── Unified engine path (opt-in via env var) ──────────────────────────
     if _is_unified_engine_enabled():
