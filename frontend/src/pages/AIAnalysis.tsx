@@ -6667,13 +6667,48 @@ const AIAnalysis: React.FC = () => {
                             </span>
                           </div>
                         )}
+                        {/* ── 命令输出区块 ── */}
+                        {msg.role === 'assistant' && messageObservations.length > 0 && !streamLoading && (
+                          <div className="mt-2 space-y-2 border-t border-slate-100 pt-2">
+                            {messageObservations.map((obs, obsIndex) => {
+                              const obsPayload = obs as Record<string, unknown>;
+                              const obsCommand = String(obsPayload.command || '').trim();
+                              const obsStdout = String(obsPayload.stdout || '').trim();
+                              const obsStderr = String(obsPayload.stderr || '').trim();
+                              const obsExitCode = Number(obsPayload.exit_code);
+                              if (!obsCommand && !obsStdout && !obsStderr) return null;
+                              return (
+                                <div key={`obs-${index}-${obsIndex}`} className="rounded border border-slate-200 bg-slate-50 p-2">
+                                  {obsCommand && (
+                                    <pre className="text-[11px] font-mono text-slate-800 whitespace-pre-wrap overflow-auto max-h-32">{`$ ${obsCommand}`}</pre>
+                                  )}
+                                  {obsStdout && (
+                                    <>
+                                      <div className="mt-1 text-[10px] font-medium text-slate-500">stdout</div>
+                                      <pre className="mt-0.5 text-[11px] font-mono text-emerald-800 whitespace-pre-wrap overflow-auto max-h-60 bg-white border border-slate-100 rounded p-1.5">{obsStdout}</pre>
+                                    </>
+                                  )}
+                                  {obsStderr && (
+                                    <>
+                                      <div className="mt-1 text-[10px] font-medium text-rose-500">stderr</div>
+                                      <pre className="mt-0.5 text-[11px] font-mono text-rose-700 whitespace-pre-wrap overflow-auto max-h-32 bg-white border border-rose-100 rounded p-1.5">{obsStderr}</pre>
+                                    </>
+                                  )}
+                                  {Number.isFinite(obsExitCode) && (
+                                    <div className="mt-1 text-[10px] text-slate-400">exit: {obsExitCode}</div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                       {/* 时间戳 */}
                       <div className={`text-[10px] text-gray-400 mt-1 px-1 flex items-center gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                         <span>{msg.role === 'user' ? '你' : 'AI'}{msg.timestamp ? ` · ${toLocaleTime(msg.timestamp)}` : ''}</span>
                       </div>
                       {/* 思考过程 */}
-                      {msg.role === 'assistant' && messageThoughtTimeline.length > 0 && (
+                      {msg.role === 'assistant' && messageThoughtTimeline.length > 0 && messageObservations.length === 0 && (
                         streamLoading ? (
                           <div className="mt-1.5 w-full max-w-[85%] rounded border border-indigo-200 bg-indigo-50/60 p-2">
                             <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-indigo-700">
@@ -6739,7 +6774,8 @@ const AIAnalysis: React.FC = () => {
                           </details>
                         )
                       )}
-                      {/* 操作按钮 */}
+                      {/* 操作按钮（有诊断输出时隐藏） */}
+                      {(!(msg.role === 'assistant' && messageObservations.length > 0)) && (
                       <div className="mt-1.5 flex flex-wrap gap-1.5">
                         <button
                           type="button"
@@ -6806,6 +6842,7 @@ const AIAnalysis: React.FC = () => {
                           </>
                         )}
                       </div>
+                      )}
                       {msg.role === 'assistant' && Array.isArray(msg.metadata?.references) && msg.metadata?.references.length > 0 && (
                         <div className="mt-1.5 w-full max-w-[85%] rounded border border-amber-200 bg-amber-50 p-2">
                           <div className="text-[11px] font-medium text-amber-700 mb-1">引用片段</div>
@@ -7084,7 +7121,7 @@ const AIAnalysis: React.FC = () => {
                           </div>
                         </div>
                       )}
-                      {msg.role === 'assistant' && messageActions.length === 0 && messageObservations.length > 0 && (
+                      {false && msg.role === 'assistant' && messageActions.length === 0 && messageObservations.length > 0 && (
                         <div className="mt-1.5 w-full max-w-[85%] rounded border border-slate-200 bg-slate-50 p-2">
                           <div className="text-[11px] font-medium text-slate-600 mb-1">命令执行结果</div>
                           <div className="space-y-1.5">
