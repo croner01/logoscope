@@ -69,6 +69,49 @@ def _parse_target_identity(target_identity: str) -> tuple[str, str]:
     return pod, ns
 
 
+def _normalize_clickhouse_query(query: str) -> str:
+    """Normalize a ClickHouse SQL query for robust matching.
+
+    Fixes common LLM-generated mismatches against the actual schema:
+      - level = 'VALUE' → lower(level) = lower('VALUE')
+        (ClickHouse string comparison is case-sensitive; the logs table
+        stores level as lowercase 'error'/'info', but LLMs often emit
+        'ERROR'/'INFO'.)
+    """
+    # level = 'value' / level = "value" → lower(level) = lower(...)
+    query = re.sub(
+        r"(?i)\blevel\s*=\s*('[^']*'|\"[^\"]*\")",
+        r"lower(level) = lower(\1)",
+        query,
+    )
+    # level IN ('A', 'B') → lower(level) IN (lower('A'), lower('B'))
+    def _wrap_in_values(m: re.Match) -> str:
+        values = m.group(1)
+        wrapped = re.sub(r"'[^']*'", lambda vm: f"lower({vm.group(0)})", values)
+        return f"lower(level) IN ({wrapped})"
+
+    query = re.sub(
+        r"(?i)\blevel\s+IN\s*\(([^)]*)\)",
+        _wrap_in_values,
+        query,
+    )
+    return query
+
+
+def _ensure_clickhouse_limit(query: str, default_limit: int = 1000) -> str:
+    """Auto-append LIMIT {default_limit} to SELECT queries without one."""
+    stripped = query.strip()
+    upper = stripped.upper()
+    if not upper.startswith("SELECT"):
+        return stripped
+    if re.search(r"\bLIMIT\s+\d", upper):
+        return stripped
+    if re.search(r"\bGROUP\s+BY\b", upper):
+        return stripped
+    cleaned = stripped.rstrip().rstrip(";")
+    return f"{cleaned} LIMIT {default_limit}"
+
+
 def _escape_clickhouse_query(query: str) -> str:
     """Escape a ClickHouse SQL query for use as a --query argument.
 
@@ -245,7 +288,9 @@ def compile_command(
         # them as kubectl exec → toolbox-k8s-readonly → confirmation_required
         # (bypassable with a ticket) rather than permission_required (hard deny).
         # The toolbox-gateway sandbox has both kubectl and clickhouse-client.
-        escaped = _escape_clickhouse_query(command)
+        normalized = _normalize_clickhouse_query(command)
+        limited = _ensure_clickhouse_limit(normalized)
+        escaped = _escape_clickhouse_query(limited)
         target = _resolve_clickhouse_target(namespace)
         shell = f'kubectl exec {target} -- clickhouse-client --query "{escaped}"'
         return CompiledCommand(

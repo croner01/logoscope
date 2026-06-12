@@ -164,3 +164,48 @@ class TestCompileCommand:
         compiled = compile_command(spec)
         assert compiled.route == "remote"
         assert "&&" in compiled.shell_command
+
+
+# ── ClickHouse auto-LIMIT tests ──────────────────────────────────────────
+
+
+def _spec(sql: str) -> CommandSpec:
+    return CommandSpec(
+        command=sql,
+        tool=ToolType.CLICKHOUSE_QUERY,
+        target_kind="clickhouse_cluster",
+        target_identity="database:logs",
+        purpose="test limit",
+    )
+
+
+def test_ensure_clickhouse_limit_appends_when_missing():
+    spec = _spec("SELECT * FROM logs.logs WHERE level = 'error'")
+    compiled = compile_command(spec)
+    assert "LIMIT 1000" in compiled.shell_command, \
+        f"Expected LIMIT 1000 in {compiled.shell_command}"
+
+
+def test_ensure_clickhouse_limit_skips_when_present():
+    spec = _spec("SELECT * FROM logs.logs LIMIT 50")
+    compiled = compile_command(spec)
+    assert "LIMIT 50" in compiled.shell_command
+    assert "LIMIT 1000" not in compiled.shell_command
+
+
+def test_ensure_clickhouse_limit_skips_group_by():
+    spec = _spec("SELECT service_name, count() FROM logs.logs GROUP BY service_name")
+    compiled = compile_command(spec)
+    assert "LIMIT 1000" not in compiled.shell_command
+
+
+def test_ensure_clickhouse_limit_skips_non_select():
+    spec = _spec("SHOW TABLES")
+    compiled = compile_command(spec)
+    assert "LIMIT 1000" not in compiled.shell_command
+
+
+def test_ensure_clickhouse_limit_handles_limit_by():
+    spec = _spec("SELECT * FROM logs.logs LIMIT 5 BY service_name ORDER BY timestamp DESC")
+    compiled = compile_command(spec)
+    assert "LIMIT 5 BY" in compiled.shell_command
