@@ -2351,7 +2351,14 @@ def _build_llm_replan_context(
         if _as_str(obs.get("status")) == "executed" and int(_as_float(obs.get("exit_code"), 0)) == 0:
             summary += " (成功)"
         else:
-            summary += f" (状态: {_as_str(obs.get('status'))})"
+            _stderr = _as_str(obs.get("stderr")).strip()
+            _msg = _as_str(obs.get("message")).strip()
+            _exit_code = int(_as_float(obs.get("exit_code"), 0))
+            _error_hint = _stderr or _msg or ""
+            if _error_hint:
+                summary += f" (失败, exit={_exit_code}: {_error_hint[:500]})"
+            else:
+                summary += f" (状态: {_as_str(obs.get('status'))}, exit={_exit_code})"
         cmd_summaries.append(summary)
 
     if cmd_summaries:
