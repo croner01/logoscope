@@ -1,0 +1,49 @@
+name: linux_system_diagnostics
+display_name: Linux 系统诊断
+description: 针对进程异常、端口占用、磁盘满、权限问题，执行系统只读排查命令。
+applicable_components:
+- linux
+- os
+- system
+- host
+- node
+trigger_patterns:
+- /var/log/(messages|syslog)
+- disk.*(full|space)
+- permission denied
+- address already in use|port.*in use
+- process.*(killed|crash|exit)
+risk_level: low
+max_steps: 4
+steps:
+- id: linux-syslog-tail
+  title: 查看系统日志
+  tool: generic_exec
+  command: cat /var/log/messages 2>/dev/null | tail -n 120 || cat /var/log/syslog
+    2>/dev/null | tail -n 120
+  purpose: 快速确认内核、systemd、权限相关错误
+  timeout: 15
+- id: linux-process-check
+  title: 查看异常进程
+  tool: generic_exec
+  command: ps -ef | grep -i {service_name}
+  purpose: 确认关键进程是否存在异常退出/重复拉起
+  timeout: 10
+  depends_on:
+  - linux-syslog-tail
+- id: linux-port-check
+  title: 查看端口监听与占用
+  tool: generic_exec
+  command: ss -lntp | head -n 80
+  purpose: 确认服务端口冲突或未监听
+  timeout: 10
+  depends_on:
+  - linux-syslog-tail
+- id: linux-disk-check
+  title: 查看磁盘容量
+  tool: generic_exec
+  command: df -h
+  purpose: 确认磁盘是否已满导致服务异常
+  timeout: 10
+  depends_on:
+  - linux-syslog-tail

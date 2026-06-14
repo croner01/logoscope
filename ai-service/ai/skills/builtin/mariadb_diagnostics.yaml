@@ -1,0 +1,58 @@
+# MariaDB 诊断技能 — 声明式定义
+---
+name: mariadb_diagnostics
+display_name: "MariaDB 诊断"
+description: "MariaDB 故障诊断：检查错误日志、活跃会话、InnoDB 锁等待和主从复制状态"
+applicable_components:
+  - mariadb
+  - mysql
+  - database
+  - db
+trigger_patterns:
+  - "mariadb.*error"
+  - "mysql.*error"
+  - "database.*connection"
+  - "db.*fail"
+  - "lock.*wait"
+  - "replication.*lag"
+risk_level: low
+max_steps: 4
+steps:
+  - id: mariadb-error-log
+    title: "拉取 MariaDB 错误日志"
+    tool: generic_exec
+    command: "kubectl exec -n {namespace} deploy/mariadb -- cat /var/log/mysql/error.log 2>/dev/null | tail -50"
+    purpose: "查看 MariaDB 最近错误日志"
+    timeout: 20
+    parse_hints:
+      extract: ["ERROR", "Warning", "InnoDB", "Aborted"]
+
+  - id: mariadb-processlist
+    title: "查看活跃会话与阻塞"
+    tool: generic_exec
+    command: "kubectl exec -n {namespace} deploy/mariadb -- mysql -e \"SHOW FULL PROCESSLIST\\G\" 2>/dev/null"
+    purpose: "检查活跃连接数和长时间运行的查询"
+    depends_on: ["mariadb-error-log"]
+    timeout: 20
+    parse_hints:
+      extract: ["State", "Time", "Info", "Locked"]
+
+  - id: mariadb-engine-status
+    title: "查看 InnoDB 锁等待状态"
+    tool: generic_exec
+    command: "kubectl exec -n {namespace} deploy/mariadb -- mysql -e \"SHOW ENGINE INNODB STATUS\\G\" 2>/dev/null"
+    purpose: "定位死锁、事务冲突和行锁竞争"
+    depends_on: ["mariadb-processlist"]
+    timeout: 25
+    parse_hints:
+      extract: ["LATEST DETECTED DEADLOCK", "LOCK WAIT", "TRANSACTION", "ROW OPERATIONS"]
+
+  - id: mariadb-replica-status
+    title: "查看主从复制状态"
+    tool: generic_exec
+    command: "kubectl exec -n {namespace} deploy/mariadb -- mysql -e \"SHOW SLAVE STATUS\\G\" 2>/dev/null"
+    purpose: "检查主从复制延迟和错误"
+    depends_on: ["mariadb-processlist"]
+    timeout: 20
+    parse_hints:
+      extract: ["Seconds_Behind_Master", "Slave_IO_Running", "Slave_SQL_Running", "Last_Error"]
