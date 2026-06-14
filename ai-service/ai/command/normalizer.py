@@ -3,9 +3,12 @@
 Converts raw dict from LLM tool calling into a validated CommandSpec.
 Auto-infers target_kind/target_identity from source_target metadata,
 and command_type from SQL inspection.
+Also detects kubectl exec clickhouse patterns and upgrades them to
+the proper CLICKHOUSE_QUERY tool type.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 
 from ai.command.spec import CommandSpec, ToolType, CommandType
@@ -17,6 +20,37 @@ def _as_str(value: Any, default: str = "") -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+_CLICKHOUSE_EXEC_PATTERN = re.compile(
+    r"""
+    kubectl\s+exec\s+
+    (?:\S+\s+)?                          # optional pod/deployment name
+    (?:-n\s+\S+\s+)?                     # optional -n namespace
+    (?:--\s+)?                           # optional --
+    (?:timeout\s+\d+\s+)?                # optional timeout prefix
+    clickhouse(?:-client)?\s+
+    (?:-q\s+|--query\s+)
+    ["'](.+?)["']                         # extracted SQL query
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _detect_clickhouse_exec_mode(command: str) -> Optional[str]:
+    """Detect if a *generic_exec* command is actually a kubectl exec to clickhouse-client.
+
+    Matches::
+
+        kubectl exec <pod> -n <ns> -- clickhouse-client --query "SELECT ..."
+        kubectl exec deploy/clickhouse -n islap -- clickhouse -q "SHOW TABLES"
+
+    Returns the extracted SQL query if matched, or *None*.
+    """
+    match = _CLICKHOUSE_EXEC_PATTERN.search(command)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def _infer_command_type(command: str, tool: ToolType) -> CommandType:
@@ -99,9 +133,11 @@ def normalize_command_spec(
             try:
                 from ai.runtime_v4.targets.service import get_runtime_v4_target_registry
                 _registry = get_runtime_v4_target_registry()
+                # 前缀匹配：兼容 namespace:ns 和 namespace:ns/cluster:xxx 格式
                 _t = _registry.find_target_by_identity(
                     target_kind="k8s_cluster",
                     target_identity=f"namespace:{_ns}",
+                    prefix_match=True,
                 )
                 if _t and isinstance(_t, dict):
                     _meta = _t.get("metadata") or {}
@@ -113,6 +149,19 @@ def normalize_command_spec(
     # Backward-compat aliases
     _TOOL_ALIASES = {"kubectl_clickhouse_query": "clickhouse_query", "k8s_clickhouse_query": "clickhouse_query"}
     tool_str = _TOOL_ALIASES.get(tool_str, tool_str)
+
+    # Auto-upgrade generic_exec → clickhouse_query when command is
+    # kubectl exec pod -- clickhouse-client --query "SELECT..."
+    if tool_str == "generic_exec" and command:
+        clickhouse_query = _detect_clickhouse_exec_mode(command)
+        if clickhouse_query:
+            tool_str = "clickhouse_query"
+            command = clickhouse_query  # strip the kubectl wrapper, keep just SQL
+            # Also upgrade target if source_target provides k8s context
+            if not target_kind and source_target:
+                target_kind = "k8s_cluster"
+            if not target_identity and source_target:
+                target_identity = _build_target_identity(source_target)
 
     try:
         tool = ToolType(tool_str) if tool_str else ToolType.GENERIC_EXEC

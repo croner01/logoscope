@@ -737,10 +737,15 @@ def _as_runtime_bool(value: Any, default: bool = False) -> bool:
 
 _EVIDENCE_INSUFFICIENT_HINTS = [
     "证据不足",
+    "待补证据",
+    "待证据验证",
+    "待验证判断",
+    "待验证假设",
+    "尚未采集",
+    "尚未收集",
     "无法定位",
     "无法确认",
     "仍缺失证据",
-    "待补证据",
     "insufficient evidence",
     "cannot determine",
     "cannot confirm",
@@ -2195,15 +2200,17 @@ async def _run_followup_runtime_task(
         legacy_coverage_value = _as_float(observe_payload.get("coverage"), -1.0)
         evidence_coverage_value = _as_float(observe_payload.get("evidence_coverage"), legacy_coverage_value)
         min_coverage = max(0.0, min(1.0, _as_float(os.getenv("AI_RUNTIME_MIN_EVIDENCE_COVERAGE"), 0.6)))
-        coverage_insufficient = evidence_coverage_value >= 0 and evidence_coverage_value < min_coverage
+        # -1.0 = "未设置"等价于 0（不达标），max 确保负值也被纳入检查
+        effective_coverage = max(0.0, evidence_coverage_value)
+        coverage_insufficient = effective_coverage < min_coverage
 
         legacy_confidence_value = _as_float(observe_payload.get("confidence"), -1.0)
         final_confidence_value = _as_float(observe_payload.get("final_confidence"), legacy_confidence_value)
-        min_final_confidence = max(0.0, min(1.0, _as_float(os.getenv("AI_RUNTIME_MIN_FINAL_CONFIDENCE"), 0.0)))
+        min_final_confidence = max(0.0, min(1.0, _as_float(os.getenv("AI_RUNTIME_MIN_FINAL_CONFIDENCE"), 0.35)))
+        effective_confidence = max(0.0, final_confidence_value)
         confidence_insufficient = (
             min_final_confidence > 0
-            and final_confidence_value >= 0
-            and final_confidence_value < min_final_confidence
+            and effective_confidence < min_final_confidence
         )
         answer_text = _as_str(result.get("answer"))
         fault_summary_text = _as_str(result.get("fault_summary"))
