@@ -258,19 +258,42 @@ async def _build_followup_long_term_memory(
             or getattr(session, "input_text", "")
         )[:220]
         assistant_hint = ""
+        successful_commands: List[str] = []
+        failed_commands: List[str] = []
+        seen_success: set = set()
+        seen_failed: set = set()
         if sid:
-            messages = await _load_messages_for_history(
-                session_store=session_store,
-                run_blocking=run_blocking,
-                session_id=sid,
-                limit=message_limit,
-            )
+            messages = await run_blocking(session_store.get_messages, sid, message_limit)
             for msg in reversed(_as_list(messages)):
                 role = _as_str(getattr(msg, "role", ""))
                 content = _as_str(getattr(msg, "content", ""))
-                if role == "assistant" and content:
+                if role == "assistant" and content and not assistant_hint:
                     assistant_hint = content[:220]
-                    break
+                # Extract action_observations from message metadata
+                metadata = _as_dict(getattr(msg, "metadata", {}))
+                for obs in _as_list(metadata.get("action_observations", [])):
+                    cmd = _as_str(obs.get("command", ""))
+                    exit_code = obs.get("exit_code")
+                    status = _as_str(obs.get("status", ""))
+                    if not cmd:
+                        continue
+                    cmd_short = cmd[:120]
+                    if exit_code == 0 and status == "completed":
+                        if cmd_short not in seen_success:
+                            seen_success.add(cmd_short)
+                            successful_commands.append(cmd_short)
+                    else:
+                        reason_parts = []
+                        if exit_code is not None and exit_code != 0:
+                            reason_parts.append(f"exit={exit_code}")
+                        if status and status not in ("", "completed"):
+                            reason_parts.append(f"status={status}")
+                        entry = cmd_short
+                        if reason_parts:
+                            entry = f"{cmd_short} ({', '.join(reason_parts)})"
+                        if entry not in seen_failed:
+                            seen_failed.add(entry)
+                            failed_commands.append(entry)
         memory_items.append(
             {
                 "session_id": sid,
@@ -280,6 +303,8 @@ async def _build_followup_long_term_memory(
                 "title": title,
                 "summary": summary,
                 "assistant_hint": assistant_hint,
+                "successful_commands": successful_commands[:3],
+                "failed_commands": failed_commands[:3],
             }
         )
         if len(memory_items) >= max_snippets:
@@ -293,6 +318,12 @@ async def _build_followup_long_term_memory(
             f"trace={_as_str(item.get('trace_id')) or 'N/A'}",
             f"summary={_as_str(item.get('summary'))}",
         ]
+        successful_commands = _as_list(item.get("successful_commands", []))
+        if successful_commands:
+            line_parts.append(f"✓成功命令: {'; '.join(successful_commands[:3])}")
+        failed_commands = _as_list(item.get("failed_commands", []))
+        if failed_commands:
+            line_parts.append(f"✗失败/被拒命令: {'; '.join(failed_commands[:3])}")
         assistant_hint = _as_str(item.get("assistant_hint"))
         if assistant_hint:
             line_parts.append(f"assistant_hint={assistant_hint}")

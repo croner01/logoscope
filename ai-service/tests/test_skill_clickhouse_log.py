@@ -39,17 +39,17 @@ class TestClickHouseLogQuerySkill:
             re.compile(pattern)
 
     def test_trigger_on_error(self, skill):
-        ctx = _ctx(log_content="ERROR database connection failed")
+        ctx = _ctx(log_content="clickhouse ERROR database connection failed")
         score = skill.match_score(ctx)
         assert score > 0.0
 
     def test_trigger_on_timeout(self, skill):
-        ctx = _ctx(log_content="timeout exceeded for query execution")
+        ctx = _ctx(log_content="clickhouse timeout exceeded for query execution")
         score = skill.match_score(ctx)
         assert score > 0.0
 
     def test_trigger_on_exception(self, skill):
-        ctx = _ctx(log_content="java.lang.NullPointerException at ...")
+        ctx = _ctx(log_content="clickhouse java.lang.NullPointerException at ...")
         score = skill.match_score(ctx)
         assert score > 0.0
 

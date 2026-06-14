@@ -8,7 +8,7 @@ from ai.runtime_v4.temporal.client import TemporalOuterClient
 
 
 class _FakeHandle:
-    async def query(self, _query_name):
+    async def query(self, _query_name, **kwargs):
         return {
             "run_id": "run-temporal-001",
             "status": "running",

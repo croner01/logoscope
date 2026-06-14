@@ -129,7 +129,7 @@ class TestObservingNode:
             "step_id": "step-1",
             "command_spec": action["command_spec"],
             "status": "completed",
-            "stdout": "output data",
+            "stdout": "status: Running",
             "stderr": "",
             "exit_code": 0,
         }
@@ -189,7 +189,7 @@ class TestRunLocalPipeline:
         assert result.done is True
 
     def test_pipeline_populates_actions_from_matched_skill(self):
-        state = _make_state(max_iterations=1)
+        state = _make_state(max_iterations=5, iteration=3)
         mock_skill = _make_mock_skill_with_steps("k8s_pod")
         with patch(
             "ai.runtime_v4.langgraph.nodes.planning._select_skills_by_rules",

@@ -10,7 +10,7 @@ class TestDiscoverNewClusters:
     def test_discovers_new_cluster_namespace_pairs(self):
         """New source_cluster values produce target candidates."""
         mock_client = MagicMock()
-        mock_client.query.return_value.result_rows = [
+        mock_client.execute.return_value = [
             ("openstack-cluster-01", "openstack", 5000),
             ("openstack-cluster-01", "kube-system", 100),
             ("cluster-local", "islap", 20000),
@@ -29,14 +29,12 @@ class TestDiscoverNewClusters:
         mock_client = MagicMock()
 
         # Two queries: first for new clusters, second for existing targets
-        mock_client.query.side_effect = [
-            MagicMock(result_rows=[
-                ("openstack-cluster-01", "openstack", 5000),
-                ("cluster-local", "islap", 20000),
-            ]),
-            MagicMock(result_rows=[
-                ("namespace:islap/cluster:cluster-local",),
-            ]),
+        mock_client.execute.side_effect = [
+            # First query: distinct source_cluster values
+            [("openstack-cluster-01", "openstack", 5000),
+             ("cluster-local", "islap", 20000)],
+            # Second query: existing target identities
+            [("namespace:islap/cluster:cluster-local",)],
         ]
 
         targets = discover_new_clusters(mock_client)
@@ -49,13 +47,11 @@ class TestDiscoverNewClusters:
     def test_skips_legacy_format_targets(self):
         """Existing targets in legacy format (namespace only) also prevent duplicates."""
         mock_client = MagicMock()
-        mock_client.query.side_effect = [
-            MagicMock(result_rows=[
-                ("cluster-local", "islap", 20000),
-            ]),
-            MagicMock(result_rows=[
-                ("namespace:islap",),  # legacy format
-            ]),
+        mock_client.execute.side_effect = [
+            # First query: distinct source_cluster values
+            [("cluster-local", "islap", 20000)],
+            # Second query: existing target identities
+            [("namespace:islap",)],  # legacy format
         ]
 
         targets = discover_new_clusters(mock_client)
@@ -64,7 +60,7 @@ class TestDiscoverNewClusters:
     def test_empty_when_no_source_cluster_data(self):
         """When no logs have source_cluster set, no targets are discovered."""
         mock_client = MagicMock()
-        mock_client.query.return_value.result_rows = []
+        mock_client.execute.return_value = []
 
         targets = discover_new_clusters(mock_client)
         assert len(targets) == 0
@@ -72,15 +68,11 @@ class TestDiscoverNewClusters:
     def test_returns_empty_when_all_already_registered(self):
         """When all (cluster, namespace) pairs already have targets, nothing new."""
         mock_client = MagicMock()
-        mock_client.query.side_effect = [
-            MagicMock(result_rows=[
-                ("cluster-a", "ns1", 100),
-                ("cluster-b", "ns2", 200),
-            ]),
-            MagicMock(result_rows=[
-                ("namespace:ns1/cluster:cluster-a",),
-                ("namespace:ns2/cluster:cluster-b",),
-            ]),
+        mock_client.execute.side_effect = [
+            [("cluster-a", "ns1", 100),
+             ("cluster-b", "ns2", 200)],
+            [("namespace:ns1/cluster:cluster-a",),
+             ("namespace:ns2/cluster:cluster-b",)],
         ]
 
         targets = discover_new_clusters(mock_client)
@@ -118,11 +110,11 @@ class TestRunAutoSeed:
     def test_integration_happy_path(self):
         """run_auto_seed returns count of newly registered targets."""
         mock_client = MagicMock()
-        mock_client.query.return_value.result_rows = [
+        mock_client.execute.return_value = [
             ("cluster-x", "ns-x", 50),
         ]
 
-        with patch("ai.target_auto_seed.clickhouse_connect.get_client", return_value=mock_client):
+        with patch("ai.target_auto_seed.get_ch_client", return_value=mock_client):
             with patch("ai.target_auto_seed.register_target", return_value=True) as mock_register:
                 count = run_auto_seed()
                 assert count == 1
@@ -131,15 +123,13 @@ class TestRunAutoSeed:
     def test_counts_only_successful_registrations(self):
         """Failed registrations are not counted."""
         mock_client = MagicMock()
-        mock_client.query.side_effect = [
-            MagicMock(result_rows=[
-                ("cluster-x", "ns-x", 50),
-                ("cluster-y", "ns-y", 30),
-            ]),
-            MagicMock(result_rows=[]),  # no existing targets
+        mock_client.execute.side_effect = [
+            [("cluster-x", "ns-x", 50),
+             ("cluster-y", "ns-y", 30)],
+            [],  # no existing targets
         ]
 
-        with patch("ai.target_auto_seed.clickhouse_connect.get_client", return_value=mock_client):
+        with patch("ai.target_auto_seed.get_ch_client", return_value=mock_client):
             with patch("ai.target_auto_seed.register_target", side_effect=[True, False]):
                 count = run_auto_seed()
                 assert count == 1  # only first succeeded

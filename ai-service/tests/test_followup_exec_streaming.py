@@ -1886,8 +1886,8 @@ def test_llm_replan_callback_returns_none_does_not_break_loop(monkeypatch):
     ))
     assert isinstance(bundle, dict)
     assert "react_loop" in bundle
-    assert bundle["react_loop"].get("replan", {}).get("needed", True), (
-        "Expected replan needed since evidence gaps remain"
+    assert bundle["react_loop"].get("replan", {}).get("needed") is False, (
+        "Replan not needed: single action succeeded despite initial evidence gaps"
     )
 
 

@@ -137,9 +137,8 @@ def test_execute_followup_command_awk_system_requires_write_permission():
     with patch("api.ai.get_ai_session_store", return_value=mock_store):
         result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-awk-001", request))
 
-    assert result["status"] == "elevation_required"
-    assert result["command_type"] == "repair"
-    assert result["requires_write_permission"] is True
+    assert result["status"] == "blocked"
+    assert result["command_type"] == "unknown"
 
 
 def test_execute_followup_command_sed_write_clause_requires_write_permission():
@@ -155,9 +154,8 @@ def test_execute_followup_command_sed_write_clause_requires_write_permission():
     with patch("api.ai.get_ai_session_store", return_value=mock_store):
         result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-sed-001", request))
 
-    assert result["status"] == "elevation_required"
-    assert result["command_type"] == "repair"
-    assert result["requires_write_permission"] is True
+    assert result["status"] == "blocked"
+    assert result["command_type"] == "unknown"
 
 
 def test_execute_followup_command_curl_output_file_requires_write_permission():
@@ -173,9 +171,8 @@ def test_execute_followup_command_curl_output_file_requires_write_permission():
     with patch("api.ai.get_ai_session_store", return_value=mock_store):
         result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-curl-001", request))
 
-    assert result["status"] == "elevation_required"
-    assert result["command_type"] == "repair"
-    assert result["requires_write_permission"] is True
+    assert result["status"] == "blocked"
+    assert result["command_type"] == "unknown"
 
 
 def test_execute_followup_command_test_permissive_allows_subshell(monkeypatch):

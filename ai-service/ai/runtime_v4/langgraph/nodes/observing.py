@@ -181,7 +181,7 @@ def _is_empty_output(exit_code: int, stdout: str, stderr: str) -> bool:
     Rules:
       - exit_code == 0 AND stdout is blank/whitespace
       - stdout contains only ClickHouse "0 rows in set" / empty table lines
-      - stdout is only header lines (PrettyCompact header with no data rows)
+      - stdout is only box-drawing / separator characters (PrettyCompact empty table)
     """
     if exit_code != 0:
         return False
@@ -190,12 +190,12 @@ def _is_empty_output(exit_code: int, stdout: str, stderr: str) -> bool:
         return True
     if re.search(r"^0 rows in set", s, re.MULTILINE | re.IGNORECASE):
         return True
-    # PrettyCompact empty: only separators and header, no data rows
+    # PrettyCompact empty table: if after filtering out border/separator lines
+    # there is no remaining content, treat as empty.
     lines = [ln for ln in s.splitlines() if ln.strip()]
     data_lines = [
         ln for ln in lines
         if not re.match(r"^[┌─┬┐├─┼┤└─┴┘│\+\-]+$", ln.strip())
-        and not re.match(r"^\s*\w[\w\s]+\s*$", ln)  # header
     ]
     if not data_lines:
         return True

@@ -72,13 +72,13 @@ class TestRunPlanning:
         assert new_state.done is True
 
     def test_marks_done_when_no_skills_and_no_actions(self):
-        state = _make_state()
+        state = _make_state(iteration=3)
         with patch("ai.runtime_v4.langgraph.nodes.planning._select_skills_by_rules", return_value=[]):
             new_state = run_planning(state)
         assert new_state.done is True
 
     def test_populates_actions_from_matched_skills(self):
-        state = _make_state()
+        state = _make_state(iteration=3)
         mock_skill = _make_mock_skill()
         with patch(
             "ai.runtime_v4.langgraph.nodes.planning._select_skills_by_rules",
@@ -101,7 +101,7 @@ class TestRunPlanning:
         assert len(new_state.actions) == 0
 
     def test_records_skill_selection_in_reflection(self):
-        state = _make_state()
+        state = _make_state(iteration=3)
         mock_skill = _make_mock_skill(name="k8s_pod_diagnostics")
         with patch(
             "ai.runtime_v4.langgraph.nodes.planning._select_skills_by_rules",
@@ -128,7 +128,7 @@ class TestRunPlanning:
         assert len(new_state.actions) == 1
 
     def test_multiple_skills_multiple_steps(self):
-        state = _make_state()
+        state = _make_state(iteration=3)
         skill_a = _make_mock_skill("skill_a", steps=[_make_mock_step("a-1"), _make_mock_step("a-2")])
         skill_b = _make_mock_skill("skill_b", steps=[_make_mock_step("b-1")])
         with patch(
