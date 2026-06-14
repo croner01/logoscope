@@ -7671,3 +7671,56 @@ async def get_auto_fix_history(
     except Exception as exc:
         logger.error("get_auto_fix_history error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Skill context injection (AI-driven skill selection) ─────────────────
+
+
+def build_skills_context(user_query: str) -> Dict[str, Any]:
+    """Build skill context sections for LLM prompts.
+
+    Returns:
+        ``{"diagnostic_tools": "...", "reference_methods": "..."}``
+    """
+    from ai.skills.manager import SkillManager
+
+    mgr = SkillManager()
+    all_skills = mgr.list_all()
+
+    diagnostic_lines: List[str] = []
+    reference_sections: List[str] = []
+
+    for skill in all_skills:
+        matched = _match_skill_to_query(skill, user_query)
+        if not matched:
+            continue
+
+        if skill.skill_type == "diagnostic":
+            diagnostic_lines.append(
+                f"- {skill.name} ({skill.step_count} steps): {skill.description}"
+            )
+        else:
+            section = f"### {skill.display_name}\n{skill.body}"
+            if skill.auxiliary_files:
+                section += "\n\n**参考文档:** " + ", ".join(skill.auxiliary_files.keys())
+            reference_sections.append(section)
+
+    return {
+        "diagnostic_tools": "\n".join(diagnostic_lines),
+        "reference_methods": "\n\n".join(reference_sections),
+    }
+
+
+def _match_skill_to_query(skill, query: str) -> bool:
+    """Three-tier matching: trigger pattern → component → description keyword."""
+    q = query.lower()
+    for pattern in skill.trigger_patterns:
+        if re.search(pattern, q):
+            return True
+    for comp in skill.applicable_components:
+        if comp.lower() in q:
+            return True
+    for word in skill.description.lower().split():
+        if len(word) > 3 and word in q:
+            return True
+    return False

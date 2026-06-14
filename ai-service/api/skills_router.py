@@ -32,13 +32,14 @@ class SkillBrief(BaseModel):
     source_dir: str
     risk_level: str
     step_count: int
+    skill_type: str = "diagnostic"
 
     class Config:
         from_attributes = True
 
 
 class SkillDetail(BaseModel):
-    """Full skill data including YAML content and steps."""
+    """Full skill data including YAML/markdown content and steps."""
     name: str
     display_name: str
     description: str
@@ -46,10 +47,13 @@ class SkillDetail(BaseModel):
     file_path: str
     risk_level: str
     step_count: int
+    skill_type: str = "diagnostic"
     trigger_patterns: List[str] = []
     applicable_components: List[str] = []
     install_meta: Dict[str, Any] = {}
     steps: List[Dict[str, Any]] = []
+    body: str = ""
+    auxiliary_files: Dict[str, str] = {}
 
     class Config:
         from_attributes = True
@@ -106,10 +110,13 @@ async def get_skill(name: str, source: Optional[str] = None) -> SkillDetail:
         file_path=skill.file_path,
         risk_level=skill.risk_level,
         step_count=skill.step_count,
+        skill_type=skill.skill_type,
         trigger_patterns=skill.trigger_patterns,
         applicable_components=skill.applicable_components,
         install_meta=skill.install_meta,
-        steps=data.get("steps", []),
+        steps=data.get("steps", []) if skill.skill_type == "diagnostic" else [],
+        body=data.get("body", ""),
+        auxiliary_files=data.get("auxiliary_files", {}),
     )
 
 
@@ -134,10 +141,13 @@ async def install_skill(body: InstallRequest) -> SkillDetail:
         file_path=src.file_path,
         risk_level=src.risk_level,
         step_count=src.step_count,
+        skill_type=src.skill_type,
         trigger_patterns=src.trigger_patterns,
         applicable_components=src.applicable_components,
         install_meta=src.install_meta,
-        steps=data.get("steps", []),
+        steps=data.get("steps", []) if src.skill_type == "diagnostic" else [],
+        body=data.get("body", ""),
+        auxiliary_files=data.get("auxiliary_files", {}),
     )
 
 
@@ -158,10 +168,13 @@ async def create_skill(body: CreateRequest) -> SkillDetail:
         file_path=src.file_path,
         risk_level=src.risk_level,
         step_count=src.step_count,
+        skill_type=src.skill_type,
         trigger_patterns=src.trigger_patterns,
         applicable_components=src.applicable_components,
         install_meta=src.install_meta,
-        steps=data.get("steps", []),
+        steps=data.get("steps", []) if src.skill_type == "diagnostic" else [],
+        body=data.get("body", ""),
+        auxiliary_files=data.get("auxiliary_files", {}),
     )
 
 
@@ -190,10 +203,13 @@ async def update_skill_yaml(name: str, body: ImportRequest) -> SkillDetail:
         file_path=src.file_path,
         risk_level=src.risk_level,
         step_count=src.step_count,
+        skill_type=src.skill_type,
         trigger_patterns=src.trigger_patterns,
         applicable_components=src.applicable_components,
         install_meta=src.install_meta,
-        steps=data.get("steps", []),
+        steps=data.get("steps", []) if src.skill_type == "diagnostic" else [],
+        body=data.get("body", ""),
+        auxiliary_files=data.get("auxiliary_files", {}),
     )
 
 
