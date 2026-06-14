@@ -1,4 +1,4 @@
-"""Tests for the OpenHands tool adapter."""
+"""Tests for the runtime backend tool adapter."""
 
 from ai.runtime_v4.backend.tool_adapter import (
     map_skill_step_to_runtime_command,

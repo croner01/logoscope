@@ -7,11 +7,6 @@ from typing import Dict
 
 from ai.runtime_v4.backend.base import RuntimeBackend
 from ai.runtime_v4.backend.langgraph_backend import LangGraphBackend
-from ai.runtime_v4.backend.openhands_backend import OpenHandsBackend
-from ai.runtime_v4.backend.openhands_provider import (
-    reset_openhands_provider,
-    validate_openhands_provider_readiness,
-)
 
 
 _runtime_backends: Dict[str, RuntimeBackend] = {}
@@ -19,8 +14,8 @@ _runtime_backends: Dict[str, RuntimeBackend] = {}
 
 def _normalize_backend_mode(value: str) -> str:
     raw = str(value or "").strip().lower()
-    if raw in {"openhands", "openhands_v1", "openhands-v1"}:
-        return "openhands"
+    if raw in {"claude_sdk", "claude"}:
+        return "claude_sdk"
     return "langgraph"
 
 
@@ -32,16 +27,13 @@ def _backend_mode(requested_backend: str = "") -> str:
 
 def validate_runtime_backend_readiness(requested_backend: str = "") -> None:
     """Fail closed when an experimental backend is configured but not enabled."""
-
     mode = _backend_mode(requested_backend)
-    if mode != "openhands":
-        return
-    enabled = str(os.getenv("AI_RUNTIME_V4_OPENHANDS_ENABLED") or "false").strip().lower()
-    if enabled not in {"1", "true", "yes", "on"}:
-        raise RuntimeError(
-            "OpenHands backend is disabled; set AI_RUNTIME_V4_OPENHANDS_ENABLED=true to enable it"
-        )
-    validate_openhands_provider_readiness()
+    if mode == "claude_sdk":
+        enabled = str(os.getenv("AI_RUNTIME_V4_CLAUDE_SDK_ENABLED") or "false").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            raise RuntimeError(
+                "Claude SDK backend is disabled; set AI_RUNTIME_V4_CLAUDE_SDK_ENABLED=true to enable it"
+            )
 
 
 def get_runtime_backend(*, requested_backend: str = "") -> RuntimeBackend:
@@ -49,8 +41,11 @@ def get_runtime_backend(*, requested_backend: str = "") -> RuntimeBackend:
     validate_runtime_backend_readiness(mode)
     backend = _runtime_backends.get(mode)
     if backend is None:
-        if mode == "openhands":
-            backend = OpenHandsBackend()
+        if mode == "claude_sdk":
+            # Will be replaced with actual ClaudeSdkBackend in Phase 1
+            raise RuntimeError(
+                "Claude SDK backend is not yet implemented; set AI_RUNTIME_V4_AGENT_BACKEND=langgraph to use the default"
+            )
         else:
             backend = LangGraphBackend()
         _runtime_backends[mode] = backend
@@ -59,7 +54,6 @@ def get_runtime_backend(*, requested_backend: str = "") -> RuntimeBackend:
 
 def reset_runtime_backend() -> None:
     _runtime_backends.clear()
-    reset_openhands_provider()
 
 
 __all__ = [
