@@ -7,6 +7,7 @@ from typing import Dict
 
 from ai.runtime_v4.backend.base import RuntimeBackend
 from ai.runtime_v4.backend.langgraph_backend import LangGraphBackend
+from ai.runtime_v4.backend.claude_sdk_backend import ClaudeSdkBackend
 
 
 _runtime_backends: Dict[str, RuntimeBackend] = {}
@@ -42,10 +43,7 @@ def get_runtime_backend(*, requested_backend: str = "") -> RuntimeBackend:
     backend = _runtime_backends.get(mode)
     if backend is None:
         if mode == "claude_sdk":
-            # Will be replaced with actual ClaudeSdkBackend in Phase 1
-            raise RuntimeError(
-                "Claude SDK backend is not yet implemented; set AI_RUNTIME_V4_AGENT_BACKEND=langgraph to use the default"
-            )
+            backend = ClaudeSdkBackend()
         else:
             backend = LangGraphBackend()
         _runtime_backends[mode] = backend
