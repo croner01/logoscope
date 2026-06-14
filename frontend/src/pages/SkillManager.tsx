@@ -114,7 +114,7 @@ const SkillManager: React.FC = () => {
     try {
       const params = sourceFilter ? { source: sourceFilter } : {};
       const res = await axios.get(SKILLS_API, { params });
-      setSkills(res.data as SkillBrief[]);
+      setSkills(Array.isArray(res.data) ? (res.data as SkillBrief[]) : []);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load skills';
       setError(msg);

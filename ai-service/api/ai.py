@@ -13,7 +13,7 @@ import contextlib
 from contextvars import ContextVar
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Callable, Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel, Field
 import json
 import logging
