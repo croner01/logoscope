@@ -1,0 +1,86 @@
+# K8s Pod 诊断技能 — 声明式定义
+# 用于 Pod 崩溃、CrashLoopBackOff、OOMKilled、ImagePullBackOff 场景
+# 两个运行时共享此定义：
+#   LangGraph (离线) → loader.py → List[SkillStep]
+#   Claude SDK (在线) → loader.py → @tool 定义
+---
+name: k8s_pod_diagnostics
+display_name: "K8s Pod 诊断"
+description: >
+  针对 Pod 崩溃、CrashLoopBackOff、OOMKilled、ImagePullBackOff 等场景，
+  依次执行 kubectl describe pod、kubectl logs、kubectl get events、
+  kubectl top pod，收集完整故障证据。
+applicable_components:
+  - pod
+  - deployment
+  - container
+  - k8s
+  - kubernetes
+trigger_patterns:
+  - "CrashLoopBackOff"
+  - "OOMKilled"
+  - "ImagePullBackOff"
+  - "pod.*restart"
+  - "container.*fail"
+  - "Back-off restarting"
+  - "Error.*container"
+risk_level: low
+max_steps: 5
+steps:
+  - id: k8s-locate-pod
+    title: "查找 Pod 所在的命名空间"
+    tool: generic_exec
+    command: "kubectl get pods -A --no-headers 2>/dev/null{service_filter} | head -20"
+    purpose: "确认目标 Pod 是否存在及其正确的命名空间"
+    timeout: 15
+    parse_hints:
+      extract: ["NAMESPACE", "NAME", "STATUS", "RESTARTS"]
+
+  - id: k8s-describe-pod
+    title: "Describe Pod 详情"
+    tool: generic_exec
+    command: >
+      kubectl get pods -A --no-headers 2>/dev/null{service_filter}
+      | head -5 | awk '{print $1, $2}'
+      | while read ns pod; do kubectl describe pod $pod -n $ns 2>/dev/null; done
+    purpose: "查看 Pod 状态、重启原因、资源限制、最近 Events"
+    depends_on: ["k8s-locate-pod"]
+    timeout: 20
+    parse_hints:
+      extract: ["Restart Count", "Last State", "Reason", "OOMKilled", "Events"]
+
+  - id: k8s-logs-tail
+    title: "获取容器最近日志"
+    tool: generic_exec
+    command: >
+      kubectl get pods -A --no-headers 2>/dev/null{service_filter}
+      | head -5 | awk '{print $1, $2}'
+      | while read ns pod; do
+          kubectl logs $pod -n $ns --tail=100 --previous 2>/dev/null
+          || kubectl logs $pod -n $ns --tail=100 2>/dev/null;
+        done || echo 'No logs available'
+    purpose: "定位崩溃时刻的错误栈和关键异常"
+    depends_on: ["k8s-describe-pod"]
+    timeout: 25
+    parse_hints:
+      extract: ["ERROR", "Exception", "FATAL", "panic", "signal"]
+
+  - id: k8s-get-events
+    title: "获取集群 Events（跨命名空间）"
+    tool: generic_exec
+    command: "kubectl get events -A --sort-by=.lastTimestamp | tail -30"
+    purpose: "查看最近集群事件，关注 Warning 和 Killing"
+    depends_on: ["k8s-locate-pod"]
+    timeout: 15
+    parse_hints:
+      extract: ["Warning", "Killing", "BackOff", "FailedScheduling"]
+
+  - id: k8s-top-pod
+    title: "查看各命名空间 Pod 资源用量"
+    tool: generic_exec
+    command: "kubectl top pod -A --no-headers 2>/dev/null | sort -k3 -hr | head -20"
+    purpose: "确认内存/CPU 是否已达到 limit，辅助 OOM 判断"
+    depends_on: ["k8s-locate-pod"]
+    timeout: 15
+    parse_hints:
+      extract: ["CPU", "MEMORY", "Mi", "Gi"]
