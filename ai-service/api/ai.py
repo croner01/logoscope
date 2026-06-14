@@ -767,6 +767,11 @@ def _runtime_evidence_gate_mode() -> str:
     return "progressive"
 
 
+def _is_evidence_gate_enabled() -> bool:
+    """全局证据门禁开关。Claude SDK 在线模式可关闭，DeepSeek 离线模式建议开启。"""
+    return _as_bool(os.getenv("AI_RUNTIME_EVIDENCE_GATE_ENABLED"), True)
+
+
 def _is_hard_evidence_slot(slot_id: Any) -> bool:
     """
     判定是否为硬阻断证据槽位。
@@ -2234,13 +2239,21 @@ async def _run_followup_runtime_task(
             coverage_insufficient = coverage_insufficient or evidence_slots_missing
         else:
             coverage_insufficient = coverage_insufficient or hard_evidence_slots_missing
-        evidence_incomplete = (
-            has_needs_data_subgoal
-            or coverage_insufficient
-            or confidence_insufficient
-            or answer_declares_insufficient
-            or hard_evidence_slots_missing
-        )
+
+        # ── Evidence gate toggle ─────────────────────────────────────────
+        # Claude SDK 在线模式可关闭 (AI_RUNTIME_EVIDENCE_GATE_ENABLED=false)
+        # DeepSeek 离线模式建议保持开启
+        if _is_evidence_gate_enabled():
+            evidence_incomplete = (
+                has_needs_data_subgoal
+                or coverage_insufficient
+                or confidence_insufficient
+                or answer_declares_insufficient
+                or hard_evidence_slots_missing
+            )
+        else:
+            # Gate 关闭时跳过所有证据检查，直接完成
+            evidence_incomplete = False
         def _compact_blocked_reason_detail(value: Any, fallback: str = "") -> str:
             text = _as_str(value).strip() or fallback
             return text[:240]
