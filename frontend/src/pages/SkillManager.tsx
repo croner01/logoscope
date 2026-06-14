@@ -678,6 +678,7 @@ const SkillManager: React.FC = () => {
               <ul className="space-y-1 ml-3 list-disc">
                 <li><code className="text-purple-600">github://owner/repo/skills/my_skill.yaml</code></li>
                 <li><code className="text-purple-600">github://owner/repo@v1.2.0/skills/my_skill.yaml</code></li>
+                <li><code className="text-purple-600">https://github.com/owner/repo/blob/main/path/to/skill.yaml</code></li>
                 <li><code className="text-purple-600">github://logoscope/skills</code> — 同时安装 index.yaml 中列出的所有技能</li>
               </ul>
             </div>

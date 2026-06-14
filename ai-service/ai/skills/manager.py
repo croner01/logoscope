@@ -84,13 +84,48 @@ class InstallMeta:
 
 # ── GitHub URL helpers ──────────────────────────────────────────────────────
 
+def _normalize_github_url(url: str) -> str:
+    """Convert ``https://github.com/...`` URLs to ``github://`` format."""
+    url = url.strip()
+    if not url.startswith(("https://github.com/", "http://github.com/")):
+        return url
+
+    m = re.match(
+        r"^https?://github\.com/"
+        r"(?P<owner>[^/]+)"
+        r"(?:/(?P<repo>[^/@]+))?"
+        r"(?:/(?:blob|tree)/(?P<ref>[^/]+))?"
+        r"(?:/(?P<path>.+))?"
+        r"$",
+        url,
+    )
+    if not m or not m.group("repo"):
+        return url  # Can't parse — let the original validation fail
+
+    owner, repo, ref, path = (
+        m.group("owner"), m.group("repo"),
+        m.group("ref"), m.group("path"),
+    )
+    # Rebuild as github://owner/repo[@ref][/path]
+    tail = ""
+    if ref:
+        tail = f"@{ref}"
+    if path:
+        tail += f"/{path}"
+    return f"github://{owner}/{repo}{tail}"
+
+
 def parse_github_url(url: str) -> Optional[Dict[str, str]]:
-    """Parse a ``github://owner/repo/path/to/skill.yaml[@ref]`` URL.
+    """Parse a GitHub skill URL into its components.
+
+    Accepts both formats:
+    - ``github://owner/repo/path/to/skill.yaml[@ref]``
+    - ``https://github.com/owner/repo[/blob/ref]/path/to/skill.yaml``
 
     Returns:
         Dict with keys (owner, repo, ref, path) or None if invalid.
     """
-    m = _GITHUB_URL_RE.match(url.strip())
+    m = _GITHUB_URL_RE.match(_normalize_github_url(url).strip())
     if not m:
         return None
     return {
@@ -280,7 +315,8 @@ class SkillManager:
         if not parts:
             raise ValueError(
                 f"Invalid GitHub URL: {github_url!r}. "
-                f"Expected format: github://owner/repo/path/to/skill.yaml[@ref]"
+                f"Expected format: github://owner/repo/path/to/skill.yaml[@ref] "
+                f"or https://github.com/owner/repo[/blob/ref]/path/to/skill.yaml"
             )
 
         # ── If no specific file path, try index.yaml ──────────────────────
