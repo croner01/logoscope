@@ -1113,7 +1113,26 @@ def _permissive_elevation_meta(command: str, reason: str) -> Dict[str, Any]:
             parts = shlex.split(command)
             database = _extract_option_value(parts, {"-d", "--database"}, database) or database
         except Exception:
+            parts = []
             pass
+        # Classify read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN) as low-risk
+        # instead of mutating — so OPA doesn't block them as "unsupported".
+        _is_readonly = False
+        if parts:
+            query_text = _extract_clickhouse_query(parts)
+            if query_text:
+                first_word = query_text.strip().split(None, 1)[0].lower()
+                _is_readonly = first_word in {"select", "show", "describe", "explain"}
+        if _is_readonly:
+            return _read_only_meta(
+                command=command,
+                reason="clickhouse read-only query",
+                command_family="clickhouse",
+                executor_type="sandbox_pod",
+                executor_profile="toolbox-clickhouse-readonly",
+                target_kind="clickhouse_cluster",
+                target_identity=f"database:{database}",
+            )
         return _mutating_meta(
             command=command,
             reason=safe_reason,

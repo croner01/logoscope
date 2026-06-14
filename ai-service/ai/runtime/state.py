@@ -61,7 +61,18 @@ class RuntimeState:
 
     def check_evidence_sufficient(self) -> bool:
         if not self.evidence_slots:
-            return len(self.observations) >= 2
+            # Only count observations that actually produced useful output:
+            # exit_code == 0 AND status is not blocked/permission_required.
+            # Failed/blocked commands don't constitute "enough evidence"
+            # — the engine should retry with a different approach.
+            successful = [
+                o for o in self.observations
+                if o.exit_code == 0
+                and o.status not in ("permission_required", "blocked", "blocked_approval", "skipped_duplicate")
+            ]
+            if not successful:
+                return False
+            return len(successful) >= 2
         return all(
             slot.status in ("filled", "reused")
             for slot in self.evidence_slots.values()
