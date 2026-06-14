@@ -107,7 +107,7 @@ data:
     [MULTILINE_PARSER]
         name          multiline_trace_stack
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
         flush_timeout 2000
         rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?\s+.*(?:ERROR|FATAL|Exception|Traceback)|Traceback \(most recent call last\):|Exception in thread \".*\"|panic: .*)$/" "cont"
@@ -127,21 +127,21 @@ data:
     [MULTILINE_PARSER]
         name          multiline_openstack_traceback
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
-        flush_timeout 4000
-        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? (?!Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s{2,}|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):|urllib3\.exceptions\.[A-Za-z_]+:|requests\.exceptions\.[A-Za-z_]+:|socket\.gaierror:|$).*)$/" "cont"
-        rule          "cont"        "/^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? )?(?:Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*|)$/" "cont"
+        flush_timeout 6000
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? (?!Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s{2,}|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):|\\S+\\.py:\\d+\\s+\\S+\\s{3,}|urllib3\.exceptions\.[A-Za-z_]+:|requests\.exceptions\.[A-Za-z_]+:|socket\.gaierror:|$).*)$/" "cont"
+        rule          "cont"        "/^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? )?(?:\S+\.py:\d+\s+\S+\s+)?(?:Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*|)$/" "cont"
 
     # ── multiline_openstack_ts_boundary: OpenStack 时间戳边界切分 ────
     [MULTILINE_PARSER]
         name          multiline_openstack_ts_boundary
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
         flush_timeout 4000
-        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRITICAL|FATAL)\s+.*)$/" "cont"
-        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRITICAL|FATAL)\s+).*$/" "cont"
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|FATAL)\s+.*)$/" "cont"
+        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|FATAL)\s+).*$/" "cont"
 
     # ── multiline_otel_stack: OTel Collector Go 堆栈 ──────────────────
     [MULTILINE_PARSER]
@@ -157,7 +157,7 @@ data:
     [MULTILINE_PARSER]
         name          multiline_query_sql
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
         flush_timeout 1500
         rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s+-\s+[^-]+\s+-\s+(?:INFO|DEBUG)\s+-\s+Executing query:\s*)$/" "cont"

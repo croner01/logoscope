@@ -75,6 +75,7 @@ class TemporalRuntimeConfig:
     workflow_execution_timeout_seconds: int
     remote_query_attempts: int
     remote_query_interval_ms: int
+    remote_query_rpc_timeout_seconds: int
 
 
 def get_temporal_runtime_config() -> TemporalRuntimeConfig:
@@ -87,8 +88,12 @@ def get_temporal_runtime_config() -> TemporalRuntimeConfig:
             30,
             _as_int(os.getenv("AI_RUNTIME_V4_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS"), 3600),
         ),
-        remote_query_attempts=max(1, _as_int(os.getenv("AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS"), 15)),
-        remote_query_interval_ms=max(50, _as_int(os.getenv("AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS"), 200)),
+        remote_query_attempts=max(1, _as_int(os.getenv("AI_RUNTIME_V4_TEMPORAL_QUERY_ATTEMPTS"), 60)),
+        remote_query_interval_ms=max(50, _as_int(os.getenv("AI_RUNTIME_V4_TEMPORAL_QUERY_INTERVAL_MS"), 1000)),
+        remote_query_rpc_timeout_seconds=max(
+            1,
+            _as_int(os.getenv("AI_RUNTIME_V4_TEMPORAL_QUERY_RPC_TIMEOUT_SECONDS"), 10),
+        ),
     )
 
 
@@ -278,24 +283,40 @@ class TemporalOuterClient:
 
         cfg = get_temporal_runtime_config()
         workflow_id = _build_workflow_id("")
-        handle = await remote_client.start_workflow(
-            WORKFLOW_DEFINITION_NAME,
-            {
-                "thread_id": _as_str(thread_id),
-                "session_id": _as_str(session_id),
-                "question": _as_str(question),
-                "analysis_context": analysis_context if isinstance(analysis_context, dict) else {},
-                "runtime_options": runtime_options if isinstance(runtime_options, dict) else {},
-            },
-            id=workflow_id,
-            task_queue=cfg.task_queue,
-            execution_timeout=timedelta(seconds=cfg.workflow_execution_timeout_seconds),
-        )
 
-        snapshot = await self._query_remote_snapshot(handle=handle, require_run_id=True)
-        run_id = _as_str(snapshot.get("run_id"))
-        if not run_id:
-            raise RuntimeError("temporal start workflow did not return run_id")
+        # Overall timeout: 120s matches the workflow activity start_to_close_timeout.
+        # Prevents hanging for 22+ minutes when Temporal/SDK query RPC is slow.
+        async def _do_start() -> Dict[str, Any]:
+            handle = await remote_client.start_workflow(
+                WORKFLOW_DEFINITION_NAME,
+                {
+                    "thread_id": _as_str(thread_id),
+                    "session_id": _as_str(session_id),
+                    "question": _as_str(question),
+                    "analysis_context": analysis_context if isinstance(analysis_context, dict) else {},
+                    "runtime_options": runtime_options if isinstance(runtime_options, dict) else {},
+                },
+                id=workflow_id,
+                task_queue=cfg.task_queue,
+                execution_timeout=timedelta(seconds=cfg.workflow_execution_timeout_seconds),
+            )
+
+            snapshot = await self._query_remote_snapshot(handle=handle, require_run_id=True)
+            run_id = _as_str(snapshot.get("run_id"))
+            if not run_id:
+                raise RuntimeError("temporal start workflow did not return run_id")
+            return {"handle": handle, "run_id": run_id, "snapshot": snapshot}
+
+        try:
+            result = await asyncio.wait_for(_do_start(), timeout=120.0)
+            handle = result["handle"]
+            run_id = result["run_id"]
+            snapshot = result["snapshot"]
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "temporal start workflow timed out after 120s — workflow activity "
+                "may still be running on the worker; check Temporal Server health"
+            )
         run_payload = await self._fetch_run_payload(run_id) if run_id else {}
         if not _as_str((run_payload or {}).get("run_id")).strip():
             run_payload = {
@@ -466,10 +487,11 @@ class TemporalOuterClient:
 
     async def _query_remote_snapshot(self, *, handle: Any, require_run_id: bool) -> Dict[str, Any]:
         cfg = get_temporal_runtime_config()
+        query_timeout = timedelta(seconds=cfg.remote_query_rpc_timeout_seconds)
         snapshot: Dict[str, Any] = {}
         for _ in range(cfg.remote_query_attempts):
             try:
-                queried = await handle.query(QUERY_SNAPSHOT)
+                queried = await handle.query(QUERY_SNAPSHOT, rpc_timeout=query_timeout)
                 snapshot = queried if isinstance(queried, dict) else {}
                 if not require_run_id:
                     return snapshot

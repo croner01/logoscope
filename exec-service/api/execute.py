@@ -393,6 +393,7 @@ def _finalize_precheck_response(
             executor_profile=as_str(safe_response.get("executor_profile"), "local-default"),
             target_kind=target_kind,
             target_identity=target_identity,
+            target_cluster_id=as_str(request.target_cluster_id or safe_response.get("target_cluster_id")),
             resolved_target_context=resolved_target_context,
         )
         safe_response["effective_executor_type"] = as_str(
@@ -786,6 +787,7 @@ class PrecheckRequest(BaseModel):
     purpose: str = ""
     target_kind: str = ""
     target_identity: str = ""
+    target_cluster_id: str = ""
 
 
 class TicketConfirmRequest(BaseModel):
@@ -813,6 +815,7 @@ class ExecuteRequest(BaseModel):
     timeout_seconds: int = 20
     target_kind: str = ""
     target_identity: str = ""
+    target_cluster_id: str = ""
 
 
 class CommandRunCreateRequest(ExecuteRequest):
@@ -874,6 +877,7 @@ async def precheck_command(request: PrecheckRequest) -> Dict[str, Any]:
         executor_profile=as_str(command_meta.get("executor_profile"), "local-default"),
         target_kind=as_str(command_meta.get("target_kind"), "runtime_node"),
         target_identity=as_str(command_meta.get("target_identity"), "runtime:local"),
+        target_cluster_id=as_str(request.target_cluster_id),
     )
     response = {
         "status": "ok",
@@ -892,6 +896,7 @@ async def precheck_command(request: PrecheckRequest) -> Dict[str, Any]:
         "executor_profile": as_str(command_meta.get("executor_profile"), "local-default"),
         "target_kind": as_str(command_meta.get("target_kind"), "runtime_node"),
         "target_identity": as_str(command_meta.get("target_identity"), "runtime:local"),
+        "target_cluster_id": as_str(request.target_cluster_id),
         "effective_executor_type": as_str(dispatch_preview.get("effective_executor_type"), "local_process"),
         "effective_executor_profile": as_str(dispatch_preview.get("effective_executor_profile")),
         "dispatch_backend": as_str(dispatch_preview.get("dispatch_backend"), "template_unavailable"),
@@ -1076,6 +1081,7 @@ async def _prepare_execution(request: ExecuteRequest) -> Dict[str, Any]:
             purpose=request.purpose,
             target_kind=request.target_kind,
             target_identity=request.target_identity,
+            target_cluster_id=as_str(request.target_cluster_id),
         )
     )
     pre_status = as_str(precheck.get("status")).lower()
@@ -1153,6 +1159,7 @@ async def create_command_run(request: CommandRunCreateRequest) -> Dict[str, Any]
         executor_profile=as_str(precheck.get("executor_profile"), "local-default"),
         target_kind=as_str(precheck.get("target_kind"), "runtime_node"),
         target_identity=as_str(precheck.get("target_identity"), "runtime:local"),
+        target_cluster_id=as_str(request.target_cluster_id or precheck.get("target_cluster_id")),
         resolved_target_context=resolved_target_context,
         target_metadata_contract=target_metadata_contract,
         policy_decision_id=decision_id,

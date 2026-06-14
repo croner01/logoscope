@@ -55,7 +55,8 @@ type NodeLifecycleState = 'entering' | 'active' | 'departing' | 'ghost';
 
 // 节点生命周期默认常量
 const NODE_ENTERING_DURATION_MS = 2000;   // entering → active
-const NODE_DEPARTING_DURATION_MS = 900000;  // departing → ghost（15 分钟）
+const NODE_DEPARTING_DURATION_MS = 300000;  // departing → ghost（5 分钟）
+const EDGE_DEPARTING_DURATION_MS = 30000;   // edge departing 清理（30 秒）
 const GHOST_CLEANUP_HOURS = 0.25;           // ghost 超时清理（小时）
 const GHOST_CLEANUP_MS = GHOST_CLEANUP_HOURS * 60 * 60 * 1000;
 type MessageTargetPattern = 'url' | 'kv' | 'proxy' | 'rpc';
@@ -1557,13 +1558,18 @@ const TopologyPage: React.FC = () => {
     nodes = evidenceFiltered.nodes;
     edges = evidenceFiltered.edges;
 
-    const weakEvidenceFiltered = filterWeakEvidenceEdges(nodes, edges, suppressWeakEdges);
-    const hiddenWeakEdgeCount = Math.max(0, edges.length - weakEvidenceFiltered.edges.length);
-    const hiddenWeakNodeCount = Math.max(0, nodes.length - weakEvidenceFiltered.nodes.length);
-    nodes = weakEvidenceFiltered.nodes;
-    edges = weakEvidenceFiltered.edges;
-
     const activeFocus = focusNodeId;
+    let hiddenWeakEdgeCount = 0;
+    let hiddenWeakNodeCount = 0;
+
+    // 焦点模式下不执行弱边抑制，避免过滤掉焦点节点及其关联边导致拓扑为空
+    if (suppressWeakEdges && !activeFocus) {
+      const weakEvidenceFiltered = filterWeakEvidenceEdges(nodes, edges, suppressWeakEdges);
+      hiddenWeakEdgeCount = Math.max(0, edges.length - weakEvidenceFiltered.edges.length);
+      hiddenWeakNodeCount = Math.max(0, nodes.length - weakEvidenceFiltered.nodes.length);
+      nodes = weakEvidenceFiltered.nodes;
+      edges = weakEvidenceFiltered.edges;
+    }
     if (activeFocus) {
       const focused = filterGraphByFocusDepth(nodes, edges, activeFocus, focusDepth);
       nodes = focused.nodes;
@@ -1664,7 +1670,7 @@ const TopologyPage: React.FC = () => {
             });
             delete departingTimersRef.current[key];
             delete departingEdgesRef.current[key];
-          }, 5000);
+          }, EDGE_DEPARTING_DURATION_MS);
         }
       });
 

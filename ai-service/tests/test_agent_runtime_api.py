@@ -3921,3 +3921,97 @@ def test_run_followup_runtime_task_marks_run_failed_when_followup_request_build_
     assert latest.summary_json["followup_runtime_worker"] == "idle"
     event_types = [item.event_type for item in events]
     assert event_protocol.RUN_FAILED in event_types
+
+
+def test_run_followup_runtime_task_finally_exception_does_not_crash(monkeypatch):
+    """Verify that an exception in the finally block's _update_run_summary does not
+    crash the background task or propagate out of _run_followup_runtime_task."""
+    runtime_service = _build_runtime_service()
+    run = runtime_service.create_run(
+        session_id="sess-finally-crash-001",
+        question="test finally exception isolation",
+        analysis_context={"analysis_type": "log", "service_name": "test-svc"},
+        runtime_options={"mode": "followup_analysis", "conversation_id": "conv-finally-crash-001"},
+    )
+
+    # Make _build_followup_request_from_ai_run fail first so we hit the except Exception path,
+    # then verify the finally block's _update_run_summary exception does not propagate.
+    def _raise_build_failure(_run, _runtime_options):
+        raise ValueError("simulated request build failure")
+
+    monkeypatch.setattr("api.ai._build_followup_request_from_ai_run", _raise_build_failure)
+
+    # Also make _update_run_summary raise when called with followup_runtime_worker
+    # (which only happens in the finally block).
+    orig_update = runtime_service._update_run_summary
+    def _raising_finally_update(_run, **changes):
+        # Only raise on the finally block's call (worker="idle"), NOT on the
+        # earlier worker="running" call at line 2013 which is before try/except.
+        if changes.get("followup_runtime_worker") == "idle":
+            raise OSError("simulated finally storage failure")
+        return orig_update(_run, **changes)
+
+    monkeypatch.setattr(runtime_service, "_update_run_summary", _raising_finally_update)
+
+    async def _run_task():
+        await _run_followup_runtime_task(
+            runtime_service,
+            run.run_id,
+            {"mode": "followup_analysis", "conversation_id": "conv-finally-crash-001"},
+        )
+        latest = runtime_service.get_run(run.run_id)
+        events = runtime_service.list_events(run.run_id, after_seq=0, limit=100)
+        return latest, events
+
+    # Must not raise — the finally exception must be swallowed
+    latest, events = asyncio.run(_run_task())
+
+    assert latest is not None
+    # The run should have been failed by the except Exception handler
+    assert latest.status == "failed"
+    event_types = [item.event_type for item in events]
+    assert event_protocol.RUN_FAILED in event_types
+
+
+def test_run_followup_runtime_task_timeout_wrapping(monkeypatch):
+    """Verify that _run_follow_up_analysis_core is wrapped with a timeout that
+    fails the run when exceeded."""
+    runtime_service = _build_runtime_service()
+    run = runtime_service.create_run(
+        session_id="sess-timeout-wrap-001",
+        question="test timeout wrapping",
+        analysis_context={"analysis_type": "log", "service_name": "test-svc"},
+        runtime_options={"mode": "followup_analysis", "conversation_id": "conv-timeout-wrap-001"},
+    )
+
+    # Set a very short deadline so the timeout fires immediately
+    monkeypatch.setenv("AI_RUNTIME_FOLLOWUP_DEADLINE_SECONDS", "1")
+    monkeypatch.setenv("AI_RUNTIME_FOLLOWUP_MIN_DEADLINE_SECONDS", "1")
+
+    # Make _run_follow_up_analysis_core hang forever
+    async def _never_return(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr("api.ai._run_follow_up_analysis_core", _never_return)
+
+    async def _run_task():
+        await _run_followup_runtime_task(
+            runtime_service,
+            run.run_id,
+            {"mode": "followup_analysis", "conversation_id": "conv-timeout-wrap-001"},
+        )
+        latest = runtime_service.get_run(run.run_id)
+        events = runtime_service.list_events(run.run_id, after_seq=0, limit=100)
+        return latest, events
+
+    latest, events = asyncio.run(_run_task())
+
+    assert latest is not None
+    assert latest.status == "failed"
+    assert latest.error_code == "followup_runtime_timeout"
+    assert "deadline" in str(latest.error_detail).lower()
+    assert latest.summary_json["current_phase"] == "timed_out"
+    # finally block must still run and set worker to idle
+    assert latest.summary_json["followup_runtime_worker"] == "idle"
+    event_types = [item.event_type for item in events]
+    assert event_protocol.RUN_FAILED in event_types

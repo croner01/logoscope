@@ -120,11 +120,11 @@ spec:
               - pg_ctl stop -m smart -D "$PGDATA" -w -t 45 || true
         resources:
           requests:
-            cpu: 100m
-            memory: 256Mi
+            cpu: 500m
+            memory: 512Mi
           limits:
-            cpu: "1"
-            memory: 1Gi
+            cpu: "2"
+            memory: 2Gi
       volumes:
       - name: data
         persistentVolumeClaim:
@@ -169,6 +169,44 @@ spec:
         app: temporal
     spec:
       terminationGracePeriodSeconds: 90
+      initContainers:
+      - name: wait-for-postgresql
+        image: postgres:16-alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-auth
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-auth
+              key: password
+        - name: PGHOST
+          value: temporal-postgresql
+        - name: PGDATABASE
+          value: temporal
+        - name: PGSSLMODE
+          value: disable
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          echo "--- Waiting for PostgreSQL to be truly ready ---"
+          for i in $(seq 1 60); do
+            if pg_isready -q 2>/dev/null; then
+              if psql -c "SELECT 1" >/dev/null 2>&1; then
+                echo "PostgreSQL is accepting queries."
+                exit 0
+              fi
+            fi
+            echo "Attempt $$i/60 — waiting 2s..."
+            sleep 2
+          done
+          echo "PostgreSQL not ready after 120s — aborting."
+          exit 1
       containers:
       - name: temporal
         image: temporalio/auto-setup:1.25.2
@@ -225,9 +263,10 @@ spec:
         startupProbe:
           tcpSocket:
             port: 7233
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 24
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 36
         livenessProbe:
           tcpSocket:
             port: 7233

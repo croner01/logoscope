@@ -1,0 +1,74 @@
+---
+# toolbox-gateway ConfigMap
+# 包含命令黑白名单策略，通过 ConfigMap 挂载，更新 ConfigMap 后重启 Pod 即可生效。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolbox-gateway-config
+  namespace: islap
+  labels:
+    app: toolbox-gateway
+    component: security-policy
+data:
+  # virsh 子命令策略 — JSON 格式
+  # 在 TOOLBOX_GATEWAY_ALLOWED_HEADS 包含 virsh 的前提下，
+  # 只有 readonly 列表中的子命令允许执行，blocked 列表中的被明确拒绝，
+  # 未出现在任一列表中的子命令也被视为不安全，默认拦截。
+  virsh-policy.json: |
+    {
+      "readonly": [
+        "list", "dominfo", "domstate", "domstats", "domuuid", "domid", "domname",
+        "domxml", "domxml-from-native", "domxml-to-native",
+        "domblklist", "domblkinfo", "domblkstat", "dominblkerrors", "domblkerror",
+        "domiflist", "domifstat", "domifaddr",
+        "dommemstat", "vcpucount", "freecell", "freepages", "maxvcpus",
+        "dommemstats", "domfsinfo", "domhostname",
+        "nodeinfo", "nodesysinfo", "capabilities", "domcapabilities", "sysinfo",
+        "version", "hostname", "uri", "connect", "help",
+        "net-list", "net-info", "net-name", "net-dumpxml",
+        "pool-list", "pool-info", "pool-dumpxml",
+        "vol-list", "vol-info", "vol-dumpxml",
+        "nodedev-list", "nodedev-info", "nodedev-dumpxml",
+        "secret-list", "secret-info", "secret-dumpxml",
+        "iface-list", "iface-info", "iface-dumpxml",
+        "snapshot-list", "snapshot-info", "snapshot-dumpxml",
+        "backup-dumpxml",
+        "nwfilter-list", "nwfilter-info", "nwfilter-dumpxml",
+        "echo"
+      ],
+      "blocked": [
+        "undefine", "destroy", "define", "create", "start", "shutdown",
+        "reboot", "reset", "suspend", "resume", "save", "restore", "managedsave",
+        "managedsave-remove", "domjobabort",
+        "migrate", "migrate-setmaxdowntime", "migrate-compcache",
+        "migrate-setspeed", "migrate-getmaxdowntime",
+        "attach-device", "detach-device", "attach-disk", "detach-disk",
+        "attach-interface", "detach-interface", "update-device", "change-media",
+        "setmaxmem", "setmem", "setvcpus", "set-user-password",
+        "vcpupin", "emulatorpin", "iothreadpin", "add-iothread", "del-iothread",
+        "blkdeviotune", "blkiotune", "memtune", "schedinfo",
+        "blockjob", "blockcommit", "blockcopy", "blockpull", "blockresize",
+        "snapshot-create", "snapshot-create-as", "snapshot-delete",
+        "snapshot-revert", "snapshot-edit",
+        "backup-begin", "backup-end",
+        "nodedev-create", "nodedev-destroy",
+        "net-create", "net-destroy", "net-define", "net-undefine",
+        "net-update", "net-edit", "net-autostart",
+        "iface-create", "iface-destroy", "iface-define", "iface-undefine",
+        "iface-edit", "iface-start", "iface-bridge", "iface-unbridge",
+        "pool-create", "pool-destroy", "pool-define", "pool-undefine",
+        "pool-start", "pool-stop", "pool-delete", "pool-edit", "pool-build",
+        "pool-refresh", "pool-autostart",
+        "vol-create", "vol-create-from", "vol-delete", "vol-upload",
+        "vol-download", "vol-resize", "vol-wipe", "vol-clone",
+        "secret-define", "secret-undefine", "secret-set-value",
+        "domrename", "inject-nmi", "send-key", "send-process-signal",
+        "qemu-agent-command", "guest-agent-timeout",
+        "domtime", "set-time", "dompmsuspend", "dompmwakeup",
+        "set-lifecycle-action", "set-domain-state", "domfstrim",
+        "qemu-monitor-command", "qemu-monitor-event",
+        "nwfilter-define", "nwfilter-undefine", "nwfilter-edit",
+        "event", "allocpages",
+        "iothreadinfo"
+      ]
+    }

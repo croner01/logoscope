@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
     topology_adjustment.set_storage_adapter(_storage_adapter)
 
     # 启动拓扑轮询任务
-    _topology_poller_task = asyncio.create_task(topology_poller(_hybrid_builder, interval=5.0))
+    _topology_poller_task = asyncio.create_task(topology_poller(_hybrid_builder, interval=30.0))
     logger.info("Topology poller task started")
 
     async def service_node_sync_loop():

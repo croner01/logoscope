@@ -970,8 +970,9 @@ class AgentRuntimeService:
         run.summary_json = {
             **(run.summary_json or {}),
             **(summary_updates if isinstance(summary_updates, dict) else {}),
-            "current_phase": "failed",
         }
+        if "current_phase" not in (summary_updates or {}):
+            run.summary_json["current_phase"] = "failed"
         self.store.save_run(run)
         self.append_event(
             run.run_id,

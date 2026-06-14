@@ -37,6 +37,38 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _build_fallback_actions(source_target: Optional[dict], question: str = "") -> List[dict]:
+    """当 LLM 未生成动作时，基于已知 target 生成默认诊断查询。"""
+    st = source_target if isinstance(source_target, dict) else {}
+    pod = _as_str(st.get("pod_name"))
+    svc = _as_str(st.get("service_name"))
+    ns = _as_str(st.get("namespace"))
+
+    if not (pod or svc):
+        return []
+
+    filters = []
+    if pod:
+        filters.append(f"pod_name='{pod}'")
+    if svc:
+        filters.append(f"service_name='{svc}'")
+    if ns:
+        filters.append(f"namespace='{ns}'")
+    where = " AND ".join(filters) if filters else "1=1"
+
+    return [{
+        "tool": "clickhouse_query",
+        "command": (
+            f"SELECT timestamp, service_name, pod_name, namespace, level, message "
+            f"FROM logs.logs WHERE {where} AND level IN ('ERROR', 'FATAL') "
+            f"ORDER BY timestamp DESC LIMIT 20"
+        ),
+        "target_kind": "clickhouse_cluster",
+        "target_identity": "database:logs",
+        "purpose": f"fallback: query recent errors for {svc or pod or ns or 'unknown target'}",
+    }]
+
+
 # ── LLM Client protocol ────────────────────────────────────────────────────
 
 @dataclass
@@ -163,9 +195,22 @@ async def run_diagnosis(
         plan = await plan_fn(system_prompt, task_prompt, tool_schema, state, memory, llm_call)
 
         if not plan.actions:
-            # No actions from LLM — we're done
-            state.diagnosis_summary = plan.summary or "LLM 未生成诊断动作"
-            break
+            # LLM 返回空 actions — 尝试基于已知 target 生成降级查询
+            fallback = _build_fallback_actions(state.source_target, state.question)
+            if fallback:
+                plan = LlmPlanResult(
+                    actions=fallback,
+                    summary="LLM returned empty actions, using fallback query",
+                )
+                if logger:
+                    logger.info(
+                        "engine: session=%s iter=%d LLM returned empty, using fallback: %s",
+                        state.run_id, iteration, fallback[0].get("command", "")[:80],
+                    )
+            else:
+                # No target metadata available — genuinely done
+                state.diagnosis_summary = plan.summary or "LLM 未生成诊断动作"
+                break
 
         # Convert LLM output to Action objects
         iteration_actions = []
@@ -281,9 +326,11 @@ async def run_diagnosis(
                 result = await tools.web_search(query)
                 await event_emitter.emit(state.run_id, "tool_call_finished", {
                     "action_id": action.action_id,
+                    "command": action.command_spec.command,
                     "status": result.status,
                     "exit_code": result.exit_code,
                     "stdout": result.stdout[:2000],
+                    "stderr": result.stderr[:2000],
                     "duration_ms": result.duration_ms,
                 })
                 if logger:
@@ -354,9 +401,11 @@ async def run_diagnosis(
 
             await event_emitter.emit(state.run_id, "tool_call_finished", {
                 "action_id": action.action_id,
+                "command": compiled.shell_command,
                 "status": result.status,
                 "exit_code": result.exit_code,
-                "stdout": result.stdout[:2000],
+                "stdout": result.stdout[:10000],
+                "stderr": result.stderr[:2000],
                 "duration_ms": result.duration_ms,
             })
 
@@ -377,7 +426,7 @@ async def run_diagnosis(
                 stderr=result.stderr,
                 duration_ms=result.duration_ms,
                 channel=result.channel,
-                command=action.command_spec.command,
+                command=compiled.shell_command,
             )
             state.add_observation(action, obs)
             memory.record(

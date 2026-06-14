@@ -1702,6 +1702,10 @@ class HybridTopologyBuilder:
             prewhere_conditions.append(f"source_cluster = '{safe_source_cluster}'")
         prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
 
+        # 使用 cityHash64 确定性采样替代滚动窗口采样，确保相邻 poll 之间推断边稳定。
+        # 每次查询命中相同的 ~20% 行，新数据只有 hash 命中的部分才进入样本，大幅降低抖动。
+        HASH_SAMPLE_MOD = 100
+        HASH_SAMPLE_MIN = 20  # ~20% 确定性采样
         query = f"""
         SELECT
             id,
@@ -1713,9 +1717,10 @@ class HybridTopologyBuilder:
             attributes_json
         FROM logs.logs
         {prewhere_clause}
+          AND cityHash64(toString(id)) % {HASH_SAMPLE_MOD} < {HASH_SAMPLE_MIN}
         ORDER BY timestamp DESC
         LIMIT {infer_sample_limit}
-        SETTINGS optimize_use_projections = 1, optimize_read_in_order = 1
+        SETTINGS optimize_use_projections = 1
         """
 
         rows = self.storage.execute_query(query)
@@ -1737,6 +1742,7 @@ class HybridTopologyBuilder:
 
             if total_candidates > 0:
                 fallback_limit = max(500, min(infer_sample_limit, 2000))
+                # 回退查询不使用 hash 过滤，确保极小窗口（<100行）也能拿到数据
                 fallback_query = f"""
                 SELECT
                     id,

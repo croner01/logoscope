@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 
 app = FastAPI(title="toolbox-gateway", version="1.0.0")
+_logger = logging.getLogger(__name__)
 _SHELL_OPERATOR_TOKENS = {"|", "|&", "||", "&&", ";", "&", ">", ">>", "<", "<<", "<<<", "<>", "<&", ">&", "&>", ">|"}
 
 
@@ -85,6 +87,182 @@ def _resolve_allowed_heads(executor_profile: str) -> set[str]:
     return _load_allowed_heads()
 
 
+# ── virsh subcommand validation ──────────────────────────────────────────────
+# Allow only read-only virsh subcommands. All write/destructive operations
+# are explicitly blocked at the application level (beyond the head allowlist).
+#
+# Policy is loaded from a JSON file (mounted from ConfigMap toolbox-gateway-config).
+# Falls back to built-in defaults if the file is not present.
+
+_VIRSH_POLICY_PATH = os.getenv(
+    "TOOLBOX_GATEWAY_VIRSH_POLICY_PATH",
+    "/etc/toolbox-gateway/virsh-policy.json",
+)
+
+# ── built-in defaults (used when ConfigMap is not mounted) ─────────────────
+
+_VIRSH_READONLY_DEFAULT = frozenset({
+    "list", "dominfo", "domstate", "domstats", "domuuid", "domid", "domname",
+    "domxml", "domxml-from-native", "domxml-to-native",
+    "domblklist", "domblkinfo", "domblkstat", "dominblkerrors", "domblkerror",
+    "domiflist", "domifstat", "domifaddr",
+    "dommemstat", "vcpucount", "freecell", "freepages", "maxvcpus",
+    "dommemstats", "domfsinfo", "domhostname",
+    "nodeinfo", "nodesysinfo", "capabilities", "domcapabilities", "sysinfo",
+    "version", "hostname", "uri", "connect", "help",
+    "net-list", "net-info", "net-name", "net-dumpxml",
+    "pool-list", "pool-info", "pool-dumpxml",
+    "vol-list", "vol-info", "vol-dumpxml",
+    "nodedev-list", "nodedev-info", "nodedev-dumpxml",
+    "secret-list", "secret-info", "secret-dumpxml",
+    "iface-list", "iface-info", "iface-dumpxml",
+    "snapshot-list", "snapshot-info", "snapshot-dumpxml",
+    "backup-dumpxml",
+    "nwfilter-list", "nwfilter-info", "nwfilter-dumpxml",
+    "echo",
+})
+
+_VIRSH_BLOCKED_DEFAULT = frozenset({
+    "undefine", "destroy", "define", "create", "start", "shutdown",
+    "reboot", "reset", "suspend", "resume", "save", "restore", "managedsave",
+    "managedsave-remove", "domjobabort",
+    "migrate", "migrate-setmaxdowntime", "migrate-compcache",
+    "migrate-setspeed", "migrate-getmaxdowntime",
+    "attach-device", "detach-device", "attach-disk", "detach-disk",
+    "attach-interface", "detach-interface", "update-device", "change-media",
+    "setmaxmem", "setmem", "setvcpus", "set-user-password",
+    "vcpupin", "emulatorpin", "iothreadpin", "add-iothread", "del-iothread",
+    "blkdeviotune", "blkiotune", "memtune", "schedinfo",
+    "blockjob", "blockcommit", "blockcopy", "blockpull", "blockresize",
+    "snapshot-create", "snapshot-create-as", "snapshot-delete",
+    "snapshot-revert", "snapshot-edit",
+    "backup-begin", "backup-end",
+    "nodedev-create", "nodedev-destroy",
+    "net-create", "net-destroy", "net-define", "net-undefine",
+    "net-update", "net-edit", "net-autostart",
+    "iface-create", "iface-destroy", "iface-define", "iface-undefine",
+    "iface-edit", "iface-start", "iface-bridge", "iface-unbridge",
+    "pool-create", "pool-destroy", "pool-define", "pool-undefine",
+    "pool-start", "pool-stop", "pool-delete", "pool-edit", "pool-build",
+    "pool-refresh", "pool-autostart",
+    "vol-create", "vol-create-from", "vol-delete", "vol-upload",
+    "vol-download", "vol-resize", "vol-wipe", "vol-clone",
+    "secret-define", "secret-undefine", "secret-set-value",
+    "domrename", "inject-nmi", "send-key", "send-process-signal",
+    "qemu-agent-command", "guest-agent-timeout",
+    "domtime", "set-time", "dompmsuspend", "dompmwakeup",
+    "set-lifecycle-action", "set-domain-state", "domfstrim",
+    "qemu-monitor-command", "qemu-monitor-event",
+    "nwfilter-define", "nwfilter-undefine", "nwfilter-edit",
+    "event", "allocpages",
+    "iothreadinfo",
+})
+
+
+def _load_virsh_policy() -> tuple[frozenset[str], frozenset[str]]:
+    """Load virsh subcommand policy from JSON file, falling back to built-in defaults.
+
+    The JSON file must contain a dict with optional ``readonly`` and ``blocked``
+    keys, each an array of subcommand strings.  Missing keys fall back to
+    the built-in defaults so partial overrides work.
+
+    Returns:
+        (readonly_set, blocked_set) — each a frozenset of subcommand names.
+    """
+    readonly = set(_VIRSH_READONLY_DEFAULT)
+    blocked = set(_VIRSH_BLOCKED_DEFAULT)
+    path = _as_str(_VIRSH_POLICY_PATH).strip()
+    if not path:
+        return frozenset(readonly), frozenset(blocked)
+
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            _logger.warning(
+                "virsh policy file %s: root value is not a dict, using defaults",
+                path,
+            )
+            return frozenset(readonly), frozenset(blocked)
+
+        raw_readonly = data.get("readonly")
+        if isinstance(raw_readonly, list) and raw_readonly:
+            readonly = {_as_str(item).strip().lower() for item in raw_readonly if _as_str(item).strip()}
+
+        raw_blocked = data.get("blocked")
+        if isinstance(raw_blocked, list) and raw_blocked:
+            blocked = {_as_str(item).strip().lower() for item in raw_blocked if _as_str(item).strip()}
+
+        _logger.info(
+            "loaded virsh policy from %s: %d readonly, %d blocked",
+            path,
+            len(readonly),
+            len(blocked),
+        )
+    except FileNotFoundError:
+        _logger.info(
+            "virsh policy file not found at %s, using built-in defaults",
+            path,
+        )
+    except Exception as exc:
+        _logger.warning(
+            "failed to load virsh policy from %s: %s, using built-in defaults",
+            path,
+            exc,
+        )
+
+    return frozenset(readonly), frozenset(blocked)
+
+
+# Module-level singleton — loaded once at import time.
+# Restart the process (or call _load_virsh_policy() again) to pick up
+# ConfigMap changes; there is no hot-reload.
+_VIRSH_READONLY_SUBCOMMANDS, _VIRSH_BLOCKED_SUBCOMMANDS = _load_virsh_policy()
+
+
+def _validate_virsh_command(command: str) -> str | None:
+    """Validate a virsh command. Returns None if allowed, error string if blocked.
+
+    Only read-only virsh subcommands are permitted. The function parses
+    the command line, skipping leading options (e.g. ``virsh -c qemu:///system list``),
+    and checks the first non-option argument (the subcommand).
+    """
+    try:
+        parts = shlex.split(_as_str(command), posix=True)
+    except Exception:
+        return "virsh: unable to parse command"
+
+    if len(parts) < 2:
+        return "virsh requires a subcommand (e.g., list, dominfo)"
+
+    # Skip leading options (anything starting with -)
+    subcmd: str | None = None
+    for idx, part in enumerate(parts[1:], start=1):
+        stripped = part.strip()
+        if stripped.startswith("-"):
+            continue
+        subcmd = stripped.lower()
+        break
+
+    if subcmd is None:
+        return "virsh requires a subcommand (e.g., list, dominfo)"
+
+    if subcmd in _VIRSH_READONLY_SUBCOMMANDS:
+        return None  # allowed
+
+    if subcmd in _VIRSH_BLOCKED_SUBCOMMANDS:
+        return (
+            f"virsh subcommand '{subcmd}' is blocked: "
+            f"write/destructive operations are not permitted"
+        )
+
+    # Unknown subcommand — safe default is to block
+    return (
+        f"virsh subcommand '{subcmd}' is not recognized as a read-only "
+        f"operation and has been blocked"
+    )
+
+
 def _extract_primary_head(command: str) -> str:
     safe_command = _as_str(command).strip()
     if not safe_command:
@@ -144,7 +322,7 @@ class ExecResult:
     timed_out: bool
 
 
-def _execute_command(
+async def _execute_command(
     command: str,
     *,
     timeout_seconds: int,
@@ -179,29 +357,44 @@ def _execute_command(
 
     try:
         if has_shell_features and _shell_emergency_enabled():
-            completed = subprocess.run(  # noqa: S602
+            process = await asyncio.create_subprocess_shell(
                 command,
-                shell=True,
                 executable="/bin/bash",
-                capture_output=True,
-                text=True,
-                timeout=safe_timeout,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
             )
         else:
             parts = shlex.split(command, posix=True)
-            completed = subprocess.run(
-                parts,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=safe_timeout,
+            process = await asyncio.create_subprocess_exec(
+                *parts,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
             )
+        try:
+            _stdout_bytes, _stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=safe_timeout
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return ExecResult(
+                exit_code=124,
+                stdout="",
+                stderr=f"command timed out after {safe_timeout}s",
+                timed_out=True,
+            )
         return ExecResult(
-            exit_code=int(completed.returncode),
-            stdout=_clip_output(completed.stdout, limit_bytes=max_output_bytes),
-            stderr=_clip_output(completed.stderr, limit_bytes=max_output_bytes),
+            exit_code=int(process.returncode or 0),
+            stdout=_clip_output(
+                _stdout_bytes.decode("utf-8", errors="ignore") if _stdout_bytes else "",
+                limit_bytes=max_output_bytes,
+            ),
+            stderr=_clip_output(
+                _stderr_bytes.decode("utf-8", errors="ignore") if _stderr_bytes else "",
+                limit_bytes=max_output_bytes,
+            ),
             timed_out=False,
         )
     except ValueError:
@@ -217,15 +410,6 @@ def _execute_command(
             stdout="",
             stderr="command not found",
             timed_out=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = _clip_output(_as_str(exc.stdout), limit_bytes=max_output_bytes)
-        stderr = _clip_output(_as_str(exc.stderr), limit_bytes=max_output_bytes)
-        return ExecResult(
-            exit_code=124,
-            stdout=stdout,
-            stderr=stderr or f"command timed out after {safe_timeout}s",
-            timed_out=True,
         )
 
 
@@ -300,13 +484,19 @@ async def execute_command(request: Request) -> Response:
     if allowed_heads and head and head not in allowed_heads:
         raise HTTPException(status_code=403, detail=f"command head not allowed: {head}")
 
+    # virsh-specific: allow only read-only subcommands
+    if head == "virsh":
+        virsh_error = _validate_virsh_command(command)
+        if virsh_error:
+            raise HTTPException(status_code=403, detail=virsh_error)
+
     timeout_seconds = _as_int(
         payload.get("timeout_seconds"),
         _as_int(os.getenv("TOOLBOX_GATEWAY_DEFAULT_TIMEOUT_SECONDS"), 60),
     )
     max_output_bytes = max(2048, _as_int(os.getenv("TOOLBOX_GATEWAY_MAX_OUTPUT_BYTES"), 262144))
 
-    result = _execute_command(
+    result = await _execute_command(
         command,
         timeout_seconds=max(1, timeout_seconds),
         max_output_bytes=max_output_bytes,

@@ -705,10 +705,12 @@ class RuntimeV4TargetRegistry:
         *,
         target_kind: str,
         target_identity: str,
+        prefix_match: bool = False,
     ) -> Optional[Dict[str, Any]]:
         candidates = self.list_targets_by_identity(
             target_kind=target_kind,
             target_identity=target_identity,
+            prefix_match=prefix_match,
         )
         if not candidates:
             return None
@@ -719,6 +721,7 @@ class RuntimeV4TargetRegistry:
         *,
         target_kind: str,
         target_identity: str,
+        prefix_match: bool = False,
     ) -> List[Dict[str, Any]]:
         safe_kind = _as_str(target_kind).lower()
         safe_identity = _as_str(target_identity).lower()
@@ -734,7 +737,11 @@ class RuntimeV4TargetRegistry:
             for record in source:
                 if safe_kind and _as_str(record.target_kind).lower() != safe_kind:
                     continue
-                if _as_str(record.target_identity).lower() != safe_identity:
+                record_identity = _as_str(record.target_identity).lower()
+                if prefix_match:
+                    if not record_identity.startswith(safe_identity):
+                        continue
+                elif record_identity != safe_identity:
                     continue
                 candidates.append(record)
             candidates.sort(
@@ -952,10 +959,18 @@ class RuntimeV4TargetRegistry:
                 "resolved_target_context": {},
             }
 
+        # 先尝试精确匹配
         matched_targets = self.list_targets_by_identity(
             target_kind=safe_kind,
             target_identity=safe_identity,
         )
+        if not matched_targets and safe_kind == "k8s_cluster" and safe_identity.startswith("namespace:"):
+            # 精确匹配失败 → 前缀匹配（兼容 namespace:ns/cluster:xxx 的 compound 格式）
+            matched_targets = self.list_targets_by_identity(
+                target_kind=safe_kind,
+                target_identity=safe_identity,
+                prefix_match=True,
+            )
         if not matched_targets:
             # 回退解析：当 namespace:X 身份在 k8s_cluster 上未注册时，
             # 尝试通过已注册的父集群目标获取 cluster_id 用于命令路由。

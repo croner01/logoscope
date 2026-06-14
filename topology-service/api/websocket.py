@@ -24,11 +24,13 @@ WS_SEND_TIMEOUT_SECONDS = max(0.1, float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "1
 
 # ── 拓扑推送稳定性控制 ──
 # 同一订阅两次推送之间的最小间隔（秒），减少推送频率避免前端频繁重绘
-TOPOLOGY_WS_MIN_PUSH_INTERVAL = max(5.0, float(os.getenv("TOPOLOGY_WS_MIN_PUSH_INTERVAL_SECONDS", "15.0")))
+TOPOLOGY_WS_MIN_PUSH_INTERVAL = max(5.0, float(os.getenv("TOPOLOGY_WS_MIN_PUSH_INTERVAL_SECONDS", "30.0")))
 # 新节点必须连续出现 N 次后才纳入推送，防止瞬时噪音导致拓扑抖动
-TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT = max(1, int(os.getenv("TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT", "2")))
+TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT = max(1, int(os.getenv("TOPOLOGY_WS_NEW_NODE_BUFFER_COUNT", "3")))
 # 节点变化数（新增+移除）至少达到此值才触发推送，避免 metrics 波动导致的无效推送
-TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH = max(1, int(os.getenv("TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH", "1")))
+TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH = max(1, int(os.getenv("TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH", "3")))
+# 移除缓冲：节点必须连续不在 N 次后才确认为移除，防止采样波动导致节点闪烁
+TOPOLOGY_WS_REMOVAL_BUFFER_COUNT = max(1, int(os.getenv("TOPOLOGY_WS_REMOVAL_BUFFER_COUNT", "3")))
 
 
 def _utc_now_iso() -> str:
@@ -48,6 +50,8 @@ class TopologyConnectionManager:
         self._last_push_time_by_key: Dict[str, float] = {}
         # 新节点缓冲：{subscription_key: {node_id: consecutive_appearance_count}}
         self._new_node_candidates_by_key: Dict[str, Dict[str, int]] = {}
+        # 移除缓冲：{subscription_key: {node_id: consecutive_absence_count}}
+        self._removal_candidates_by_key: Dict[str, Dict[str, int]] = {}
         # 上次已推送的拓扑（仅在实际推送时更新，作为变化检测的基线）
         self._last_pushed_topology_by_key: Dict[str, Dict[str, Any]] = {}
 
@@ -144,6 +148,7 @@ class TopologyConnectionManager:
             self._last_push_time_by_key.pop(key, None)
             self._last_pushed_topology_by_key.pop(key, None)
             self._new_node_candidates_by_key.pop(key, None)
+            self._removal_candidates_by_key.pop(key, None)
 
     async def connect(self, websocket: WebSocket):
         """接受新的 WebSocket 连接"""
@@ -311,7 +316,22 @@ class TopologyConnectionManager:
         for nid in stale_ids:
             del buffer[nid]
 
-        total_node_change = len(confirmed_new_node_ids) + len(removed_node_ids)
+        # ── 3b. 移除缓冲：节点必须连续不在 N 次后才确认为移除 ──
+        removal_buffer = self._removal_candidates_by_key.setdefault(subscription_key, {})
+        confirmed_removed_node_ids: Set[str] = set()
+
+        for node_id in removed_node_ids:
+            count = removal_buffer.get(node_id, 0) + 1
+            removal_buffer[node_id] = count
+            if count >= TOPOLOGY_WS_REMOVAL_BUFFER_COUNT:
+                confirmed_removed_node_ids.add(node_id)
+
+        # 节点重新出现 → 清空移除缓冲
+        reappeared_ids = [nid for nid in removal_buffer if nid not in removed_node_ids]
+        for nid in reappeared_ids:
+            del removal_buffer[nid]
+
+        total_node_change = len(confirmed_new_node_ids) + len(confirmed_removed_node_ids)
 
         # ── 4. 变化显著性检查 ──
         if total_node_change < TOPOLOGY_WS_MIN_NODE_CHANGE_FOR_PUSH:
@@ -333,8 +353,8 @@ class TopologyConnectionManager:
             ]
             filtered_topology = {**topology_data, "nodes": filtered_nodes, "edges": filtered_edges}
             logger.info(
-                "Topology push for %s: buffering %d new node(s), pushing %d confirmed, %d removed",
-                subscription_key, len(unconfirmed_ids), len(confirmed_new_node_ids), len(removed_node_ids),
+                "Topology push for %s: buffering %d new node(s), pushing %d confirmed, removing %d confirmed (raw=%d)",
+                subscription_key, len(unconfirmed_ids), len(confirmed_new_node_ids), len(confirmed_removed_node_ids), len(removed_node_ids),
             )
         else:
             filtered_topology = topology_data

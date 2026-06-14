@@ -249,7 +249,7 @@ data:
     [MULTILINE_PARSER]
         name          multiline_trace_stack
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
         flush_timeout 2000
         rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?\s+.*(?:ERROR|FATAL|Exception|Traceback)|Traceback \(most recent call last\):|Exception in thread \".*\"|panic: .*)$/" "cont"
@@ -267,7 +267,7 @@ data:
     [MULTILINE_PARSER]
         name          multiline_query_sql
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
         flush_timeout 1500
         rule          "start_state" "/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\s+-\s+[^-]+\s+-\s+(?:INFO|DEBUG)\s+-\s+Executing query:\s*)$/" "cont"
@@ -285,22 +285,22 @@ data:
     [MULTILINE_PARSER]
         name          multiline_openstack_traceback
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
-        flush_timeout 4000
+        flush_timeout 6000
         # OpenStack 日志会把完整前缀（时间戳+PID+级别+组件）写在 traceback 的每一行上。
         # start_state 使用单空格分隔符，让 traceback 缩进保留在内容中，通过否定前瞻排除续行。
         # cont 让前缀变成可选，使得带完整前缀的续行也能被匹配聚合。
-        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? (?!Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s{2,}|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):|urllib3\.exceptions\.[A-Za-z_]+:|requests\.exceptions\.[A-Za-z_]+:|socket\.gaierror:|$).*)$/" "cont"
-        rule          "cont"        "/^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? )?(?:Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*|)$/" "cont"
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? (?!Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s{2,}|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):|\S+\.py:\d+\s+\S+\s{3,}|urllib3\.exceptions\.[A-Za-z_]+:|requests\.exceptions\.[A-Za-z_]+:|socket\.gaierror:|$).*)$/" "cont"
+        rule          "cont"        "/^(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)? \d+ (?:ERROR|CRITICAL) [A-Za-z0-9_\.\-]+(?: \[[^\]]*\])? )?(?:\S+\.py:\d+\s+\S+\s+)?(?:Traceback \(most recent call last\):|During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:|\s+File \".*\", line \d+, in .*|\s+.*|[A-Za-z_][A-Za-z0-9_\.]*(?:Error|Exception|Failure):.*|urllib3\.exceptions\.[A-Za-z_]+:.*|requests\.exceptions\.[A-Za-z_]+:.*|socket\.gaierror:.*|)$/" "cont"
 
     [MULTILINE_PARSER]
         name          multiline_openstack_ts_boundary
         type          regex
-        parser        docker
+        parser        cri
         key_content   log
         flush_timeout 4000
         # 任意“时间戳 + OpenStack 级别”都必须作为新日志边界，避免 ERROR/CRITICAL 被上一条 INFO 合并。
-        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRITICAL|FATAL)\s+.*)$/" "cont"
+        rule          "start_state" "/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|FATAL)\s+.*)$/" "cont"
         # 仅在未遇到新的“时间戳 + 级别”边界时继续拼接，保证 traceback/多行 SQL 等后续内容完整。
-        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|CRITICAL|FATAL)\s+).*$/" "cont"
+        rule          "cont"        "/^(?!\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s+\d+)?\s+(?:DEBUG|INFO|NOTICE|WARN|WARNING|FATAL)\s+).*$/" "cont"

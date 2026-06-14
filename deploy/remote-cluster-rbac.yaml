@@ -1,0 +1,121 @@
+---
+# 远端集群 RBAC — 赋予 logoscope-remote-executor 与本地 toolbox-gateway 相同的只读+exec 权限
+# 在远端集群上执行: kubectl apply -f remote-cluster-rbac.yaml
+#
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logoscope-remote-readonly
+  labels:
+    app: logoscope
+    component: remote-executor
+rules:
+  # Pod 操作（含 exec）
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+
+  # 核心只读资源
+  - apiGroups: [""]
+    resources:
+      - services
+      - endpoints
+      - events
+      - configmaps
+      - secrets
+      - namespaces
+      - nodes
+      - nodes/status
+      - nodes/proxy
+      - persistentvolumes
+      - persistentvolumeclaims
+      - replicationcontrollers
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+
+  # Apps
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/status
+      - statefulsets
+      - statefulsets/status
+      - daemonsets
+      - daemonsets/status
+      - replicasets
+      - replicasets/status
+      - controllerrevisions
+    verbs: ["get", "list", "watch"]
+
+  # Batch
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - jobs/status
+      - cronjobs
+      - cronjobs/status
+    verbs: ["get", "list", "watch"]
+
+  # 网络
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingresses/status
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+
+  # 存储
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+      - csidrivers
+      - csinodes
+    verbs: ["get", "list", "watch"]
+
+  # 弹性伸缩
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+  # Pod 调度策略
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+
+  # 协调
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch"]
+
+  # 端点发现
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+
+  # 指标（可选 — 用于 kubectl top）
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logoscope-remote-readonly
+  labels:
+    app: logoscope
+    component: remote-executor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logoscope-remote-readonly
+subjects:
+  - kind: ServiceAccount
+    name: logoscope-remote-executor
+    namespace: kube-system

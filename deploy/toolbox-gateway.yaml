@@ -63,7 +63,7 @@ spec:
             - containerPort: 8088
           env:
             - name: TOOLBOX_GATEWAY_ALLOWED_HEADS
-              value: "kubectl,clickhouse-client,clickhouse"
+              value: "kubectl,clickhouse-client,clickhouse,virsh"
             - name: TOOLBOX_GATEWAY_DEFAULT_TIMEOUT_SECONDS
               value: "90"
             - name: TOOLBOX_GATEWAY_MAX_OUTPUT_BYTES
@@ -81,11 +81,19 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
+            - name: toolbox-gateway-config
+              mountPath: /etc/toolbox-gateway/virsh-policy.json
+              subPath: virsh-policy.json
+              readOnly: true
             - name: kubeconfig-remote-cluster-01
               mountPath: /etc/kubeconfigs/openstack-cluster-01
               subPath: openstack-cluster-01
               readOnly: true
       volumes:
+        - name: toolbox-gateway-config
+          configMap:
+            name: toolbox-gateway-config
+            optional: true
         - name: kubeconfig-remote-cluster-01
           secret:
             secretName: kubeconfig-remote-cluster-01

@@ -251,10 +251,6 @@ async def unified_diagnosis_bridge(
         kwargs: dict = {"message": message, "context": None}
         if use_json_format:
             kwargs["response_format"] = {"type": "json_object"}
-            # Pre-filling: force the model to start output from the correct key.
-            # The provider appends this as an assistant message so the model
-            # continues from `{"actions":[` instead of inventing an outer wrapper.
-            kwargs["assistant_prefix"] = '{"actions":['
 
         try:
             raw = await chat_fn(**kwargs)

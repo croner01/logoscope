@@ -184,6 +184,7 @@ apply_one() {
       ;;
     toolbox-gateway)
       kubectl apply -f "${PROJECT_ROOT}/deploy/toolbox-gateway.yaml"
+      kubectl apply -f "${PROJECT_ROOT}/deploy/toolbox-gateway-config.yaml"
       ;;
     ingest-service)
       kubectl apply -f "${PROJECT_ROOT}/deploy/ingest-service.yaml"
