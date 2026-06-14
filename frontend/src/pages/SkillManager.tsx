@@ -24,6 +24,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import axios from 'axios';
+import ReferenceSkillView from './ReferenceSkillView';
 
 /* ─── Types ──────────────────────────────────────────────────────────────── */
 
@@ -34,6 +35,7 @@ interface SkillBrief {
   source_dir: 'builtin' | 'installed' | 'custom';
   risk_level: string;
   step_count: number;
+  skill_type?: string;
 }
 
 interface SkillStep {
@@ -53,6 +55,8 @@ interface SkillDetail extends SkillBrief {
   applicable_components: string[];
   install_meta: Record<string, string>;
   steps: SkillStep[];
+  body?: string;
+  auxiliary_files?: Record<string, string>;
 }
 
 const API_PREFIX = import.meta.env.VITE_API_URL || '';
@@ -444,9 +448,15 @@ const SkillManager: React.FC = () => {
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${riskBadge[skill.risk_level] || 'bg-slate-100 text-slate-600'}`}>
                       {skill.risk_level === 'low' ? '低风险' : skill.risk_level === 'high' ? '高风险' : '中风险'}
                     </span>
-                    <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-                      {skill.step_count} 步
-                    </span>
+                    {skill.skill_type === 'reference' ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 border border-indigo-200">
+                        📖 参考
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                        {skill.step_count} 步
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -483,6 +493,11 @@ const SkillManager: React.FC = () => {
                   <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${sourceColor[skillDetail.source_dir]}`}>
                     {sourceLabel[skillDetail.source_dir] || skillDetail.source_dir}
                   </span>
+                  {skillDetail.skill_type === 'reference' && (
+                    <span className="text-xs px-2 py-0.5 rounded-full border font-medium bg-indigo-100 text-indigo-700 border-indigo-200 ml-1">
+                      📖 参考
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-slate-400 mt-1">
                   <code className="text-teal-600">{skillDetail.name}</code>
@@ -534,6 +549,15 @@ const SkillManager: React.FC = () => {
                 )}
               </div>
             </div>
+
+            {/* ── Content: branch by skill_type ─────────────────────────── */}
+            {skillDetail.skill_type === 'reference' ? (
+              <ReferenceSkillView
+                body={skillDetail.body ?? ''}
+                auxiliaryFiles={skillDetail.auxiliary_files ?? {}}
+              />
+            ) : (
+              <>
 
             {/* ── Metadata grid ─────────────────────────────────────────── */}
             <div className="grid grid-cols-3 gap-4 mb-6">
@@ -641,6 +665,8 @@ const SkillManager: React.FC = () => {
                 </div>
               ))}
             </div>
+              </>
+            )}
           </div>
         )}
       </div>
