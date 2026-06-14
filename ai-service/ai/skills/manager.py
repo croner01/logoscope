@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai.skills.adapters import SkillSource
+from ai.skills.adapters import SkillSource, YamlAdapter
 from ai.skills.base import SkillContext
 from ai.skills.builtin._helpers import _as_str
 
@@ -133,20 +133,6 @@ def _download_file(url: str, timeout: int = 30) -> Optional[str]:
     except Exception as e:
         logger.warning("Failed to download %s: %s", url, e)
         return None
-
-
-# ── YAML helpers ────────────────────────────────────────────────────────────
-
-def _validate_skill_yaml(data: Dict[str, Any]) -> Optional[str]:
-    """Minimal validation. Returns error message or None if valid."""
-    if not isinstance(data, dict):
-        return "not a dict"
-    if not data.get("name"):
-        return "missing 'name' field"
-    steps = data.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return "missing or empty 'steps' list"
-    return None
 
 
 def _ensure_dir(path: str) -> str:
@@ -327,7 +313,7 @@ class SkillManager:
 
         import yaml
         data = yaml.safe_load(content)
-        err = _validate_skill_yaml(data)
+        err = YamlAdapter().validate(data)
         if err:
             raise ValueError(f"Invalid skill YAML from {raw_url}: {err}")
 
@@ -401,7 +387,7 @@ class SkillManager:
         """
         import yaml
         data = yaml.safe_load(yaml_content)
-        err = _validate_skill_yaml(data)
+        err = YamlAdapter().validate(data)
         if err:
             raise ValueError(f"Invalid skill YAML: {err}")
 
