@@ -16,16 +16,14 @@ All three share the same YAML format and the same loader entry.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-import shutil
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai.skills.adapters import SkillSource, YamlAdapter
+from ai.skills.adapters import SkillSource, YamlAdapter, SkillAdapter, MarkdownAdapter
+from ai.skills.discovery import discover_skill_urls, try_index_yaml
 from ai.skills.base import SkillContext
 from ai.skills.builtin._helpers import _as_str
 
@@ -47,8 +45,6 @@ _GITHUB_URL_RE = re.compile(
     r"(?:/(?P<path>.+))?$"
 )
 _RAW_GITHUB_URL = "https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
-
-GITHUB_API_BASE = "https://api.github.com"
 
 
 @dataclass
@@ -168,6 +164,23 @@ class SkillManager:
         self._builtin_dir = builtin_dir
         self._installed_dir = _ensure_dir(installed_dir)
         self._custom_dir = _ensure_dir(custom_dir)
+        self._adapters: Dict[str, SkillAdapter] = {}
+        self._register_default_adapters()
+
+    def register_adapter(self, adapter: SkillAdapter) -> None:
+        """Register a skill format adapter."""
+        self._adapters[adapter.skill_type] = adapter
+
+    def _register_default_adapters(self) -> None:
+        self.register_adapter(YamlAdapter())
+        self.register_adapter(MarkdownAdapter())
+
+    def _get_adapter(self, file_path: str) -> Optional[SkillAdapter]:
+        """Find the first registered adapter that can handle *file_path*."""
+        for adapter in self._adapters.values():
+            if adapter.detect(file_path):
+                return adapter
+        return None
 
     # ── Scan ──────────────────────────────────────────────────────────────────
 
@@ -186,11 +199,12 @@ class SkillManager:
         ]:
             if not os.path.isdir(dir_path):
                 continue
-            for fname in sorted(os.listdir(dir_path)):
-                if not fname.endswith(".yaml"):
+            for name in sorted(os.listdir(dir_path)):
+                item_path = os.path.join(dir_path, name)
+                adapter = self._get_adapter(item_path)
+                if adapter is None:
                     continue
-                file_path = os.path.join(dir_path, fname)
-                source = self._read_skill_source(file_path, source_dir)
+                source = adapter.read(item_path, source_dir)
                 if source and source.name:
                     # Lower-priority dirs are iterated first, so a later
                     # (higher-priority) occurrence overwrites an earlier one.
@@ -212,11 +226,12 @@ class SkillManager:
         ]:
             if not os.path.isdir(dir_path):
                 continue
-            for fname in sorted(os.listdir(dir_path)):
-                if not fname.endswith(".yaml"):
+            for name in sorted(os.listdir(dir_path)):
+                item_path = os.path.join(dir_path, name)
+                adapter = self._get_adapter(item_path)
+                if adapter is None:
                     continue
-                file_path = os.path.join(dir_path, fname)
-                source = self._read_skill_source(file_path, source_dir)
+                source = adapter.read(item_path, source_dir)
                 if source and source.name:
                     groups.setdefault(source_dir, []).append(source)
         return groups
@@ -227,7 +242,6 @@ class SkillManager:
         Priority: custom > installed > builtin (when not filtered).
         """
         found: Optional[SkillSource] = None
-        order = ["custom", "installed", "builtin"]
 
         for source_dir, dir_path in [
             ("builtin", self._builtin_dir),
@@ -238,38 +252,50 @@ class SkillManager:
                 continue
             if not os.path.isdir(dir_path):
                 continue
-            for fname in os.listdir(dir_path):
-                if not fname.endswith(".yaml"):
+            for name in os.listdir(dir_path):
+                item_path = os.path.join(dir_path, name)
+                adapter = self._get_adapter(item_path)
+                if adapter is None:
                     continue
-                file_path = os.path.join(dir_path, fname)
-                s = self._read_skill_source(file_path, source_dir)
+                s = adapter.read(item_path, source_dir)
                 if s and s.name == name:
                     found = s
                     if source:
-                        return found  # exact match, no need to continue
+                        return found
 
         return found
 
     def get_skill_data(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the parsed YAML data for a skill by name."""
         source = self.get_skill(name)
-        if source is None or not os.path.isfile(source.file_path):
+        if source is None or not os.path.exists(source.file_path):
             return None
+
+        if source.skill_type == "reference":
+            return {
+                "body": source.body,
+                "auxiliary_files": source.auxiliary_files,
+            }
+
         import yaml
-        with open(source.file_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+        try:
+            with open(source.file_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+        except Exception:
+            return None
 
     # ── Install ───────────────────────────────────────────────────────────────
 
-    def install(self, github_url: str) -> SkillSource:
-        """Download a skill YAML from GitHub and save to installed/ directory.
+    def install(self, github_url: str) -> List[SkillSource]:
+        """Download skill(s) from GitHub and save to installed/ directory.
 
         Args:
             github_url: Format ``github://owner/repo/path/to/skill.yaml[@ref]``
-                        or ``github://owner/repo`` (looks for index.yaml).
+                        or ``github://owner/repo`` (looks for index.yaml,
+                        then auto-discovers skills/ directory).
 
         Returns:
-            SkillSource for the installed skill.
+            List[SkillSource] for the installed skill(s).
 
         Raises:
             ValueError: on invalid URL, download failure, or invalid YAML.
@@ -282,68 +308,73 @@ class SkillManager:
                 f"or https://github.com/owner/repo[/blob/ref]/path/to/skill.yaml"
             )
 
-        # ── If no specific file path, try index.yaml ──────────────────────
-        if not parts["path"]:
-            index_url = build_raw_url({**parts, "path": "index.yaml"})
-            content = _download_file(index_url)
-            if content is None:
-                raise ValueError(
-                    f"No path given and index.yaml not found at {index_url}. "
-                    f"Specify a file: github://{parts['owner']}/{parts['repo']}/skills/my_skill.yaml"
-                )
-            # Parse index and install all listed skills
-            import yaml
-            index_data = yaml.safe_load(content)
-            if not isinstance(index_data, dict):
-                raise ValueError("index.yaml must be a YAML mapping")
-            skill_paths = index_data.get("skills", [])
-            if not skill_paths:
-                raise ValueError("index.yaml has no 'skills' list")
-            results = []
-            for sp in skill_paths:
-                skill_url = f"github://{parts['owner']}/{parts['repo']}@{parts['ref']}/{sp}"
-                results.append(self.install(skill_url))
-            return results[0]  # return first; caller can see all via list_all()
+        # Specific file path → single install
+        if parts["path"]:
+            return [self._install_single(parts, github_url)]
 
-        # ── Download the YAML file ───────────────────────────────────────
+        # No path → try index.yaml
+        index_content = try_index_yaml(parts["owner"], parts["repo"], parts["ref"])
+        if index_content:
+            return self._install_from_index(index_content, parts, github_url)
+
+        # Auto-discover skills via GitHub API
+        skill_paths = discover_skill_urls(parts["owner"], parts["repo"], parts["ref"])
+        if not skill_paths:
+            raise ValueError(
+                f"No index.yaml or skills found at {github_url}. "
+                f"Specify a skill path."
+            )
+
+        installed = []
+        for sp in skill_paths:
+            sub_parts = {**parts, "path": sp}
+            try:
+                result = self._install_single(sub_parts, github_url)
+                installed.append(result)
+            except (ValueError, FileExistsError) as e:
+                logger.warning("Skipping %s: %s", sp, e)
+        if not installed:
+            raise ValueError("No installable skills found in repository.")
+        return installed
+
+    def _install_single(self, parts: Dict[str, str],
+                        original_url: str) -> SkillSource:
+        """Download and install a single skill file from GitHub."""
         raw_url = build_raw_url(parts)
         content = _download_file(raw_url)
         if content is None:
             raise ValueError(f"Failed to download from {raw_url}")
 
-        import yaml
-        data = yaml.safe_load(content)
-        err = YamlAdapter().validate(data)
-        if err:
-            raise ValueError(f"Invalid skill YAML from {raw_url}: {err}")
-
-        skill_name = data["name"]
-
-        # Check collision with builtin — warn but allow
-        builtin_path = os.path.join(self._builtin_dir, f"{skill_name}.yaml")
-        if os.path.isfile(builtin_path):
-            logger.warning(
-                "Skill '%s' already exists in builtin — installed version will override it",
-                skill_name,
+        file_name = parts["path"].split("/")[-1]
+        adapter = self._get_adapter(file_name)
+        if adapter is None:
+            raise ValueError(
+                f"Unsupported skill format: {file_name}. "
+                f"Supported: YAML (.yaml), Markdown (.md)"
             )
 
-        # Add install tracking metadata
-        data["_source"] = {
-            "type": "github",
-            "original_url": github_url,
-            "raw_url": raw_url,
-            "installed_at": _now_iso(),
-        }
+        return adapter.install(content, parts, original_url, raw_url, self._installed_dir)
 
-        # Write to installed/ directory
-        dest = os.path.join(self._installed_dir, f"{skill_name}.yaml")
-        with open(dest, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
-
-        logger.info("Installed skill '%s' from %s → %s", skill_name, github_url, dest)
-        src = self._read_skill_source(dest, "installed")
-        assert src is not None
-        return src
+    def _install_from_index(self, content: str, parts: Dict[str, str],
+                            original_url: str) -> List[SkillSource]:
+        """Parse index.yaml and install all listed skills."""
+        import yaml
+        index_data = yaml.safe_load(content)
+        if not isinstance(index_data, dict):
+            raise ValueError("index.yaml must be a YAML mapping")
+        skill_paths = index_data.get("skills", [])
+        if not skill_paths:
+            raise ValueError("index.yaml has no 'skills' list")
+        results = []
+        for sp in skill_paths:
+            skill_url = f"github://{parts['owner']}/{parts['repo']}@{parts['ref']}/{sp}"
+            try:
+                results.extend(self.install(skill_url))
+            except (ValueError, FileExistsError) as e:
+                logger.warning("Skipping %s: %s", sp, e)
+        if not results:
+            raise ValueError("No installable skills found in index.yaml")
+        return results
 
     # ── Create ────────────────────────────────────────────────────────────────
 
@@ -413,13 +444,21 @@ class SkillManager:
         for dir_path in [self._custom_dir, self._installed_dir]:
             if not os.path.isdir(dir_path):
                 continue
+            # Try .yaml file first (diagnostic skill)
             path = os.path.join(dir_path, f"{name}.yaml")
             if os.path.isfile(path):
                 os.remove(path)
                 logger.info("Removed skill '%s' from %s", name, dir_path)
                 return True
+            # Try directory (reference skill)
+            dir_path_skill = os.path.join(dir_path, name)
+            if os.path.isdir(dir_path_skill):
+                import shutil
+                shutil.rmtree(dir_path_skill)
+                logger.info("Removed skill '%s' from %s/", name, dir_path_skill)
+                return True
 
-        logger.warning("Skill '%s' not found in installed/ or custom/ — cannot remove", name)
+        logger.warning("Skill '%s' not found in installed/ or custom/", name)
         return False
 
     # ── Update ────────────────────────────────────────────────────────────────
@@ -512,35 +551,11 @@ class SkillManager:
 
     @staticmethod
     def _read_skill_source(file_path: str, source_dir: str) -> Optional[SkillSource]:
-        """Read a YAML file and extract its metadata as SkillSource."""
-        import yaml
-
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-        except Exception as e:
-            logger.debug("Failed to read skill YAML %s: %s", file_path, e)
-            return None
-
-        if not isinstance(data, dict) or not data.get("name"):
-            return None
-
-        steps = data.get("steps", []) or []
-        install_meta = data.pop("_source", {}) or {}
-        trigger_raw = data.get("trigger_patterns", []) or []
-
-        return SkillSource(
-            name=str(data["name"]),
-            display_name=_as_str(data.get("display_name"), str(data["name"])),
-            description=_as_str(data.get("description")),
-            source_dir=source_dir,
-            file_path=file_path,
-            risk_level=_as_str(data.get("risk_level"), "low"),
-            step_count=len(steps) if isinstance(steps, list) else 0,
-            trigger_patterns=[str(p) for p in trigger_raw if isinstance(p, str)],
-            applicable_components=list(data.get("applicable_components") or []),
-            install_meta=dict(install_meta) if isinstance(install_meta, dict) else {},
-        )
+        """Read a skill file and extract its metadata as SkillSource."""
+        for adapter in [YamlAdapter(), MarkdownAdapter()]:
+            if adapter.detect(file_path):
+                return adapter.read(file_path, source_dir)
+        return None
 
 
 # ── Template builder ─────────────────────────────────────────────────────────
@@ -646,9 +661,10 @@ def main_cli():
 
     if args.command == "install":
         try:
-            src = mgr.install(args.url)
-            print(f"✅ 安装成功: {src.name} ({src.source_label})")
-            print(f"   路径: {src.file_path}")
+            results = mgr.install(args.url)
+            for src in results:
+                print(f"✅ 安装成功: {src.name} ({src.source_label})")
+                print(f"   路径: {src.file_path}")
         except Exception as e:
             print(f"❌ 安装失败: {e}")
             return 1

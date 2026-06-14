@@ -117,9 +117,13 @@ async def get_skill(name: str, source: Optional[str] = None) -> SkillDetail:
 async def install_skill(body: InstallRequest) -> SkillDetail:
     """Download a skill YAML from GitHub and install it."""
     try:
-        src = _mgr.install(body.url)
+        results = _mgr.install(body.url)
     except (ValueError, FileExistsError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if not results:
+        raise HTTPException(status_code=400, detail="No skills were installed")
+    src = results[0]
 
     data = _mgr.get_skill_data(src.name) or {}
     return SkillDetail(
