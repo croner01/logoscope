@@ -21,6 +21,7 @@ import {
   ChevronRight,
   User,
   Zap,
+  BookOpen,
 } from 'lucide-react';
 
 /* ─── Nav structure ──────────────────────────────────────────────────────── */
@@ -60,6 +61,7 @@ const navGroups: NavGroup[] = [
       { path: '/ai-analysis',    label: 'AI 智能分析',    icon: <BrainCircuit size={16} /> },
       { path: '/ai-runtime-lab', label: 'AI Runtime Lab', icon: <FlaskConical size={16} /> },
       { path: '/ai-cases',       label: '知识库管理',     icon: <BookMarked size={16} /> },
+      { path: '/skills',         label: '技能管理',       icon: <BookOpen size={16} /> },
     ],
   },
   {

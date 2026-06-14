@@ -28,6 +28,7 @@ from config import config
 from storage.adapter import StorageAdapter
 from api.ai import router as ai_router
 from api.ai_runtime_v2 import router as ai_runtime_v2_router
+from api.skills_router import router as skills_router
 from api.ai import set_storage_adapter as set_ai_storage
 from api.ai import shutdown_background_tasks as shutdown_ai_background_tasks
 from ai.runtime_v4.langgraph.graph import validate_inner_engine_readiness
@@ -125,6 +126,7 @@ async def root():
 
 app.include_router(ai_router)
 app.include_router(ai_runtime_v2_router)
+app.include_router(skills_router, prefix="/api/v1/skills")
 
 
 if __name__ == "__main__":

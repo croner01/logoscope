@@ -6,6 +6,11 @@ Converts the declarative YAML skill format into runtime-specific structures:
 - ``langgraph`` backend → ``List[SkillStep]`` (for DeepSeek offline mode)
 - ``claude_sdk`` backend → ``List[Dict]`` (@tool-compatible function definitions)
 - ``mcp`` backend → ``List[Dict]`` (MCP tool definitions)
+
+Directory resolution (three-tier):
+    1. ``custom/``     — user-created skills (highest priority)
+    2. ``installed/``  — GitHub-installed skills
+    3. ``builtin/``    — shipped with the image (fallback)
 """
 from __future__ import annotations
 
@@ -244,6 +249,140 @@ __all__ = [
     "load_tool_definitions",
     "get_skill_metadata",
     "match_skill_yaml",
+    "resolve_skill_path",
+    "list_skill_names",
+    "scan_skill_directories",
     "_build_template_context",
     "_format_command",
 ]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Three-directory resolution
+# ═════════════════════════════════════════════════════════════════════════════
+
+SKILL_DIRECTORIES = {
+    "custom": os.path.join(os.path.dirname(__file__), "custom"),
+    "installed": os.path.join(os.path.dirname(__file__), "installed"),
+    "builtin": os.path.join(os.path.dirname(__file__), "builtin"),
+}
+
+
+def resolve_skill_path(name: str, *, source: Optional[str] = None) -> Optional[str]:
+    """Resolve a skill name to its YAML file path across the three directories.
+
+    Priority: custom > installed > builtin.
+    When *source* is set (e.g. ``"custom"``), only that directory is searched.
+
+    Returns:
+        Absolute file path, or None if not found.
+    """
+    dirs = []
+    if source:
+        path = SKILL_DIRECTORIES.get(source)
+        if path:
+            dirs.append((source, path))
+    else:
+        # Highest priority first
+        for label in ("custom", "installed", "builtin"):
+            path = SKILL_DIRECTORIES.get(label)
+            if path:
+                dirs.append((label, path))
+
+    for label, dir_path in dirs:
+        if not os.path.isdir(dir_path):
+            continue
+        candidate = os.path.join(dir_path, f"{name}.yaml")
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Also search for any .yaml file whose internal name matches
+    if not source:
+        for label, dir_path in reversed(dirs):
+            if not os.path.isdir(dir_path):
+                continue
+            for fname in os.listdir(dir_path):
+                if not fname.endswith(".yaml"):
+                    continue
+                filepath = os.path.join(dir_path, fname)
+                meta = get_skill_metadata(filepath)
+                if meta.get("name") == name:
+                    return filepath
+
+    return None
+
+
+def list_skill_names() -> Dict[str, str]:
+    """Return a mapping ``{skill_name: source_label}`` for all visible skills.
+
+    On name collision, custom > installed > builtin (same priority rule).
+    """
+    import yaml
+    seen: Dict[str, str] = {}
+    for label, dir_path in reversed(list(SKILL_DIRECTORIES.items())):
+        if not os.path.isdir(dir_path):
+            continue
+        for fname in sorted(os.listdir(dir_path)):
+            if not fname.endswith(".yaml"):
+                continue
+            filepath = os.path.join(dir_path, fname)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                if isinstance(data, dict) and data.get("name"):
+                    seen[str(data["name"])] = label
+            except Exception:
+                continue
+    return seen
+
+
+def scan_skill_directories() -> Dict[str, List[Dict[str, Any]]]:
+    """Scan all three directories and return grouped metadata.
+
+    Returns:
+        ``{"builtin": [...], "installed": [...], "custom": [...]}``
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for label, dir_path in SKILL_DIRECTORIES.items():
+        if not os.path.isdir(dir_path):
+            continue
+        entries: List[Dict[str, Any]] = []
+        for fname in sorted(os.listdir(dir_path)):
+            if not fname.endswith(".yaml"):
+                continue
+            filepath = os.path.join(dir_path, fname)
+            meta = get_skill_metadata(filepath)
+            if meta.get("name"):
+                meta["_file"] = filepath
+                meta["_source"] = label
+                entries.append(meta)
+        groups[label] = entries
+    return groups
+
+
+def load_skill_by_name(
+    name: str,
+    context: Optional[SkillContext] = None,
+    backend: str = "langgraph",
+) -> Any:
+    """Load a skill by name (resolved across three directories).
+
+    Args:
+        name: Skill name.
+        context: Optional SkillContext for template substitution.
+        backend: ``"langgraph"`` (returns ``List[SkillStep]``) or
+                 ``"claude_sdk"`` (returns ``List[Dict]`` tool definitions).
+
+    Returns:
+        The backend-specific skill representation, or None if not found.
+    """
+    path = resolve_skill_path(name)
+    if path is None:
+        return None
+
+    if backend == "langgraph":
+        return load_skill_steps(path, context)
+    elif backend == "claude_sdk":
+        return load_tool_definitions(path)
+    else:
+        raise ValueError(f"Unknown backend: {backend!r}")

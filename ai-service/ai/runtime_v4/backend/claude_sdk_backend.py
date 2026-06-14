@@ -65,30 +65,36 @@ def _api_key() -> str:
 def _load_skills_as_tools(skill_names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Load YAML skill files as Claude tool definitions.
 
-    If ``skill_names`` is None, loads all ``.yaml`` files from the builtin
-    skills directory.
+    Scans all three skill directories (builtin / installed / custom) via
+    ``SkillManager``.  When *skill_names* is None, returns **all** visible
+    skills respecting priority (custom > installed > builtin).
     """
-    import glob
     from ai.skills.loader import load_tool_definitions
+    from ai.skills.manager import SkillManager
 
-    skills_dir = os.path.join(os.path.dirname(__file__), "..", "..", "skills", "builtin")
-    skills_dir = os.path.abspath(skills_dir)
-
+    mgr = SkillManager()
     tools: List[Dict[str, Any]] = []
 
     if skill_names:
-        patterns = [os.path.join(skills_dir, f"{name}.yaml") for name in skill_names]
+        # Resolve each requested name across the three directories
+        for name in skill_names:
+            source = mgr.get_skill(name)
+            if source and os.path.isfile(source.file_path):
+                try:
+                    tool_defs = load_tool_definitions(source.file_path)
+                    tools.extend(tool_defs)
+                    logger.debug("Loaded skill tool: %s (%s)", name, source.source_dir)
+                except Exception:
+                    logger.warning("Failed to load skill: %s", name, exc_info=True)
     else:
-        patterns = [os.path.join(skills_dir, "*.yaml")]
-
-    for pattern in patterns:
-        for yaml_path in sorted(glob.glob(pattern)):
+        # All visible skills (priority: custom > installed > builtin)
+        for skill in mgr.list_all():
             try:
-                tool_defs = load_tool_definitions(yaml_path)
+                tool_defs = load_tool_definitions(skill.file_path)
                 tools.extend(tool_defs)
-                logger.debug("Loaded skill tool: %s", os.path.basename(yaml_path))
+                logger.debug("Loaded skill tool: %s (%s)", skill.name, skill.source_dir)
             except Exception:
-                logger.warning("Failed to load skill: %s", yaml_path, exc_info=True)
+                logger.warning("Failed to load skill: %s", skill.name, exc_info=True)
 
     return tools
 
@@ -138,7 +144,7 @@ async def _execute_tool_call(
     """
     from ai.runtime.tools import ToolAdapter
     from ai.command.spec import CommandSpec, ToolType, CommandType
-    from ai.skills.loader import load_skill_steps
+    from ai.skills.loader import load_skill_steps, resolve_skill_path
     from ai.skills.base import SkillContext
 
     # Resolve context from tool input
@@ -146,11 +152,10 @@ async def _execute_tool_call(
     service_name = _as_str(ctx_data.get("service_name"))
     namespace = _as_str(ctx_data.get("namespace"), "islap")
 
-    # Load the skill steps from YAML to get concrete command specs
-    skills_dir = os.path.join(os.path.dirname(__file__), "..", "..", "skills", "builtin")
-    yaml_path = os.path.join(skills_dir, f"{tool_name}.yaml")
+    # Resolve skill YAML across builtin / installed / custom directories
+    yaml_path = resolve_skill_path(tool_name)
 
-    if os.path.isfile(yaml_path):
+    if yaml_path:
         skill_ctx = SkillContext(service_name=service_name, namespace=namespace)
         steps = load_skill_steps(yaml_path, context=skill_ctx)
         if steps:

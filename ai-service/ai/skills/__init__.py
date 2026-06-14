@@ -36,6 +36,7 @@ should use:
 """
 
 from ai.skills.base import DiagnosticSkill, SkillContext, SkillStep  # noqa: F401
+from ai.skills.manager import SkillManager, SkillSource  # noqa: F401
 from ai.skills.registry import (  # noqa: F401
     get_skill,
     get_skill_registry,
@@ -52,6 +53,9 @@ __all__ = [
     "DiagnosticSkill",
     "SkillContext",
     "SkillStep",
+    # Manager
+    "SkillManager",
+    "SkillSource",
     # Registry
     "get_skill",
     "get_skill_registry",
