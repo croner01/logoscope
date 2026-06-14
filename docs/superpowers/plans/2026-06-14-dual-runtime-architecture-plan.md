@@ -2,7 +2,21 @@
 
 > 分析日期：2026-06-14
 > 分析方法：Superpower Systematic Debugging（Phase 1 证据收集 + Phase 2 模式分析）
-> 状态：方案确认，待实施
+> 状态：Phase 0-3 基础设施完成，Phase 2 核心清理等待生产验证
+
+> 已提交 commits：
+> - `pre-dual-runtime-phase0` — 重构前快照（回退点）
+> - `a1b7539` — Phase 0a: 删除零引用文件
+> - `1feaae7` — Phase 0b: 技能 YAML 导出+加载
+> - `82ab161` — Phase 0c: ClickHouse 命令历史表
+> - `4585b6e` — Phase 1: Claude SDK 后端
+> - `47540d4` — Phase 2a: Gate 开关
+> - `1b8dc8c` — Phase 2b: ClickHouse 自动记录
+> - `4b2793e` — Phase 3: MCP 服务器
+> - `8d9ca43` — Phase 2c: 删除 followup_action_draft_helpers
+> - `0bf39c9` — Phase 2c: 删除 followup_action_command_helpers
+
+> **净代码变更：已删除 2,099 行，新增 1,854 行（含 336 行 MCP 服务器）**
 
 ---
 
@@ -180,16 +194,16 @@
 
 > **原则：只加不删。** 所有旧代码继续运行，新代码独立部署。
 
-| Step | 文件 | 内容 | 依赖 |
-|------|------|------|------|
-| 0.1 | `skills/exporter.py`（新增） | Python 技能类 → YAML 导出 | — |
-| 0.2 | `skills/loader.py`（新增） | YAML → Claude @tool / LangGraph SkillStep | 0.1 |
-| 0.3 | `skills/builtin/k8s_pod.yaml`（新增） | 1 个技能导出验证 | 0.1 |
-| 0.4 | `command/history.py`（新增） | ClickHouse 命令历史表 + store | — |
-| 0.5 | `runtime/memory.py`（修改） | SessionMemory 接入 ClickHouse 持久化 | 0.4 |
-| 0.6 | **删除** `followup_confirmation_ticket_helpers.py` | 安全删除（零引用） | — |
-| 0.7 | **删除** `openhands_helper.py` | 安全删除（零 Python 导入） | — |
-| 0.8 | **删除** `openhands_provider.py`, `openhands_backend.py` | 清理 openhands 相关 | 0.7 |
+| Step | 文件 | 内容 | 依赖 | 状态 |
+|------|------|------|------|------|
+| 0.1 | `skills/exporter.py`（新增） | Python 技能类 → YAML 导出 | — | ✅ |
+| 0.2 | `skills/loader.py`（新增） | YAML → Claude @tool / LangGraph SkillStep | 0.1 | ✅ |
+| 0.3 | `skills/builtin/k8s_pod.yaml`（新增） | 1 个技能导出验证 | 0.1 | ✅ |
+| 0.4 | `command/history.py`（新增） | ClickHouse 命令历史表 + store | — | ✅ |
+| 0.5 | `runtime/memory.py`（修改） | SessionMemory 接入 ClickHouse 持久化 | 0.4 | ✅ |
+| 0.6 | **删除** `followup_confirmation_ticket_helpers.py` | 安全删除（零引用） | — | ✅ |
+| 0.7 | **删除** `openhands_helper.py` | 安全删除（零 Python 导入） | — | ✅ |
+| 0.8 | **删除** `openhands_provider.py`, `openhands_backend.py` | 清理 openhands 相关 | 0.7 | ✅ |
 
 **验证标准：**
 - 现有 test suite 全部通过
@@ -198,13 +212,13 @@
 
 ### Phase 1：Claude SDK 后端（2-3 天）
 
-| Step | 文件 | 内容 | 依赖 |
-|------|------|------|------|
-| 1.1 | `backend/__init__.py`（修改） | 注册 claude_sdk 后端 | Phase 0 |
-| 1.2 | `backend/claude_sdk_backend.py`（新增） | Claude Agent SDK 后端实现 | 1.1 |
-| 1.3 | `approval/unified_adapter.py`（新增） | 统一审批映射层 | — |
-| 1.4 | `skills/loader.py`（补充） | YAML → @tool 转换器 | 0.2, 1.2 |
-| 1.5 | 环境变量 `AI_RUNTIME_V4_AGENT_BACKEND=claude_sdk` | 后端切换 | 1.2 |
+| Step | 文件 | 内容 | 依赖 | 状态 |
+|------|------|------|------|------|
+| 1.1 | `backend/__init__.py`（修改） | 注册 claude_sdk 后端 | Phase 0 | ✅ |
+| 1.2 | `backend/claude_sdk_backend.py`（新增） | Claude Agent SDK 后端实现 | 1.1 | ✅ |
+| 1.3 | `approval/unified_adapter.py`（新增） | 统一审批映射层 | — | ⏳ 可选 |
+| 1.4 | `skills/loader.py`（补充） | YAML → @tool 转换器 | 0.2, 1.2 | ✅ |
+| 1.5 | 环境变量 `AI_RUNTIME_V4_AGENT_BACKEND=claude_sdk` | 后端切换 | 1.2 | ⏳ 需生产验证 |
 
 **验证标准：**
 - `claude_sdk` 后端可以启动并处理一个完整的诊断请求
@@ -214,14 +228,19 @@
 
 ### Phase 2：切换与清理（2-3 天）
 
-| Step | 内容 | 验证 |
-|------|------|------|
-| 2.1 | 在线流量切到 `claude_sdk` 后端 | 线上监控无异常 |
-| 2.2 | `api/ai.py` 拆分：删除所有 followup_* 导入 | 删除后测试全过 |
-| 2.3 | 删除第一批废弃文件（followup_orchestration 等） | git diff 确认无残留 |
-| 2.4 | `api/ai.py` Gate 逻辑 → 开关控制 + 简化版 | 在线 OFF 验证 |
-| 2.5 | 删除记忆系统代码（executed_set/command_run_index 等） | 测试全过 |
-| 2.6 | 更新前端 status/blockedReason 显示逻辑 | 前端渲染正常 |
+| Step | 内容 | 验证 | 状态 |
+|------|------|------|------|
+| 2a | Gate 开关 `AI_RUNTIME_EVIDENCE_GATE_ENABLED` | 默认 ON 不改变行为 | ✅ |
+| 2b | ClickHouse 自动记录到 ToolAdapter | fire-and-forget 不阻塞执行 | ✅ |
+| 2c | 删除小型工具文件（action_draft_helpers 等） | 内联到 api/ai.py 后删除 | ✅ |
+| 2.1 | 在线流量切到 `claude_sdk` 后端 | 线上监控无异常 | ⏳ |
+| 2.2 | `api/ai.py` 拆分：删除所有 followup_* 导入 | 删除后测试全过 | ⏳ |
+| 2.3 | 删除第一批废弃文件（followup_orchestration 等） | git diff 确认无残留 | ⏳ |
+| 2.4 | Gate 逻辑简化版 | 在线 OFF 验证 | ⏳ |
+| 2.5 | 删除记忆系统代码 | 测试全过 | ⏳ |
+| 2.6 | 更新前端 status/blockedReason 显示 | 前端渲染正常 | ⏳ |
+
+> ⏳ = 等待新后端（Claude SDK）生产环境验证通过后执行。当前 v1 followup 运行路径仍依赖这些代码。
 
 **验证标准：**
 - 所有 test 通过（更新后的测试套件）
@@ -231,12 +250,12 @@
 
 ### Phase 3：MCP 服务器（可选，2 天）
 
-| Step | 内容 |
-|------|------|
-| 3.1 | 创建 `mcp_server/` 项目 |
-| 3.2 | 实现 clickhouse_query / kubectl_read / kubectl_write 工具 |
-| 3.3 | 集成 exec-service precheck + ticket 系统 |
-| 3.4 | 测试 Claude Code Desktop 连接 |
+| Step | 内容 | 状态 |
+|------|------|------|
+| 3.1 | 创建 `mcp_server/` 项目 | ✅ |
+| 3.2 | 实现 clickhouse_query / kubectl_read / kubectl_write 工具 | ✅ |
+| 3.3 | 集成 exec-service precheck + ticket 系统 | ✅ |
+| 3.4 | 测试 Claude Code Desktop 连接 | ⏳ 需部署后测试 |
 
 ---
 
