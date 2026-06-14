@@ -37,15 +37,22 @@ class ToolResult:
 
 
 class ToolAdapter:
-    """Executes compiled commands via exec-service (remote)."""
+    """Executes compiled commands via exec-service (remote).
+
+    Automatically records every execution to ClickHouse via ``history_store``
+    for cross-run dedup and audit (fire-and-forget, never blocks execution).
+    """
 
     def __init__(
         self,
         exec_service_url: str | None = None,
+        *,
+        _history_store: Any = None,  # for DI / testing
     ):
         self._exec_url = (
             exec_service_url or os.getenv("EXEC_SERVICE_BASE_URL", "http://exec-service:8095")
         ).rstrip("/")
+        self._history_store = _history_store
 
     async def execute(
         self,
@@ -80,6 +87,35 @@ class ToolAdapter:
         aid = action_id or "runtime"
         started = time.monotonic()
 
+        # ── Helper: fire-and-forget ClickHouse recording ──────────────
+        async def _record(tr: ToolResult, fp: str, ctype: str):
+            try:
+                store = self._history_store
+                if store is None:
+                    from ai.command.history import ClickHouseHistoryStore
+                    store = ClickHouseHistoryStore()
+                if fp:
+                    store.record(CommandRecord(
+                        fingerprint=fp,
+                        command=compiled.shell_command,
+                        command_type=ctype,
+                        tool=str(compiled.spec.tool.value) if hasattr(compiled.spec.tool, "value") else "generic_exec",
+                        purpose=compiled.spec.purpose,
+                        status=tr.status or ("success" if tr.success else "failed"),
+                        exit_code=tr.exit_code,
+                        stdout=tr.stdout[:2000],
+                        stderr=tr.stderr[:1000],
+                        target_kind=compiled.spec.target_kind,
+                        target_identity=compiled.spec.target_identity,
+                        run_id=aid,
+                        session_id=sid,
+                    ))
+            except Exception:
+                pass  # fire-and-forget: never block execution on history
+
+        fp = make_fingerprint(compiled.shell_command, compiled.spec.purpose)
+        ctype = str(compiled.spec.command_type.value) if hasattr(compiled.spec.command_type, "value") else "query"
+
         try:
             # ── Step 1: precheck ──────────────────────────────────────────
             precheck_resp = await asyncio.to_thread(
@@ -103,7 +139,7 @@ class ToolAdapter:
             # Hard deny — policy engine refuses this command class outright
             if precheck_status == "permission_required":
                 duration_ms = int((time.monotonic() - started) * 1000)
-                return ToolResult(
+                tr = ToolResult(
                     success=False,
                     status="permission_required",
                     exit_code=0,
@@ -111,6 +147,8 @@ class ToolAdapter:
                     duration_ms=duration_ms,
                     channel="remote",
                 )
+                await _record(tr, fp, ctype)
+                return tr
 
             # Extract ticket for confirmation/elevation gates
             ticket = _as_str(precheck_data.get("confirmation_ticket"))
@@ -138,7 +176,7 @@ class ToolAdapter:
             duration_ms = int((time.monotonic() - started) * 1000)
             data = resp.json() if resp.ok else {}
             run_data = data.get("run", data) if isinstance(data, dict) else {}
-            return ToolResult(
+            tr = ToolResult(
                 success=resp.ok and run_data.get("exit_code", 1) == 0,
                 status=run_data.get("status", "completed"),
                 exit_code=run_data.get("exit_code", 0),
@@ -147,9 +185,11 @@ class ToolAdapter:
                 duration_ms=duration_ms,
                 channel="remote",
             )
+            await _record(tr, fp, ctype)
+            return tr
         except Exception as e:
             duration_ms = int((time.monotonic() - started) * 1000)
-            return ToolResult(
+            tr = ToolResult(
                 success=False,
                 status="failed",
                 exit_code=1,
@@ -157,6 +197,8 @@ class ToolAdapter:
                 duration_ms=duration_ms,
                 channel="remote",
             )
+            await _record(tr, fp, ctype)
+            return tr
 
 
     async def web_search(self, query: str, max_results: int = 5) -> ToolResult:
