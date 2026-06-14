@@ -455,7 +455,7 @@ export const buildRuntimeTranscriptMessage = (params: {
       title: options.title,
       phase,
       status: options.status,
-      summary: options.detail ? options.detail.slice(0, 120) : undefined,
+      summary: options.detail ? options.detail.slice(0, 500) : undefined,
       detail: options.detail,
       timestamp: options.timestamp,
       iteration: options.iteration,

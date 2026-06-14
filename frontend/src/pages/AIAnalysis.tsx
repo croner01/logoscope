@@ -1253,6 +1253,47 @@ const renderFollowUpInlineRichText = (text: string, keyPrefix: string): React.Re
   });
 };
 
+const ObservationBlock: React.FC<{
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}> = ({ command, stdout, stderr, exitCode }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const hasLongOutput = stdout.length > 600 || stderr.length > 300;
+  return (
+    <div className="rounded border border-slate-200 bg-slate-50 p-2">
+      {command && (
+        <pre className="text-[12px] font-mono text-slate-800 whitespace-pre-wrap overflow-auto max-h-40">{`$ ${command}`}</pre>
+      )}
+      {stdout && (
+        <>
+          <div className="mt-1 text-[11px] font-medium text-slate-500">stdout</div>
+          <pre className={`mt-0.5 text-[12px] font-mono text-emerald-800 whitespace-pre-wrap overflow-auto bg-white border border-slate-100 rounded p-1.5 ${expanded ? 'max-h-[600px]' : 'max-h-40'}`}>{stdout}</pre>
+        </>
+      )}
+      {stderr && (
+        <>
+          <div className="mt-1 text-[11px] font-medium text-rose-500">stderr</div>
+          <pre className={`mt-0.5 text-[12px] font-mono text-rose-700 whitespace-pre-wrap overflow-auto bg-white border border-rose-100 rounded p-1.5 ${expanded ? 'max-h-[600px]' : 'max-h-40'}`}>{stderr}</pre>
+        </>
+      )}
+      {Number.isFinite(exitCode) && (
+        <div className="mt-1 text-[11px] text-slate-400">exit: {exitCode}</div>
+      )}
+      {hasLongOutput && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="mt-1 text-[11px] text-indigo-500 hover:text-indigo-700 focus:outline-none"
+        >
+          {expanded ? '收起完整输出' : '展开完整输出'}
+        </button>
+      )}
+    </div>
+  );
+};
+
 const renderFollowUpRichContent = (
   content: string,
   keyPrefix: string,
@@ -6677,28 +6718,13 @@ const AIAnalysis: React.FC = () => {
                               const obsStderr = String(obsPayload.stderr || '').trim();
                               const obsExitCode = Number(obsPayload.exit_code);
                               if (!obsCommand && !obsStdout && !obsStderr) return null;
-                              return (
-                                <div key={`obs-${index}-${obsIndex}`} className="rounded border border-slate-200 bg-slate-50 p-2">
-                                  {obsCommand && (
-                                    <pre className="text-[11px] font-mono text-slate-800 whitespace-pre-wrap overflow-auto max-h-32">{`$ ${obsCommand}`}</pre>
-                                  )}
-                                  {obsStdout && (
-                                    <>
-                                      <div className="mt-1 text-[10px] font-medium text-slate-500">stdout</div>
-                                      <pre className="mt-0.5 text-[11px] font-mono text-emerald-800 whitespace-pre-wrap overflow-auto max-h-60 bg-white border border-slate-100 rounded p-1.5">{obsStdout}</pre>
-                                    </>
-                                  )}
-                                  {obsStderr && (
-                                    <>
-                                      <div className="mt-1 text-[10px] font-medium text-rose-500">stderr</div>
-                                      <pre className="mt-0.5 text-[11px] font-mono text-rose-700 whitespace-pre-wrap overflow-auto max-h-32 bg-white border border-rose-100 rounded p-1.5">{obsStderr}</pre>
-                                    </>
-                                  )}
-                                  {Number.isFinite(obsExitCode) && (
-                                    <div className="mt-1 text-[10px] text-slate-400">exit: {obsExitCode}</div>
-                                  )}
-                                </div>
-                              );
+                              return <ObservationBlock
+                                key={`obs-${index}-${obsIndex}`}
+                                command={obsCommand}
+                                stdout={obsStdout}
+                                stderr={obsStderr}
+                                exitCode={obsExitCode}
+                              />;
                             })}
                           </div>
                         )}
@@ -6708,7 +6734,7 @@ const AIAnalysis: React.FC = () => {
                         <span>{msg.role === 'user' ? '你' : 'AI'}{msg.timestamp ? ` · ${toLocaleTime(msg.timestamp)}` : ''}</span>
                       </div>
                       {/* 思考过程 */}
-                      {msg.role === 'assistant' && messageThoughtTimeline.length > 0 && messageObservations.length === 0 && (
+                      {msg.role === 'assistant' && messageThoughtTimeline.length > 0 && (
                         streamLoading ? (
                           <div className="mt-1.5 w-full max-w-[85%] rounded border border-indigo-200 bg-indigo-50/60 p-2">
                             <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-indigo-700">
@@ -6856,18 +6882,25 @@ const AIAnalysis: React.FC = () => {
                         </div>
                       )}
                       {msg.role === 'assistant' && messageSubgoals.length > 0 && (
-                        <details className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2 group" open>
-                          <summary className="cursor-pointer text-[11px] font-medium text-sky-700 list-none flex items-center gap-1">
-                            <svg className="w-3 h-3 text-sky-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-sky-200 bg-sky-50 p-2">
+                          <div className="text-[11px] font-medium text-sky-700 mb-1 flex items-center gap-2">
                             子目标拆解
-                          </summary>
-                          <div className="mt-1.5 space-y-1.5">
+                            {messageSubgoals.filter(sg => sg.status === 'pending' || sg.status === 'in_progress').length > 0 && (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-amber-700 bg-amber-100 rounded-full px-2 py-0.5">
+                                ⚠️ {messageSubgoals.filter(sg => sg.status === 'pending').length} 个待完成
+                              </span>
+                            )}
+                          </div>
+                          <div className="space-y-1.5">
                             {messageSubgoals.map((goal, goalIndex) => (
-                              <div key={`${msg.message_id || index}:subgoal:${goal.id || goalIndex}`} className="rounded border border-sky-100 bg-white p-1.5">
+                              <div key={`${msg.message_id || index}:subgoal:${goal.id || goalIndex}`} className={`rounded border p-1.5 ${goal.status === 'pending' ? 'border-amber-200 bg-amber-50/50' : 'border-sky-100 bg-white'}`}>
                                 <div className="flex items-center justify-between gap-2">
-                                  <div className="text-[11px] font-medium text-sky-900">{goal.title || goal.id || '未命名子目标'}</div>
-                                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${getFollowUpSubgoalStatusTagClass(goal.status)}`}>
-                                    {formatFollowUpSubgoalStatus(goal.status)}
+                                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-sky-900">
+                                    {goal.status === 'pending' && <span className="text-amber-500">⚠️</span>}
+                                    {goal.title || goal.id || '未命名子目标'}
+                                  </div>
+                                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${goal.status === 'pending' ? 'border-amber-300 bg-amber-100 text-amber-800' : getFollowUpSubgoalStatusTagClass(goal.status)}`}>
+                                    {goal.status === 'pending' ? '⏳ 待完成' : formatFollowUpSubgoalStatus(goal.status)}
                                   </span>
                                 </div>
                                 {goal.reason && (
@@ -6879,35 +6912,38 @@ const AIAnalysis: React.FC = () => {
                               </div>
                             ))}
                           </div>
-                        </details>
+                        </div>
                       )}
                       {msg.role === 'assistant' && messageReflection && (
-                        <details className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2 group" open>
-                          <summary className="cursor-pointer text-[11px] font-medium text-violet-700 list-none flex items-center gap-1">
-                            <svg className="w-3 h-3 text-violet-400 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-                            反思 & 缺口
-                          </summary>
-                          <div className="mt-1.5 space-y-1.5">
-                          <div className="text-[11px] font-medium text-violet-700 mb-1">反思闭环</div>
+                        <div className="mt-1.5 w-full max-w-[85%] rounded border border-violet-200 bg-violet-50 p-2">
+                          <div className="text-[11px] font-medium text-violet-700 mb-1">反思 & 缺口</div>
                           <div className="flex flex-wrap gap-2 text-[11px] text-violet-700">
                             <span>迭代: {Number(messageReflection.iterations || 0)}</span>
                             <span>完成: {Number(messageReflection.completed_count || 0)}/{Number(messageReflection.total_count || 0)}</span>
                             <span>置信度: {formatReflectionConfidence(messageReflection.final_confidence)}</span>
+                            {messageReflection.final_confidence != null && Number(messageReflection.final_confidence) < 0.7 && (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-amber-700 bg-amber-100 rounded-full px-2 py-0.5">⚠️ 证据不足</span>
+                            )}
                           </div>
                           {reflectionGaps.length > 0 && (
-                            <div className="mt-1 text-[11px] text-violet-700">缺口：{reflectionGaps.slice(0, 3).join('；')}</div>
+                            <div className="mt-1 text-[11px] text-violet-700">
+                              <span className="font-medium">缺口：</span>
+                              {reflectionGaps.slice(0, 3).join('；')}
+                            </div>
                           )}
                           {reflectionActions.length > 0 && (
-                            <div className="mt-1 text-[11px] text-violet-700">下一步：{reflectionActions.slice(0, 3).join('；')}</div>
+                            <div className="mt-1 text-[11px] text-violet-700">
+                              <span className="font-medium">下一步：</span>
+                              {reflectionActions.slice(0, 3).join('；')}
+                            </div>
                           )}
                         </div>
-                        </details>
                       )}
                       {msg.role === 'assistant' && messageActions.length > 0 && (
                         <div className="mt-1.5 w-full max-w-[85%] rounded border border-emerald-200 bg-emerald-50 p-2">
                           <div className="text-[11px] font-medium text-emerald-700 mb-1">执行计划（ReAct）</div>
-                          <div className="space-y-1.5">
-                            {messageActions.slice(0, 1).map((action, actionIndex) => {
+                          <div className={`space-y-1.5 ${messageActions.length > 3 ? 'max-h-80 overflow-auto pr-1' : ''}`}>
+                            {messageActions.map((action, actionIndex) => {
                               const displayPriority = Number.isFinite(Number(action.priority))
                                 ? Math.max(1, Math.floor(Number(action.priority)))
                                 : actionIndex + 1;

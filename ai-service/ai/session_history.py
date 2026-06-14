@@ -189,16 +189,16 @@ def _compact_action_observation(item: Any) -> Dict[str, Any]:
         "status": str(obs.get("status") or "").strip().lower(),
         "action_id": str(obs.get("action_id") or "").strip(),
         "command_run_id": str(obs.get("command_run_id") or "").strip(),
-        "command": _truncate_text(obs.get("command"), max_chars=320),
+        "command": _truncate_text(obs.get("command"), max_chars=2000),
         "command_type": str(obs.get("command_type") or "").strip(),
         "risk_level": str(obs.get("risk_level") or "").strip(),
         "exit_code": int(obs.get("exit_code") or 0),
         "timed_out": bool(obs.get("timed_out")),
         "auto_executed": bool(obs.get("auto_executed")),
         "output_truncated": bool(obs.get("output_truncated")),
-        "message": _truncate_text(obs.get("message"), max_chars=360),
-        "stdout_preview": _truncate_text(obs.get("stdout"), max_chars=280),
-        "stderr_preview": _truncate_text(obs.get("stderr"), max_chars=280),
+        "message": _truncate_text(obs.get("message"), max_chars=2000),
+        "stdout_preview": _truncate_text(obs.get("stdout"), max_chars=2000),
+        "stderr_preview": _truncate_text(obs.get("stderr"), max_chars=2000),
     }
 
 
@@ -206,10 +206,10 @@ def _compact_followup_action(item: Any) -> Dict[str, Any]:
     action = item if isinstance(item, dict) else {}
     return {
         "id": str(action.get("id") or "").strip(),
-        "title": _truncate_text(action.get("title"), max_chars=240),
-        "purpose": _truncate_text(action.get("purpose"), max_chars=280),
+        "title": _truncate_text(action.get("title"), max_chars=2000),
+        "purpose": _truncate_text(action.get("purpose"), max_chars=2000),
         "action_type": str(action.get("action_type") or "").strip(),
-        "command": _truncate_text(action.get("command"), max_chars=320),
+        "command": _truncate_text(action.get("command"), max_chars=2000),
         "command_type": str(action.get("command_type") or "").strip(),
         "risk_level": str(action.get("risk_level") or "").strip(),
         "requires_confirmation": bool(action.get("requires_confirmation")),
@@ -244,8 +244,8 @@ def _compact_message_metadata(metadata: Any) -> Dict[str, Any]:
             safe_thoughts.append(
                 {
                     "phase": str(payload.get("phase") or "").strip(),
-                    "title": _truncate_text(payload.get("title"), max_chars=200),
-                    "detail": _truncate_text(payload.get("detail"), max_chars=320),
+                    "title": _truncate_text(payload.get("title"), max_chars=2000),
+                    "detail": _truncate_text(payload.get("detail"), max_chars=2000),
                     "status": str(payload.get("status") or "").strip(),
                     "iteration": int(payload.get("iteration") or 0),
                 }
