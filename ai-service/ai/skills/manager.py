@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from ai.skills.adapters import SkillSource
 from ai.skills.base import SkillContext
 from ai.skills.builtin._helpers import _as_str
 
@@ -48,30 +49,6 @@ _GITHUB_URL_RE = re.compile(
 _RAW_GITHUB_URL = "https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
 
 GITHUB_API_BASE = "https://api.github.com"
-
-
-@dataclass
-class SkillSource:
-    """One skill YAML with its origin metadata."""
-    name: str
-    display_name: str
-    description: str
-    source_dir: str  # "builtin" | "installed" | "custom"
-    file_path: str
-    risk_level: str = "low"
-    step_count: int = 0
-    trigger_patterns: List[str] = field(default_factory=list)
-    applicable_components: List[str] = field(default_factory=list)
-    install_meta: Dict[str, Any] = field(default_factory=dict)  # from _source field
-
-    @property
-    def source_label(self) -> str:
-        """Human-readable source label."""
-        return {
-            "builtin": "内置",
-            "installed": "已安装",
-            "custom": "自定义",
-        }.get(self.source_dir, self.source_dir)
 
 
 @dataclass
