@@ -294,7 +294,7 @@ const SkillManager: React.FC = () => {
     { key: 'custom', label: '自定义' },
   ];
 
-  const displaySkills = skills.filter(s => {
+  const displaySkills = Array.isArray(skills) ? skills.filter(s => {
     if (sourceFilter && s.source_dir !== sourceFilter) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
@@ -305,7 +305,7 @@ const SkillManager: React.FC = () => {
       );
     }
     return true;
-  });
+  }) : [];
 
   /* ── Render ──────────────────────────────────────────────────────────────── */
 
@@ -324,7 +324,7 @@ const SkillManager: React.FC = () => {
               技能管理
             </h2>
             <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 ml-1">
-              {skills.length}
+              {Array.isArray(skills) ? skills.length : 0}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -370,8 +370,8 @@ const SkillManager: React.FC = () => {
           {allSources.map(src => {
             const active = sourceFilter === src.key;
             const count = src.key === null
-              ? skills.length
-              : skills.filter(s => s.source_dir === src.key).length;
+              ? (Array.isArray(skills) ? skills.length : 0)
+              : (Array.isArray(skills) ? skills.filter(s => s.source_dir === src.key).length : 0);
             return (
               <button
                 key={src.label}
