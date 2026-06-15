@@ -22,3 +22,4 @@ opentelemetry-instrumentation-fastapi==0.43b0
 opentelemetry-instrumentation-requests==0.43b0
 opentelemetry-proto==1.22.0
 protobuf==4.25.1
+typing_extensions==4.12.2

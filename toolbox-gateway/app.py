@@ -18,6 +18,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 app = FastAPI(title="toolbox-gateway", version="1.0.0")
 _logger = logging.getLogger(__name__)
 _SHELL_OPERATOR_TOKENS = {"|", "|&", "||", "&&", ";", "&", ">", ">>", "<", "<<", "<<<", "<>", "<&", ">&", "&>", ">|"}
+# Pipe-only operators — safe to handle programmatically without a shell
+_PIPE_OPERATORS = {"|"}
+_PIPE_ENABLED_DEFAULT = True  # pipe chain execution enabled by default
 
 
 def _as_str(value: Any, default: str = "") -> str:
@@ -291,6 +294,61 @@ def _shell_emergency_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _pipe_enabled() -> bool:
+    raw = _as_str(os.getenv("TOOLBOX_GATEWAY_PIPE_ENABLED"), str(_PIPE_ENABLED_DEFAULT)).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _detect_shell_operators(command: str) -> tuple[bool, bool]:
+    """Scan command for shell operator tokens.
+
+    Returns (has_any_operator, has_only_pipe).
+    ``has_only_pipe`` is True when the command contains ONLY ``|`` operators
+    (no ``;``, ``&&``, ``>``, etc.).
+    """
+    has_any = False
+    found_non_pipe = False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        for token in lexer:
+            token_str = _as_str(token).strip()
+            if token_str in _SHELL_OPERATOR_TOKENS:
+                has_any = True
+                if token_str not in _PIPE_OPERATORS:
+                    found_non_pipe = True
+                    break
+    except Exception:
+        has_any = True
+        found_non_pipe = True
+
+    return has_any, has_any and not found_non_pipe
+
+
+def _split_pipe_segments(command: str) -> list[str] | None:
+    """Split a command string on ``|`` operators.
+
+    Returns a list of command segments (at least 2) when the command
+    contains pipe operators, or ``None`` if parsing fails.
+    """
+    try:
+        lexer_with_pipe = shlex.shlex(command, posix=True, punctuation_chars="|")
+        lexer_with_pipe.whitespace_split = True
+        lexer_with_pipe.commenters = ""
+        segments: list[list[str]] = [[]]
+        for token in lexer_with_pipe:
+            token_str = _as_str(token).strip()
+            if token_str == "|":
+                segments.append([])
+            elif token_str:
+                segments[-1].append(token_str)
+        result = [" ".join(seg) for seg in segments if seg]
+        return result if len(result) >= 2 else None
+    except Exception:
+        return None
+
+
 KUBECONFIG_BASE_DIR = "/etc/kubeconfigs"
 
 
@@ -322,6 +380,160 @@ class ExecResult:
     timed_out: bool
 
 
+async def _execute_pipe_chain(
+    segments: list[str],
+    *,
+    timeout_seconds: int,
+    max_output_bytes: int,
+    kubeconfig_path: str | None = None,
+) -> ExecResult:
+    """Execute a pipe chain (``cmd1 | cmd2 | ...``) safely without a shell.
+
+    Each segment is spawned via ``create_subprocess_exec`` (no shell).
+    ``os.pipe()`` + ``pass_fds`` connects each segment's stdout to the
+    next segment's stdin.  Only ``|`` is supported — other shell operators
+    (``;``, ``&&``, ``>``, etc.) are rejected earlier in the calling code.
+
+    Returns the last segment's stdout and a composite stderr + exit code.
+    """
+    proc_env = os.environ.copy()
+    if kubeconfig_path:
+        proc_env["KUBECONFIG"] = kubeconfig_path
+
+    processes: list[asyncio.subprocess.Process] = []
+    prev_read_fd: int | None = None
+    pipe_write_fds: list[int] = []
+
+    try:
+        for i, segment in enumerate(segments):
+            parts = shlex.split(segment, posix=True)
+            if not parts:
+                continue
+
+            is_last = i == len(segments) - 1
+
+            if is_last:
+                # Last segment: capture stdout + stderr
+                process = await asyncio.create_subprocess_exec(
+                    *parts,
+                    stdin=prev_read_fd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
+                    pass_fds=(prev_read_fd,) if prev_read_fd is not None else (),
+                )
+                processes.append(process)
+            else:
+                # Intermediate segment: create pipe for stdout
+                pipe_r, pipe_w = os.pipe()
+                pipe_write_fds.append(pipe_w)
+                process = await asyncio.create_subprocess_exec(
+                    *parts,
+                    stdin=prev_read_fd,
+                    stdout=pipe_w,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=proc_env,
+                    pass_fds=(prev_read_fd,) if prev_read_fd is not None else (),
+                )
+                os.close(pipe_w)  # write end owned by child now
+                if prev_read_fd is not None:
+                    os.close(prev_read_fd)
+                prev_read_fd = pipe_r
+                processes.append(process)
+
+        if not processes:
+            return ExecResult(exit_code=0, stdout="", stderr="", timed_out=False)
+
+        # Wait for the last process (with timeout)
+        try:
+            last_stdout_bytes, last_stderr_bytes = await asyncio.wait_for(
+                processes[-1].communicate(),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            for p in processes:
+                try:
+                    p.kill()
+                except ProcessLookupError:
+                    pass
+            for p in processes:
+                try:
+                    await p.wait()
+                except ProcessLookupError:
+                    pass
+            return ExecResult(
+                exit_code=124,
+                stdout="",
+                stderr=f"piped command timed out after {timeout_seconds}s",
+                timed_out=True,
+            )
+
+        # Collect stderr and exit code from all intermediate processes
+        all_stderr_parts: list[str] = []
+        overall_exit = 0
+        for idx, p in enumerate(processes):
+            if p.returncode is None:
+                try:
+                    await p.wait()
+                except ProcessLookupError:
+                    pass
+            rc = int(p.returncode or 0)
+            if rc != 0 and overall_exit == 0:
+                overall_exit = rc
+            # Reap stderr from intermediate processes
+            if idx < len(processes) - 1:
+                try:
+                    _se = p.stderr
+                    if _se:
+                        se_bytes = await _se.read()
+                        if se_bytes:
+                            all_stderr_parts.append(se_bytes.decode("utf-8", errors="ignore"))
+                except Exception:
+                    pass
+
+        if last_stderr_bytes:
+            all_stderr_parts.append(last_stderr_bytes.decode("utf-8", errors="ignore"))
+
+        return ExecResult(
+            exit_code=overall_exit,
+            stdout=_clip_output(
+                last_stdout_bytes.decode("utf-8", errors="ignore") if last_stdout_bytes else "",
+                limit_bytes=max_output_bytes,
+            ),
+            stderr=_clip_output(
+                "\n".join(all_stderr_parts) if all_stderr_parts else "",
+                limit_bytes=max_output_bytes,
+            ),
+            timed_out=False,
+        )
+    except FileNotFoundError:
+        return ExecResult(
+            exit_code=127,
+            stdout="",
+            stderr="command not found in pipe chain",
+            timed_out=False,
+        )
+    except Exception:
+        return ExecResult(
+            exit_code=126,
+            stdout="",
+            stderr="failed to execute piped command",
+            timed_out=False,
+        )
+    finally:
+        # Safety: close any leftover pipe write fds
+        for fd in pipe_write_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if prev_read_fd is not None:
+            try:
+                os.close(prev_read_fd)
+            except OSError:
+                pass
+
+
 async def _execute_command(
     command: str,
     *,
@@ -330,19 +542,25 @@ async def _execute_command(
     kubeconfig_path: str | None = None,
 ) -> ExecResult:
     safe_timeout = max(1, int(timeout_seconds))
-    has_shell_features = False
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        for token in lexer:
-            if _as_str(token).strip() in _SHELL_OPERATOR_TOKENS:
-                has_shell_features = True
-                break
-    except Exception:
-        has_shell_features = True
+
+    # Detect shell operators and classify
+    has_shell_features, has_only_pipe = _detect_shell_operators(command)
     if "$(" in command or "`" in command:
         has_shell_features = True
+        has_only_pipe = False
+
+    # ── Pipe-only mode: execute via safe process chain ──────────────
+    if has_only_pipe and _pipe_enabled():
+        segments = _split_pipe_segments(command)
+        if segments and len(segments) >= 2:
+            return await _execute_pipe_chain(
+                segments,
+                timeout_seconds=safe_timeout,
+                max_output_bytes=max_output_bytes,
+                kubeconfig_path=kubeconfig_path,
+            )
+
+    # ── Other shell operators or pipe disabled → block unless emergency ──
     if has_shell_features and not _shell_emergency_enabled():
         return ExecResult(
             exit_code=126,

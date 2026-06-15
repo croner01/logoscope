@@ -36,6 +36,10 @@ PACKAGE_VERSIONS = {
     "requests": "2.31.0",
     "tenacity": "8.2.3",
     "temporalio": "1.9.0",
+    # NOTE: The actual runtime uses typing_extensions==4.10.0 (to avoid PEP 696 validation
+    # that breaks langsmith 0.1.147 on Python 3.11+). The version here satisfies openai's
+    # constraint so pip resolves cleanly; the Dockerfile overrides it with --no-deps.
+    "typing_extensions": "4.12.2",
     "uvicorn[standard]": "0.24.0",
 }
 
@@ -62,6 +66,7 @@ SERVICE_REQUIREMENTS = {
         "opentelemetry-instrumentation-requests",
         "opentelemetry-proto",
         "protobuf",
+        "typing_extensions",
     ],
     "query-service/requirements-runtime.txt": [
         "fastapi",
