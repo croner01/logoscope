@@ -111,6 +111,112 @@ def _build_events_anchor_sql(
     )
 
 
+def _build_discovery_sql_channel1(trace_id: str, start: str, end: str) -> str:
+    """Channel 1: services sharing the same trace_id."""
+    return (
+        "SELECT DISTINCT service_name FROM logs.logs "
+        f"WHERE trace_id = '{_escape_sql_string(trace_id)}' "
+        f"  AND timestamp BETWEEN '{_escape_sql_string(start)}' "
+        f"  AND '{_escape_sql_string(end)}' "
+        "ORDER BY service_name"
+    )
+
+
+def _build_discovery_sql_channel2(os_request_id: str, start: str, end: str) -> str:
+    """Channel 2: services with req-xxx in message."""
+    safe_req = _escape_sql_string(os_request_id)
+    return (
+        "SELECT DISTINCT service_name FROM logs.logs "
+        f"WHERE timestamp BETWEEN '{_escape_sql_string(start)}' "
+        f"  AND '{_escape_sql_string(end)}' "
+        f"  AND message LIKE '%{safe_req}%' "
+        "ORDER BY service_name"
+    )
+
+
+def _build_discovery_sql_channel3(start: str, end: str) -> str:
+    """Channel 3: all services active in the time window."""
+    return (
+        "SELECT DISTINCT service_name FROM logs.logs "
+        f"WHERE timestamp BETWEEN '{_escape_sql_string(start)}' "
+        f"  AND '{_escape_sql_string(end)}' "
+        "ORDER BY service_name"
+    )
+
+
+def _merge_service_channels(
+    channel1: List[str],
+    channel2: List[str],
+    channel3: List[str],
+    *,
+    max_services: int = _MAX_CHAIN_SERVICES,
+) -> Dict[str, str]:
+    """
+    Merge three discovery channels into a single service->anchor_type map.
+
+    Priority: trace_id > req_xxx > time_window.
+    Truncated to max_services (keep highest priority).
+    """
+    result: Dict[str, str] = {}
+
+    for svc in channel1:
+        result[svc] = "trace_id"
+    for svc in channel2:
+        if svc not in result:
+            result[svc] = "req_xxx"
+    for svc in channel3:
+        if svc not in result:
+            result[svc] = "time_window"
+
+    # Sort: trace_id first, then req_xxx, then time_window; alpha within group
+    priority = {"trace_id": 0, "req_xxx": 1, "time_window": 2}
+    sorted_services = sorted(
+        result.items(),
+        key=lambda item: (priority.get(item[1], 99), item[0]),
+    )
+
+    return dict(sorted_services[:max_services])
+
+
+def _build_supplement_sql(
+    service_name: str,
+    anchor_type: str,
+    trace_id: str,
+    os_request_id: str,
+    start: str,
+    end: str,
+) -> str:
+    """
+    Build per-service supplement SQL.
+
+    Strategy is selected by anchor_type:
+      trace_id   -> WHERE trace_id=X AND service_name=Y
+      req_xxx    -> WHERE message LIKE '%req-xxx%' AND service_name=Y
+      time_window -> WHERE timestamp BETWEEN start AND end AND service_name=Y
+    """
+    safe_svc = _escape_sql_string(service_name)
+    safe_start = _escape_sql_string(start)
+    safe_end = _escape_sql_string(end)
+
+    if anchor_type == "trace_id" and trace_id:
+        cond = f"trace_id = '{_escape_sql_string(trace_id)}'"
+    elif anchor_type == "req_xxx" and os_request_id:
+        safe_req = _escape_sql_string(os_request_id)
+        cond = f"message LIKE '%{safe_req}%'"
+    else:
+        cond = "1=1"
+
+    return (
+        "SELECT timestamp, level, message "
+        "FROM logs.logs "
+        f"WHERE {cond} "
+        f"  AND service_name = '{safe_svc}' "
+        f"  AND timestamp BETWEEN '{safe_start}' AND '{safe_end}' "
+        "ORDER BY timestamp ASC "
+        "LIMIT 300 FORMAT PrettyCompact"
+    )
+
+
 @register_skill
 class BusinessChainAnalyzerSkill(DiagnosticSkill):
     """
@@ -212,16 +318,47 @@ class BusinessChainAnalyzerSkill(DiagnosticSkill):
             )
         )
 
-        # Placeholder steps for Tasks 2-4
+        # ── Step 2: service discovery (3 parallel queries) ─────────────────
+        discovery_channel1_sql = _build_discovery_sql_channel1(
+            trace_id, ew_start, ew_end
+        )
+        discovery_channel2_sql = _build_discovery_sql_channel2(
+            os_request_id, ew_start, ew_end
+        )
+        discovery_channel3_sql = _build_discovery_sql_channel3(
+            ew_start, ew_end
+        )
+
         steps.append(
             SkillStep(
-                step_id="bca-service-discovery",
-                title="服务发现（占位 — Task 2 实现）",
-                command_spec=_clickhouse_query(
-                    "SELECT 1 FORMAT PrettyCompact", timeout_s=10
-                ),
-                purpose="占位步骤，Task 2 将替换为三通道服务发现 SQL",
+                step_id="bca-service-discovery-ch1",
+                title="服务发现 — trace_id 通道",
+                command_spec=_clickhouse_query(discovery_channel1_sql, timeout_s=30),
+                purpose=f"所有与 trace_id={trace_id} 关联的服务",
                 depends_on=["bca-anchor-resolve"],
+                parse_hints={"extract": ["service_name"]},
+            )
+        )
+
+        steps.append(
+            SkillStep(
+                step_id="bca-service-discovery-ch2",
+                title="服务发现 — req-xxx 通道",
+                command_spec=_clickhouse_query(discovery_channel2_sql, timeout_s=30),
+                purpose=f"所有 message 中含 {os_request_id} 的服务",
+                depends_on=["bca-anchor-resolve"],
+                parse_hints={"extract": ["service_name"]},
+            )
+        )
+
+        steps.append(
+            SkillStep(
+                step_id="bca-service-discovery-ch3",
+                title="服务发现 — 时间窗口全服务",
+                command_spec=_clickhouse_query(discovery_channel3_sql, timeout_s=30),
+                purpose=f"时间窗口 {ew_start} ~ {ew_end} 内所有活跃服务",
+                depends_on=["bca-anchor-resolve"],
+                parse_hints={"extract": ["service_name"]},
             )
         )
 
