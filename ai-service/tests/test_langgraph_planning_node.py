@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai.runtime_v4.langgraph.nodes.planning import run_planning
+from ai.runtime_v4.langgraph.nodes.planning import run_planning, _get_phase2_skill
 from ai.runtime_v4.langgraph.state import InnerGraphState
 
 
@@ -89,7 +89,7 @@ class TestRunPlanning:
         assert new_state.actions[0]["skill_name"] == "mock_skill"
 
     def test_does_not_duplicate_selected_skills(self):
-        state = _make_state(selected_skills=["mock_skill"])
+        state = _make_state(selected_skills=["mock_skill"], iteration=3)
         mock_skill = _make_mock_skill(name="mock_skill")
         with patch(
             "ai.runtime_v4.langgraph.nodes.planning._select_skills_by_rules",
@@ -143,6 +143,7 @@ class TestRunPlanning:
     def test_skips_low_confidence_skill_pairs(self):
         state = _make_state(
             question="service health check looks unstable",
+            iteration=3,
             skill_context={
                 "question": "service health check looks unstable",
                 "log_content": "health endpoint flaps intermittently",
@@ -170,3 +171,21 @@ class TestRunPlanning:
             # Should not raise
             new_state = run_planning(state)
         assert new_state is not None
+
+
+class TestPhase2SkillSelection:
+    """Tests for _get_phase2_skill() dynamic selection."""
+
+    def test_chain_analysis_question_triggers_business_chain(self):
+        question = "分析这个请求的完整业务链"
+        skill_name = _get_phase2_skill(question)
+        assert skill_name == "business_chain_analyzer"
+
+    def test_generic_question_triggers_cross_component(self):
+        question = "为什么这个请求报错了"
+        skill_name = _get_phase2_skill(question)
+        assert skill_name == "cross_component_correlation"
+
+    def test_empty_question_uses_default(self):
+        skill_name = _get_phase2_skill("")
+        assert skill_name == "cross_component_correlation"

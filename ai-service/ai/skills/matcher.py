@@ -16,6 +16,12 @@ from ai.skills.registry import get_skill_registry
 
 logger = logging.getLogger(__name__)
 
+# Keywords that trigger business_chain_analyzer instead of cross_component_correlation
+CHAIN_ANALYSIS_KEYWORDS = {
+    "业务链", "全链路", "完整流程", "调用链", "服务链",
+    "链条", "flow", "full trace", "end-to-end",
+}
+
 # Threshold above which a skill is considered "high-confidence" for auto-selection
 _HIGH_CONFIDENCE_THRESHOLD = 0.7
 _AUTO_SELECT_MIN_SCORE = 0.35

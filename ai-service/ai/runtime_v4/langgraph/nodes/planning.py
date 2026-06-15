@@ -18,6 +18,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ai.runtime_v4.langgraph.state import InnerGraphState
+from ai.skills.matcher import CHAIN_ANALYSIS_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,19 @@ _PLANNING_AUTOSELECT_MIN_SCORE = 0.35
 
 # Names of the mandatory Phase-1 and Phase-2 skills
 _PHASE1_SKILL = "log_flow_analyzer"
-_PHASE2_SKILL = "cross_component_correlation"
+_PHASE2_DEFAULT = "cross_component_correlation"
+
+
+def _get_phase2_skill(question: str) -> str:
+    """Choose Phase 2 skill based on user question keywords.
+
+    Returns \"business_chain_analyzer\" when the question contains
+    full-chain analysis keywords; otherwise returns the default
+    \"cross_component_correlation\".
+    """
+    if question and any(kw in question for kw in CHAIN_ANALYSIS_KEYWORDS):
+        return "business_chain_analyzer"
+    return _PHASE2_DEFAULT
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -417,7 +430,7 @@ def _populate_actions_from_skills(
         if skill.name in state.selected_skills:
             continue  # avoid duplicates across iterations
         # Never re-inject the Phase-1/2 skills via the regular path
-        if skill.name in (_PHASE1_SKILL, _PHASE2_SKILL):
+        if skill.name in (_PHASE1_SKILL, _PHASE2_DEFAULT):
             continue
         try:
             steps = skill.plan_steps(context)
@@ -492,11 +505,12 @@ def run_planning(state: InnerGraphState) -> InnerGraphState:
     # ── Iteration 2: Force-inject Phase-2 (if Phase-1 succeeded) ─────────────
     if state.iteration == 2:
         if _phase1_succeeded(state):
-            if _inject_mandatory_skill(state, _PHASE2_SKILL):
+            phase2_skill = _get_phase2_skill(_as_str(state.question))
+            if _inject_mandatory_skill(state, phase2_skill):
                 injected_count += 1
                 state.reflection["last_skill_selection"] = {
                     "iteration": state.iteration,
-                    "selected": [_PHASE2_SKILL],
+                    "selected": [phase2_skill],
                     "phase": "phase2_forced",
                 }
         else:
