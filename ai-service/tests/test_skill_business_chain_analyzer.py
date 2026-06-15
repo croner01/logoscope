@@ -14,6 +14,8 @@ from ai.skills.builtin.business_chain_analyzer import (
     _build_discovery_sql_channel3,
     _merge_service_channels,
     _build_supplement_sql,
+    _build_trace_tree_sql,
+    _build_span_tree,
     DEFAULT_CHAIN_PROMPT,
     _MAX_CHAIN_SERVICES,
 )
@@ -184,3 +186,69 @@ class TestServiceDiscovery:
         )
         assert "1=1" in sql
         assert "service_name = 'keystone'" in sql
+
+
+class TestTraceTreeRebuild:
+    def test_build_trace_tree_sql(self):
+        sql = _build_trace_tree_sql("trace-001")
+        assert "logs.traces" in sql
+        assert "PREWHERE trace_id = 'trace-001'" in sql
+        assert "parent_span_id" in sql
+
+    def test_build_span_tree_single_root(self):
+        spans = [
+            {"span_id": "a", "parent_span_id": "", "service_name": "nova-api",
+             "span_kind": "SERVER", "operation_name": "POST /servers",
+             "timestamp": "12:00:01", "duration_ms": "452", "status": "OK"},
+        ]
+        lines = _build_span_tree(spans)
+        assert len(lines) == 1
+        assert "nova-api" in lines[0]
+        assert "POST /servers" in lines[0]
+
+    def test_build_span_tree_parent_child(self):
+        spans = [
+            {"span_id": "a", "parent_span_id": "", "service_name": "nova-api",
+             "span_kind": "SERVER", "operation_name": "POST /servers",
+             "timestamp": "12:00:01", "duration_ms": "452", "status": "OK"},
+            {"span_id": "b", "parent_span_id": "a", "service_name": "nova-compute",
+             "span_kind": "CLIENT", "operation_name": "spawn",
+             "timestamp": "12:00:05", "duration_ms": "5000", "status": "ERROR"},
+        ]
+        lines = _build_span_tree(spans)
+        assert len(lines) == 2
+        assert lines[1].startswith("  ")
+        assert "nova-compute" in lines[1]
+        assert "[ERROR]" in lines[1]
+
+    def test_build_span_tree_grandchild(self):
+        spans = [
+            {"span_id": "a", "parent_span_id": "", "service_name": "nova-api",
+             "span_kind": "SERVER", "operation_name": "POST",
+             "timestamp": "12:00:01", "duration_ms": "452", "status": "OK"},
+            {"span_id": "b", "parent_span_id": "a", "service_name": "nova-compute",
+             "span_kind": "CLIENT", "operation_name": "spawn",
+             "timestamp": "12:00:05", "duration_ms": "8000", "status": "OK"},
+            {"span_id": "c", "parent_span_id": "b", "service_name": "proton",
+             "span_kind": "CLIENT", "operation_name": "setup_network",
+             "timestamp": "12:00:10", "duration_ms": "1200", "status": "OK"},
+        ]
+        lines = _build_span_tree(spans)
+        assert len(lines) == 3
+        # Verify indentation: root no indent, child 2, grandchild 4
+        assert not lines[0].startswith(" ")
+        assert lines[1].startswith("  ")
+        assert lines[2].startswith("    ")
+
+    def test_build_span_tree_empty(self):
+        lines = _build_span_tree([])
+        assert lines == []
+
+    def test_build_span_tree_no_root(self):
+        spans = [
+            {"span_id": "b", "parent_span_id": "orphan", "service_name": "lost",
+             "span_kind": "INTERNAL", "operation_name": "orphan",
+             "timestamp": "12:00:01", "duration_ms": "100", "status": "OK"},
+        ]
+        lines = _build_span_tree(spans)
+        assert lines == []

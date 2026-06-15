@@ -217,6 +217,57 @@ def _build_supplement_sql(
     )
 
 
+def _build_trace_tree_sql(trace_id: str) -> str:
+    """Build SQL to fetch all spans for a trace_id."""
+    return (
+        "SELECT trace_id, span_id, parent_span_id, service_name, "
+        "       operation_name, status, duration_ms, timestamp, span_kind "
+        "FROM logs.traces "
+        f"PREWHERE trace_id = '{_escape_sql_string(trace_id)}' "
+        "ORDER BY timestamp ASC"
+    )
+
+
+def _build_span_tree(
+    spans: List[Dict[str, Any]],
+) -> List[str]:
+    """
+    Reconstruct a trace tree from span parent_span_id relationships.
+
+    Returns indented text lines representing the call tree.
+    """
+    # Index spans by span_id
+    span_index: Dict[str, Dict[str, Any]] = {}
+    children: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    for span in spans:
+        sid = _as_str(span.get("span_id"))
+        pid = _as_str(span.get("parent_span_id"))
+        span_index[sid] = span
+        children[pid].append(span)
+
+    def _recurse(parent_id: str, depth: int) -> List[str]:
+        lines: List[str] = []
+        for span in children.get(parent_id, []):
+            indent = "  " * depth
+            s_id = _as_str(span.get("span_id"))
+            svc = _as_str(span.get("service_name"))
+            kind = _as_str(span.get("span_kind"))
+            op = _as_str(span.get("operation_name"))
+            ts = _as_str(span.get("timestamp"))
+            dur = _as_str(span.get("duration_ms"))
+            status = _as_str(span.get("status"))
+            status_tag = f" [{status}]" if status in ("ERROR", "STATUS_CODE_ERROR") else ""
+            lines.append(
+                f"{indent}{svc} [{kind}] {op} "
+                f"({ts}, {dur}ms){status_tag}"
+            )
+            lines.extend(_recurse(s_id, depth + 1))
+        return lines
+
+    return _recurse("", 0)
+
+
 @register_skill
 class BusinessChainAnalyzerSkill(DiagnosticSkill):
     """
@@ -361,5 +412,24 @@ class BusinessChainAnalyzerSkill(DiagnosticSkill):
                 parse_hints={"extract": ["service_name"]},
             )
         )
+
+        # ── Step 4: trace-tree-rebuild (only if trace_id available) ────────
+        if trace_id:
+            trace_tree_sql = _build_trace_tree_sql(trace_id)
+            steps.append(
+                SkillStep(
+                    step_id="bca-trace-tree",
+                    title="Trace 调用树重建",
+                    command_spec=_clickhouse_query(trace_tree_sql, timeout_s=45),
+                    purpose="从 logs.traces 的 parent_span_id 重建服务调用树",
+                    depends_on=["bca-service-discovery-ch1"],
+                    parse_hints={
+                        "extract": [
+                            "trace_id", "span_id", "parent_span_id",
+                            "service_name", "operation_name", "duration_ms",
+                        ],
+                    },
+                )
+            )
 
         return steps
