@@ -432,4 +432,36 @@ class BusinessChainAnalyzerSkill(DiagnosticSkill):
                 )
             )
 
+        # ── Step 5: chain-analyze — LLM analysis step ─────────────────
+        chain_prompt = _as_str(context.chain_analysis_prompt) or DEFAULT_CHAIN_PROMPT
+        time_window_str = f"{ew_start} ~ {ew_end}"
+        req_info = os_request_id or "N/A"
+        trace_info = trace_id or "N/A"
+
+        steps.append(
+            SkillStep(
+                step_id="bca-chain-analyze",
+                title="全业务链分析报告生成",
+                command_spec=_generic_exec(
+                    f"echo 'Business chain analysis will be computed by the LLM "
+                    f"based on Steps 1-4 results. "
+                    f"Time window: {time_window_str}, "
+                    f"req-xxx: {req_info}, trace_id: {trace_info}'",
+                    timeout_s=5,
+                ),
+                purpose="基于 Steps 1-4 收集的日志数据，生成全业务链分析文字报告",
+                depends_on=[
+                    "bca-anchor-resolve",
+                    "bca-service-discovery-ch1",
+                    "bca-service-discovery-ch2",
+                    "bca-service-discovery-ch3",
+                ]
+                + (["bca-trace-tree"] if trace_id else []),
+                parse_hints={
+                    "chain_analysis": True,
+                    "chain_analysis_prompt": chain_prompt,
+                },
+            )
+        )
+
         return steps

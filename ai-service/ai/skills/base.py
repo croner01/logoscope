@@ -40,6 +40,8 @@ class SkillContext:
     namespace: str = "islap"
     previous_observations: List[Dict[str, Any]] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
+    # Configurable prompt for business chain analysis (overrides DEFAULT_CHAIN_PROMPT)
+    chain_analysis_prompt: str = ""
 
     # ── Cross-component correlation fields (Phase 2) ──────────────────────────
     # OpenStack X-Request-ID (req-xxxxxxxx-xxxx-...) or generic request_id
@@ -102,6 +104,10 @@ class SkillContext:
             data_flow=_as_list(safe.get("data_flow")),
             evidence_window_start=_as_str(safe.get("evidence_window_start", "")),
             evidence_window_end=_as_str(safe.get("evidence_window_end", "")),
+            chain_analysis_prompt=_as_str(
+                safe.get("chain_analysis_prompt")
+                or (safe.get("extra") or {}).get("chain_analysis_prompt", "")
+            ),
             source_target=(
                 safe.get("source_target")
                 if isinstance(safe.get("source_target"), dict)

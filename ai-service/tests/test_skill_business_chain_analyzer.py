@@ -252,3 +252,28 @@ class TestTraceTreeRebuild:
         ]
         lines = _build_span_tree(spans)
         assert lines == []
+
+
+class TestChainAnalyze:
+    def test_default_prompt_has_required_sections(self):
+        assert "业务链全貌" in DEFAULT_CHAIN_PROMPT
+        assert "每个环节的行为" in DEFAULT_CHAIN_PROMPT
+        assert "错误/异常定位" in DEFAULT_CHAIN_PROMPT
+        assert "瓶颈分析" in DEFAULT_CHAIN_PROMPT
+        assert "缺失环节" in DEFAULT_CHAIN_PROMPT
+        assert "{time_window}" in DEFAULT_CHAIN_PROMPT
+        assert "{trace_tree}" in DEFAULT_CHAIN_PROMPT
+        assert "{service_logs}" in DEFAULT_CHAIN_PROMPT
+
+    def test_plan_steps_includes_analyze_step(self, skill):
+        steps = skill.plan_steps(_ctx())
+        step_ids = [s.step_id for s in steps]
+        assert "bca-chain-analyze" in step_ids
+
+    def test_plan_steps_analyze_step_has_parse_hints(self, skill):
+        steps = skill.plan_steps(_ctx())
+        for step in steps:
+            if step.step_id == "bca-chain-analyze":
+                assert step.parse_hints.get("chain_analysis") is True
+                assert "chain_analysis_prompt" in step.parse_hints
+                assert DEFAULT_CHAIN_PROMPT in step.parse_hints["chain_analysis_prompt"]
