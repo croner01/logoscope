@@ -162,10 +162,31 @@ class BusinessChainAnalyzerSkill(DiagnosticSkill):
         ts = _as_str(context.log_timestamp)
 
         # Derive time window from context
+        _TW_FALLBACK_MINUTES = 5
         ew_start = _as_str(context.evidence_window_start)
         ew_end = _as_str(context.evidence_window_end)
         if not ew_start or not ew_end:
-            ew_start = ew_end = ts
+            if ts:
+                # Expand single timestamp to ±5min window
+                try:
+                    from datetime import datetime, timedelta
+                    clean_ts = ts.replace("Z", "+00:00").replace("T", " ")
+                    if "T" not in ts and " " not in ts:
+                        raise ValueError("unrecognized timestamp format")
+                    dt = datetime.fromisoformat(clean_ts)
+                    fmt = "%Y-%m-%d %H:%M:%S"
+                    ew_start = (dt - timedelta(minutes=_TW_FALLBACK_MINUTES)).strftime(fmt)
+                    ew_end = (dt + timedelta(minutes=_TW_FALLBACK_MINUTES)).strftime(fmt)
+                except Exception:
+                    # Fallback: use as-is (SQL BETWEEN will be narrow)
+                    ew_start = ew_end = ts
+                logger.info(
+                    "No evidence_window; expanded log_timestamp=%s "
+                    "to ±%dmin window: %s ~ %s",
+                    ts, _TW_FALLBACK_MINUTES, ew_start, ew_end,
+                )
+            else:
+                logger.info("No time window available; anchor query may return no results")
 
         anchor_sql = _build_anchor_resolve_sql(
             trace_id=trace_id,

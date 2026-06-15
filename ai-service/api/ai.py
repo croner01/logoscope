@@ -76,6 +76,7 @@ from ai.followup_orchestration_helpers import (
 )
 from ai.followup_v2_adapter import run_followup_v2_adapter
 from ai.agent_runtime import event_protocol, get_agent_runtime_service
+from ai.agent_runtime.models import build_id
 from ai.agent_runtime.exec_client import (
     ExecServiceClientError,
     execute_command as execute_controlled_command,
@@ -3552,6 +3553,7 @@ def _build_llm_runtime_status() -> Dict[str, Any]:
         os.getenv("LOCAL_MODEL_API_BASE")
         or os.getenv("LOCAL_MODEL_BASE_URL")
         or os.getenv("LLM_API_BASE")
+        or os.getenv("ANTHROPIC_API_BASE")
         or ""
     ).strip()
 
@@ -3762,6 +3764,17 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """将任意值转为布尔值。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _as_list(value: Any) -> List[Any]:

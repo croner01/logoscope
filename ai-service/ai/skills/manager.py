@@ -252,8 +252,8 @@ class SkillManager:
                 continue
             if not os.path.isdir(dir_path):
                 continue
-            for name in os.listdir(dir_path):
-                item_path = os.path.join(dir_path, name)
+            for entry in os.listdir(dir_path):
+                item_path = os.path.join(dir_path, entry)
                 adapter = self._get_adapter(item_path)
                 if adapter is None:
                     continue

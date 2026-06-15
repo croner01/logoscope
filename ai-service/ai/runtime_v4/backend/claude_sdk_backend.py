@@ -60,6 +60,11 @@ def _api_key() -> str:
     return key
 
 
+def _api_base_url() -> str:
+    """返回自定义 Anthropic API base URL（用于兼容 DeepSeek 等第三方 API）。"""
+    return _as_str(os.getenv("ANTHROPIC_API_BASE"))
+
+
 # ── Skill → Tool definitions ──────────────────────────────────────────────
 
 def _load_skills_as_tools(skill_names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
@@ -199,7 +204,8 @@ async def _run_claude_loop(
     """Run the Claude agent loop: plan → tool_call → observe → continue → done."""
     import anthropic
 
-    client = anthropic.AsyncAnthropic(api_key=_api_key())
+    base_url = _api_base_url()
+    client = anthropic.AsyncAnthropic(api_key=_api_key(), base_url=base_url) if base_url else anthropic.AsyncAnthropic(api_key=_api_key())
     tools = _load_skills_as_tools()
     system_prompt = _build_system_prompt(request)
 

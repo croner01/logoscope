@@ -64,8 +64,8 @@ def _build_skill_context_from_state(state: InnerGraphState):
 def _get_skill_by_name(name: str):
     """Retrieve a registered skill instance by name.  Returns None on miss."""
     try:
-        from ai.skills.registry import get_registry
-        registry = get_registry()
+        from ai.skills.registry import get_skill_registry
+        registry = get_skill_registry()
         return registry.get(name)
     except Exception:
         logger.debug("Skill registry lookup failed for %r", name)

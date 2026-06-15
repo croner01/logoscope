@@ -470,6 +470,7 @@ class ClaudeProvider(BaseLLMProvider):
     def __init__(self, config: LLMConfig):
         super().__init__(config)
         self.api_key = config.api_key or os.getenv("ANTHROPIC_API_KEY")
+        self.api_base = config.api_base or os.getenv("ANTHROPIC_API_BASE") or ""
         self._client = None
 
     async def _get_client(self):
@@ -477,10 +478,13 @@ class ClaudeProvider(BaseLLMProvider):
         if self._client is None:
             try:
                 from anthropic import AsyncAnthropic
-                self._client = AsyncAnthropic(
+                kwargs = dict(
                     api_key=self.api_key,
                     timeout=self.config.timeout,
                 )
+                if self.api_base:
+                    kwargs["base_url"] = self.api_base
+                self._client = AsyncAnthropic(**kwargs)
             except ImportError:
                 raise ImportError("请安装 anthropic: pip install anthropic")
         return self._client
@@ -514,7 +518,12 @@ class ClaudeProvider(BaseLLMProvider):
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            content = response.content[0].text
+            # 遍历 content blocks，合并所有 text block（跳过 thinking / tool_use）
+            parts: list[str] = []
+            for block in response.content:
+                if getattr(block, "type", None) == "text":
+                    parts.append(block.text or "")
+            content = "".join(parts)
             latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
             self._set_cache(cache_key, content)

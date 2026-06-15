@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai.command.compiler import CompiledCommand
+from ai.command.history import make_fingerprint
 
 import requests
 
@@ -92,7 +93,7 @@ class ToolAdapter:
             try:
                 store = self._history_store
                 if store is None:
-                    from ai.command.history import ClickHouseHistoryStore
+                    from ai.command.history import ClickHouseHistoryStore, CommandRecord
                     store = ClickHouseHistoryStore()
                 if fp:
                     store.record(CommandRecord(

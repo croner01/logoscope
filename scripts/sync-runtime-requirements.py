@@ -14,7 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_VERSIONS = {
     "aiokafka": "0.12.0",
     "aiohttp": "3.9.5",
+    "anthropic": "0.49.0",
     "clickhouse-driver": "0.2.10",
+    "pyyaml": "6.0.2",
     "fastapi": "0.104.1",
     "httpx": "0.25.2",
     "langchain-core": "0.3.10",
@@ -46,6 +48,8 @@ SERVICE_REQUIREMENTS = {
         "neo4j",
         "requests",
         "openai",
+        "anthropic",
+        "pyyaml",
         "langchain-core",
         "langgraph",
         "temporalio",

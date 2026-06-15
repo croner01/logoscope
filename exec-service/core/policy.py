@@ -32,15 +32,23 @@ BLOCKED_OPERATORS = {
     ">|",
 }
 DEFAULT_ALLOWED_HEADS = {
+    # ── Kubernetes & Cloud ──────────────────────────────────────────────
     "kubectl",
-    "curl",
+    "helm",
+    "openstack",
+    # ── Database ────────────────────────────────────────────────────────
     "clickhouse-client",
     "clickhouse",
-    "openstack",
     "psql",
     "postgres",
     "mysql",
     "mariadb",
+    # ── HTTP ────────────────────────────────────────────────────────────
+    "curl",
+    # ── Host / Service Management ───────────────────────────────────────
+    "systemctl",
+    "service",
+    # ── Text Processing (read-only) ─────────────────────────────────────
     "rg",
     "grep",
     "cat",
@@ -52,9 +60,52 @@ DEFAULT_ALLOWED_HEADS = {
     "echo",
     "pwd",
     "sed",
-    "helm",
-    "systemctl",
-    "service",
+    # ── Common Ops Diagnostic Tools (read-only) ─────────────────────────
+    "env",
+    "find",
+    "which",
+    "whoami",
+    "id",
+    "uname",
+    "hostname",
+    "uptime",
+    "date",
+    "ps",
+    "df",
+    "du",
+    "stat",
+    "file",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "diff",
+    "comm",
+    "nproc",
+    "arch",
+    "lscpu",
+    "lsblk",
+    "lspci",
+    "lsusb",
+    "dmesg",
+    "ss",
+    "netstat",
+    "nslookup",
+    "dig",
+    "host",
+    "pgrep",
+    "pidof",
+    "resolvectl",
+    "timedatectl",
+    # ── Potentially mutating (handled individually) ─────────────────────
+    "ip",
+    "sysctl",
+    "journalctl",
+    "ip6tables",
+    "iptables",
+    "chronyc",
+    "ntpq",
 }
 COMMAND_REPAIR_HEADS = tuple(sorted(DEFAULT_ALLOWED_HEADS, key=len, reverse=True))
 MAX_COMMAND_CHARS = max(24, int(os.getenv("EXEC_COMMAND_MAX_CHARS", "320")))
@@ -1788,6 +1839,25 @@ def classify_command(command: str) -> Dict[str, Any]:
             target_identity="workspace:local",
         )
 
+    if head in {
+        "env", "find", "which", "whoami", "id", "uname", "hostname",
+        "uptime", "date", "ps", "df", "du", "stat", "file",
+        "wc", "sort", "uniq", "cut", "tr", "diff", "comm",
+        "nproc", "arch", "lscpu", "lsblk", "lspci", "lsusb",
+        "dmesg", "ss", "netstat", "nslookup", "dig", "host",
+        "pgrep", "pidof", "resolvectl", "timedatectl",
+        "chronyc", "ntpq",
+    }:
+        return _read_only_meta(
+            command=normalized,
+            reason="read-only diagnostic command",
+            command_family="shell",
+            executor_type="sandbox_pod",
+            executor_profile="busybox-readonly",
+            target_kind="runtime_workspace",
+            target_identity="workspace:local",
+        )
+
     if head == "sed":
         if "-i" in parts or any(as_str(item).startswith("--in-place") for item in parts):
             return _mutating_meta(
@@ -1802,6 +1872,136 @@ def classify_command(command: str) -> Dict[str, Any]:
         return _read_only_meta(
             command=normalized,
             reason="sed read-only transform",
+            command_family="shell",
+            executor_type="sandbox_pod",
+            executor_profile="busybox-readonly",
+            target_kind="runtime_workspace",
+            target_identity="workspace:local",
+        )
+
+    if head in {"ip", "ip6tables", "iptables"}:
+        # ── ip ────────────────────────────────────────────────────────
+        #   Read-only:  addr show / route / link show / neigh / maddr / tunnel
+        #   Mutating:   link set/down/up, addr add/del, route add/del,
+        #               neigh add/del, tunnel add/del, netns add/del
+        # ── iptables / ip6tables ──────────────────────────────────────
+        #   Read-only:  -L / -S / --list / -n (numeric) / --version
+        #   Mutating:   -A / -D / -I / -R / -F / -Z / -N / -X / -P / -E / -C
+        # ──────────────────────────────────────────────────────────────
+        if head == "ip":
+            _IP_MUTATING_CMDS = {
+                "add", "del", "delete", "change", "replace",
+                "set", "up", "down", "flush",
+            }
+            _IP_MUTATING_OBJ = {"netns", "monitor", "mroute"}
+            obj = as_str(parts[1]).lower() if len(parts) > 1 else ""
+            verb = as_str(parts[2]).lower() if len(parts) > 2 else ""
+
+            is_mutating = False
+            if obj == "route" or obj == "rule":
+                # ip route / ip rule: add/del/delete/change/replace/flush
+                if verb in {"add", "del", "delete", "change", "replace", "flush"}:
+                    is_mutating = True
+            elif obj == "netns":
+                # ip netns add/del/delete/exec
+                if verb in {"add", "del", "delete", "exec"}:
+                    is_mutating = True
+            elif obj in _IP_MUTATING_OBJ:
+                is_mutating = True
+            elif verb in _IP_MUTATING_CMDS:
+                # General: ip link set, ip addr add, ip neigh del, etc.
+                is_mutating = True
+
+            if is_mutating:
+                return _mutating_meta(
+                    command=normalized,
+                    reason="ip network configuration command",
+                    command_family="shell",
+                    executor_type="privileged_sandbox_pod",
+                    executor_profile="busybox-mutating",
+                    target_kind="runtime_workspace",
+                    target_identity="workspace:local",
+                )
+            return _read_only_meta(
+                command=normalized,
+                reason="ip read-only query",
+                command_family="shell",
+                executor_type="sandbox_pod",
+                executor_profile="busybox-readonly",
+                target_kind="runtime_workspace",
+                target_identity="workspace:local",
+            )
+
+        # iptables/ip6tables: if it lists rules → read-only; otherwise → mutating
+        # This is a safe heuristic: listing is the primary read-only operation
+        low_flags = {as_str(parts[i]).lower() for i in range(1, len(parts))}
+        raw_flags = {as_str(parts[i]) for i in range(1, len(parts))}
+        has_readonly = bool(
+            "-L" in raw_flags or "--list" in low_flags
+            or "--numeric" in low_flags
+            or "--version" in low_flags
+            or "-v" in raw_flags               # -v = verbose
+            or "-S" in raw_flags               # -S = show rules
+        )
+        if has_readonly:
+            return _read_only_meta(
+                command=normalized,
+                reason="iptables read-only list",
+                command_family="shell",
+                executor_type="sandbox_pod",
+                executor_profile="busybox-readonly",
+                target_kind="runtime_workspace",
+                target_identity="workspace:local",
+            )
+        return _mutating_meta(
+            command=normalized,
+            reason="iptables firewall modification",
+            command_family="shell",
+            executor_type="privileged_sandbox_pod",
+            executor_profile="busybox-mutating",
+            target_kind="runtime_workspace",
+            target_identity="workspace:local",
+        )
+
+    if head == "sysctl":
+        # -w → write (mutating); otherwise read-only
+        if "-w" in parts or any(as_str(item).startswith("--write") for item in parts):
+            return _mutating_meta(
+                command=normalized,
+                reason="sysctl write command",
+                command_family="shell",
+                executor_type="privileged_sandbox_pod",
+                executor_profile="busybox-mutating",
+                target_kind="runtime_workspace",
+                target_identity="workspace:local",
+            )
+        return _read_only_meta(
+            command=normalized,
+            reason="sysctl read-only",
+            command_family="shell",
+            executor_type="sandbox_pod",
+            executor_profile="busybox-readonly",
+            target_kind="runtime_workspace",
+            target_identity="workspace:local",
+        )
+
+    if head == "journalctl":
+        # --flush / --rotate / --vacuum-* → mutating; otherwise read-only
+        _JOURNALCTL_MUTATING = {"--flush", "--rotate", "--vacuum-time", "--vacuum-size", "--vacuum-files"}
+        for item in parts:
+            if any(item.startswith(prefix) for prefix in _JOURNALCTL_MUTATING):
+                return _mutating_meta(
+                    command=normalized,
+                    reason="journalctl maintenance command",
+                    command_family="shell",
+                    executor_type="privileged_sandbox_pod",
+                    executor_profile="busybox-mutating",
+                    target_kind="runtime_workspace",
+                    target_identity="workspace:local",
+                )
+        return _read_only_meta(
+            command=normalized,
+            reason="journalctl read-only",
             command_family="shell",
             executor_type="sandbox_pod",
             executor_profile="busybox-readonly",

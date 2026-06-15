@@ -14,6 +14,8 @@ clickhouse-connect==0.6.10
 neo4j==5.14.0
 requests==2.31.0
 openai==1.63.0
+anthropic==0.49.0
+pyyaml==6.0.2
 langchain-core==0.3.10
 
 # 监控指标

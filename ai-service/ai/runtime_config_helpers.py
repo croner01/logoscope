@@ -182,6 +182,8 @@ def _apply_llm_runtime_update(normalized: Dict[str, Any]) -> None:
 
     if provider == "local":
         _set_env_if_present("LOCAL_MODEL_API_BASE", normalized["api_base"])
+    elif provider == "claude":
+        _set_env_if_present("ANTHROPIC_API_BASE", normalized["api_base"])
 
     if normalized["clear_api_key"]:
         for key in [
@@ -377,6 +379,7 @@ def _persist_llm_runtime_to_deployment_file(
         "LLM_MODEL": _as_str(normalized.get("model")),
         "LLM_API_BASE": _as_str(normalized.get("api_base")),
         "LOCAL_MODEL_API_BASE": _as_str(normalized.get("api_base")) if _as_str(normalized.get("provider")) == "local" else "",
+        "ANTHROPIC_API_BASE": _as_str(normalized.get("api_base")) if _as_str(normalized.get("provider")) == "claude" else "",
         "LOCAL_MODEL_PATH": _as_str(normalized.get("local_model_path")),
     }
     return _persist_env_updates_to_deployment_file(updates, deployment_file)
