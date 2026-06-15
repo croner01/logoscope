@@ -7,6 +7,7 @@ first so the registry has them registered before rule-based matching runs.
 # ── Phase 1 & 2: always-injected foundation skills ───────────────────────────
 from ai.skills.builtin import log_flow_analyzer  # noqa: F401  priority=100
 from ai.skills.builtin import cross_component_correlation  # noqa: F401  priority=90
+from ai.skills.builtin import business_chain_analyzer  # noqa: F401  priority=85
 
 # ── Domain-specific diagnostic skills ────────────────────────────────────────
 from ai.skills.builtin import k8s_pod  # noqa: F401
