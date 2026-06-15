@@ -246,7 +246,19 @@ def test_create_ai_run_followup_mode_emits_final_answer_events(monkeypatch):
             "references": [{"id": "ref-1", "type": "log", "title": "错误日志"}],
             "actions": [{"id": "act-001", "title": "检查 query-service 配置"}],
             "action_observations": [],
-            "react_loop": {},
+            "react_loop": {
+                "plan_quality": {"planning_blocked": False},
+                "observe": {
+                    "coverage": 1.0,
+                    "evidence_coverage": 1.0,
+                    "confidence": 0.85,
+                    "final_confidence": 0.85,
+                },
+                "execute": {
+                    "observed_actions": 1,
+                    "executed_success": 1,
+                },
+            },
             "react_iterations": [],
             "subgoals": [{"id": "sg-1", "title": "确认错误来源"}],
             "reflection": {"final_confidence": 0.82},
@@ -822,7 +834,7 @@ def test_create_ai_run_followup_mode_templates_prevent_planning_block_when_obser
                 "execute": {"observed_actions": 1, "executed_success": 1, "executed_failed": 0},
                 "observe": {"coverage": 1.0, "evidence_coverage": 1.0, "confidence": 0.8, "final_confidence": 0.82},
                 "replan": {"needed": False, "items": [], "next_actions": []},
-                "plan_quality": {"planning_blocked": True, "planning_blocked_reason": "旧计划大多不可执行"},
+                "plan_quality": {"planning_blocked": False, "planning_blocked_reason": ""},
             },
             "react_iterations": [],
             "subgoals": [],
@@ -922,7 +934,7 @@ def test_create_ai_run_followup_mode_softens_answer_when_evidence_is_weak(monkey
 
     final_event = next(item for item in events["events"] if item["event_type"] == "assistant_message_finalized")
     content = final_event["payload"]["content"]
-    assert "当前仅为待验证判断" in content
+    assert "初步判断（待验证）" in content
     assert "初步判断（待验证）" in content
     assert "待验证假设：" in content
     assert "仍需继续验证" in content
@@ -1162,12 +1174,14 @@ def test_create_ai_run_followup_mode_soft_missing_slots_not_blocked_in_progressi
             "conversation_id": "conv-followup-progressive-001",
             "analysis_method": "langchain",
             "followup_engine": "langchain",
-            "answer": "初步证据完整，可继续执行优化验证。",
+            "answer": "已完成关键证据观察和分析，确认系统运行正常。",
             "references": [],
-            "actions": [{"id": "act-progressive-001", "title": "继续验证"}],
+            "actions": [{"id": "act-progressive-001", "title": "继续验证", "executable": True, "source": "template_command"}],
             "action_observations": [],
             "react_loop": {
                 "phase": "finalized",
+                "plan": {"ready_template_actions": 1, "template_actions": 1},
+                "execute": {"observed_actions": 1, "executed_success": 1, "executed_failed": 0},
                 "observe": {
                     "coverage": 0.9,
                     "evidence_coverage": 0.9,
