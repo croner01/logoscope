@@ -148,7 +148,7 @@ async def _execute_tool_call(
     ToolAdapter → exec-service pipeline.
     """
     from ai.runtime.tools import ToolAdapter
-    from ai.command.spec import CommandSpec, ToolType, CommandType
+    from ai.command.normalizer import normalize_command_spec
     from ai.skills.loader import load_skill_steps, resolve_skill_path
     from ai.skills.base import SkillContext
 
@@ -169,13 +169,22 @@ async def _execute_tool_call(
             adapter = ToolAdapter()
             for step in steps:
                 spec = step.command_spec
-                command_spec = CommandSpec(
-                    tool=ToolType(spec.get("tool", "generic_exec")),
-                    command=spec.get("command", ""),
-                    target_kind=_as_str(spec.get("target_kind", "k8s_cluster")),
-                    target_identity=_as_str(spec.get("target_identity", "")),
-                    timeout_seconds=int(spec.get("timeout_seconds", 20)),
-                )
+                try:
+                    # Use normalize_command_spec for alias mapping
+                    # (kubectl_clickhouse_query → clickhouse_query, etc.)
+                    command_spec = normalize_command_spec(
+                        {
+                            "tool": spec.get("tool", "generic_exec"),
+                            "command": spec.get("command", ""),
+                            "target_kind": _as_str(spec.get("target_kind", "k8s_cluster")),
+                            "target_identity": _as_str(spec.get("target_identity", "")),
+                            "timeout_seconds": int(spec.get("timeout_seconds", 20)),
+                        }
+                    )
+                except Exception:
+                    # Fallback: skip steps with invalid tool/command spec
+                    outputs.append(f"### {step.title}\n执行失败: 无效的命令规范 (tool={spec.get('tool')})")
+                    continue
                 try:
                     result = await adapter.execute(
                         command_spec,
@@ -317,29 +326,37 @@ class ClaudeSdkBackend(RuntimeBackend):
         async def _run():
             return await _run_claude_loop(request)
 
+        # Check if we're already in an event loop
         try:
             asyncio.get_running_loop()
-            # Already in an event loop — run in a new thread to avoid nesting
-            result: List[RuntimeBackendResult] = []
-
-            def _target():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    r = new_loop.run_until_complete(_run())
-                    result.append(r)
-                finally:
-                    new_loop.close()
-
-            thread = threading.Thread(target=_target, daemon=True)
-            thread.start()
-            thread.join(timeout=300)
-            if not result:
-                raise RuntimeError("Claude SDK backend timed out or failed to start")
-            return result[0]
         except RuntimeError:
             # No running event loop — safe to asyncio.run()
             return asyncio.run(_run())
+
+        # Already in an event loop — run in a new thread to avoid nesting
+        result: List[RuntimeBackendResult] = []
+        thread_error: List[Exception] = []
+
+        def _target():
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                r = new_loop.run_until_complete(_run())
+                result.append(r)
+            except Exception as exc:
+                thread_error.append(exc)
+            finally:
+                new_loop.close()
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join(timeout=300)
+
+        if thread_error:
+            raise RuntimeError(f"Claude SDK backend failed: {thread_error[0]}") from thread_error[0]
+        if not result:
+            raise RuntimeError("Claude SDK backend timed out or failed to start")
+        return result[0]
 
 
 __all__ = ["ClaudeSdkBackend"]

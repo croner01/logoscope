@@ -102,6 +102,7 @@ async def create_command_run(
     timeout_seconds: int = 20,
     target_kind: str = "",
     target_identity: str = "",
+    target_cluster_id: str = "",
 ) -> Dict[str, Any]:
     safe_ticket = _as_str(approval_token).strip() or _as_str(confirmation_ticket)
     payload = {
@@ -120,6 +121,7 @@ async def create_command_run(
         "timeout_seconds": _as_int(timeout_seconds, 20),
         "target_kind": _as_str(target_kind),
         "target_identity": _as_str(target_identity),
+        "target_cluster_id": _as_str(target_cluster_id),
     }
     return await _run_blocking(
         _request_json,
@@ -147,6 +149,7 @@ async def execute_command(
     timeout_seconds: int = 20,
     target_kind: str = "",
     target_identity: str = "",
+    target_cluster_id: str = "",
 ) -> Dict[str, Any]:
     safe_ticket = _as_str(approval_token).strip() or _as_str(confirmation_ticket)
     payload = {
@@ -165,6 +168,7 @@ async def execute_command(
         "timeout_seconds": _as_int(timeout_seconds, 20),
         "target_kind": _as_str(target_kind),
         "target_identity": _as_str(target_identity),
+        "target_cluster_id": _as_str(target_cluster_id),
     }
     return await _run_blocking(
         _request_json,
@@ -185,6 +189,7 @@ async def precheck_command(
     timeout_seconds: int = 10,
     target_kind: str = "",
     target_identity: str = "",
+    target_cluster_id: str = "",
 ) -> Dict[str, Any]:
     payload = {
         "session_id": _as_str(session_id),
@@ -194,6 +199,7 @@ async def precheck_command(
         "purpose": _as_str(purpose),
         "target_kind": _as_str(target_kind),
         "target_identity": _as_str(target_identity),
+        "target_cluster_id": _as_str(target_cluster_id),
     }
     return await _run_blocking(
         _request_json,

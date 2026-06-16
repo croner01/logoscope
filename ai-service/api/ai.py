@@ -1856,6 +1856,44 @@ async def _emit_followup_runtime_event(
         )
 
 
+def _resolve_followup_target_cluster_id(
+    *,
+    target_kind: str,
+    target_identity: str,
+    command_spec_target_cluster_id: str,
+) -> str:
+    """解析命令应路由到的 target_cluster_id。
+
+    优先级：
+    1. command_spec 中显式指定的 target_cluster_id（V4 生成命令）
+    2. 如果为空但目标是远程 k8s_cluster，从 AI_RUNTIME_V4_REMOTE_TARGETS_JSON 中获取
+    """
+    if command_spec_target_cluster_id:
+        return command_spec_target_cluster_id
+
+    safe_kind = _as_str(target_kind).strip().lower()
+    safe_identity = _as_str(target_identity).strip().lower()
+    if safe_kind == "k8s_cluster" and safe_identity and not safe_identity.endswith(":islap"):
+        raw = _as_str(os.environ.get("AI_RUNTIME_V4_REMOTE_TARGETS_JSON", "")).strip()
+        if raw:
+            try:
+                targets = json.loads(raw)
+                if isinstance(targets, list):
+                    for t in targets:
+                        if (
+                            isinstance(t, dict)
+                            and _as_str(t.get("target_kind")).strip().lower() == "k8s_cluster"
+                        ):
+                            kc = t.get("credential_scope")
+                            if isinstance(kc, dict):
+                                cid = _as_str(kc.get("kubeconfig_name")).strip()
+                                if cid:
+                                    return cid
+            except Exception:
+                pass
+    return ""
+
+
 async def _run_followup_runtime_task(
     runtime_service: Any,
     run_id: str,
@@ -1939,6 +1977,12 @@ async def _run_followup_runtime_task(
                 cs_args = _cs_args_raw if isinstance(_cs_args_raw, dict) else {}
                 target_kind = _as_str(cs_args.get("target_kind", "k8s_cluster"))
                 target_identity = _as_str(cs_args.get("target_identity", "namespace:islap"))
+                cs_target_cluster_id = _as_str(cs_args.get("target_cluster_id"))
+                target_cluster_id = _resolve_followup_target_cluster_id(
+                    target_kind=target_kind,
+                    target_identity=target_identity,
+                    command_spec_target_cluster_id=cs_target_cluster_id,
+                )
 
                 # Precheck to classify the command
                 precheck = await precheck_controlled_command(
@@ -1949,6 +1993,7 @@ async def _run_followup_runtime_task(
                     purpose=purpose,
                     target_kind=target_kind,
                     target_identity=target_identity,
+                    target_cluster_id=target_cluster_id,
                 )
                 precheck_status = _as_str(precheck.get("status")).lower()
                 permission_blocked = precheck_status == "permission_required"
@@ -1979,6 +2024,7 @@ async def _run_followup_runtime_task(
                     timeout_seconds=int(float(_as_str(cs_args.get("timeout_s", "20")) or "20")),
                     target_kind=target_kind,
                     target_identity=target_identity,
+                    target_cluster_id=target_cluster_id,
                 )
 
                 run_data = result.get("run") if isinstance(result.get("run"), dict) else result
@@ -5812,6 +5858,22 @@ async def execute_followup_command(
             remaining_seconds = max(1, (remaining_ms + 999) // 1000)
             safe_timeout = max(3, min(safe_timeout, int(remaining_seconds)))
 
+        # 从 command_spec 提取目标集群路由参数
+        _spec_target_kind = ""
+        _spec_target_identity = ""
+        _spec_target_cluster_id = ""
+        if isinstance(safe_command_spec, dict):
+            _args = safe_command_spec.get("args")
+            if isinstance(_args, dict):
+                _spec_target_kind = _as_str(_args.get("target_kind"))
+                _spec_target_identity = _as_str(_args.get("target_identity"))
+                _spec_target_cluster_id = _as_str(_args.get("target_cluster_id"))
+        cmd_target_cluster_id = _resolve_followup_target_cluster_id(
+            target_kind=_spec_target_kind,
+            target_identity=_spec_target_identity,
+            command_spec_target_cluster_id=_spec_target_cluster_id,
+        )
+
         if not bool(request.confirmed):
             precheck = await precheck_controlled_command(
                 session_id=session_id,
@@ -5820,6 +5882,9 @@ async def execute_followup_command(
                 command=raw_command,
                 purpose=purpose,
                 timeout_seconds=min(20, safe_timeout),
+                target_kind=_spec_target_kind,
+                target_identity=_spec_target_identity,
+                target_cluster_id=cmd_target_cluster_id,
             )
             precheck_status = _as_str(precheck.get("status")).lower()
             precheck_command_type = _as_str(precheck.get("command_type")).lower()
@@ -5876,6 +5941,7 @@ async def execute_followup_command(
                 command=raw_command,
                 purpose=purpose,
                 timeout_seconds=min(20, safe_timeout),
+                target_cluster_id=cmd_target_cluster_id,
             )
             if _as_str(precheck.get("command_type")).lower() == "repair":
                 return {
@@ -5902,6 +5968,7 @@ async def execute_followup_command(
             elevated=bool(request.elevated),
             confirmation_ticket=_as_str(request.confirmation_ticket),
             timeout_seconds=safe_timeout,
+            target_cluster_id=cmd_target_cluster_id,
         )
         mapped = _map_followup_exec_response(
             session_id=session_id,
