@@ -47,11 +47,34 @@ from ai.langchain_runtime import run_followup_langchain
 from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
 from ai.runtime.bridge import unified_diagnosis_bridge, _is_unified_engine_enabled
 from ai.knowledge_provider import get_knowledge_gateway, shutdown_knowledge_gateway, reload_knowledge_gateway
-from ai.followup_prompt_helpers import (
+from ai.command._v1_helpers.context_helpers import (
+    _build_context_pills,
+    _build_followup_references,
+)
+from ai.command._v1_helpers.react_helpers import (
+    _build_followup_react_memory,
+    _merge_reflection_with_react_memory,
+)
+from ai.command._v1_helpers.persistence_helpers import (
+    _persist_followup_messages_and_history,
+    _update_followup_session_summary,
+)
+from ai.command._v1_helpers.prompt_helpers import (
     _build_followup_planner_prompt,
     _build_followup_reflection,
     _build_followup_response_instruction,
     _compact_conversation_for_prompt,
+)
+from ai.command._v1_helpers.session_helpers import (
+    _build_followup_history,
+    _ensure_followup_analysis_session,
+    _seed_followup_runtime_history_session,
+    _upsert_followup_user_message,
+)
+from ai.command._v1_helpers.runtime_helpers import (
+    _build_followup_long_term_memory,
+    _build_followup_runtime_thread_memory,
+    _resolve_followup_answer_bundle,
 )
 from ai.followup_planning_helpers import (
     _append_followup_react_summary,
@@ -60,21 +83,6 @@ from ai.followup_planning_helpers import (
     _build_followup_react_loop,
     _build_followup_subgoals,
     _prioritize_followup_actions_with_react_memory,
-)
-from ai.followup_react_helpers import (
-    _build_followup_react_memory,
-    _merge_reflection_with_react_memory,
-)
-from ai.followup_session_helpers import (
-    _build_followup_history,
-    _ensure_followup_analysis_session,
-    _seed_followup_runtime_history_session,
-    _upsert_followup_user_message,
-)
-from ai.followup_runtime_helpers import (
-    _build_followup_long_term_memory,
-    _build_followup_runtime_thread_memory,
-    _resolve_followup_answer_bundle,
 )
 from ai.followup_orchestration_helpers import (
     _emit_followup_event,
@@ -93,12 +101,6 @@ from ai.agent_runtime.exec_client import (
 )
 from ai.agent_runtime.user_question_adapter import build_business_question
 from ai.agent_runtime.status import is_terminal_run_status
-from ai.followup_context_helpers import _build_context_pills, _build_followup_references
-# NOTE: followup_command_spec functions imported from ai.command._followup_compat above
-from ai.followup_persistence_helpers import (
-    _persist_followup_messages_and_history,
-    _update_followup_session_summary,
-)
 from ai.project_knowledge_pack import select_project_knowledge
 from ai.kb_route_helpers import (
     _build_kb_search_request_context,

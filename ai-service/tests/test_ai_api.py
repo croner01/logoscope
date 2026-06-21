@@ -1976,7 +1976,8 @@ class TestFollowUpCommandExecuteEndpoint:
     @pytest.fixture(autouse=True)
     def _patch_controlled_exec_gateway(self):
         """追问命令接口统一走受控执行网关；单测中 mock 网关返回。"""
-        from ai.followup_command import _normalize_followup_command_line, _resolve_followup_command_meta
+        from ai.command._followup_compat import resolve_command_meta as _resolve_followup_command_meta
+        from ai.command.line_normalizer import normalize_command_line as _normalize_followup_command_line
 
         ticket_store: dict[str, dict[str, str]] = {}
         run_seq = {"value": 0}
