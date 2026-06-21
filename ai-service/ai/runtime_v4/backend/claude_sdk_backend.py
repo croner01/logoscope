@@ -12,8 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from ai.agent_runtime import event_protocol
 from ai.runtime_v4.backend.base import RuntimeBackend, RuntimeBackendRequest, RuntimeBackendResult
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,11 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 # ── Configuration helpers ─────────────────────────────────────────────────
 
 def _model_name() -> str:
-    return _as_str(os.getenv("CLAUDE_SDK_MODEL"), "claude-sonnet-4-20250514")
+    return (
+        _as_str(os.getenv("CLAUDE_SDK_MODEL"))
+        or _as_str(os.getenv("LLM_MODEL"))
+        or "claude-sonnet-4-20250514"
+    )
 
 
 def _max_tokens() -> int:
@@ -52,17 +57,68 @@ def _max_turns() -> int:
 
 
 def _api_key() -> str:
-    key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
+    """返回符合当前 provider 的 API key。
+
+    优先级规则：
+    - 当使用 DeepSeek（模型名以 ``deepseek`` 开头或 LLM_PROVIDER=deepseek）
+      时：DEEPSEEK_API_KEY → ANTHROPIC_API_KEY → CLAUDE_SDK_API_KEY → LLM_API_KEY
+    - 其他情况：ANTHROPIC_API_KEY → CLAUDE_SDK_API_KEY → DEEPSEEK_API_KEY → LLM_API_KEY
+
+    Secret 中可能同时存在 ANTHROPIC_API_KEY（旧）和 DEEPSEEK_API_KEY（新），
+    如果不区分 provider 优先级，旧 ANTHROPIC_API_KEY 会一直劫持新 DeepSeek key。
+    """
+    provider = _as_str(os.getenv("LLM_PROVIDER"))
+    model = _model_name()
+    using_deepseek = model.startswith("deepseek") or provider == "deepseek"
+
+    if using_deepseek:
+        key = _as_str(os.getenv("DEEPSEEK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("LLM_API_KEY"))
+    else:
+        key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("DEEPSEEK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("LLM_API_KEY"))
     if not key:
-        key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
-    if not key:
-        raise RuntimeError("Claude SDK backend requires ANTHROPIC_API_KEY or CLAUDE_SDK_API_KEY")
+        raise RuntimeError(
+            "Claude SDK backend 需要设置 ANTHROPIC_API_KEY、CLAUDE_SDK_API_KEY、"
+            "DEEPSEEK_API_KEY 或 LLM_API_KEY 其中一个环境变量"
+        )
     return key
 
 
 def _api_base_url() -> str:
-    """返回自定义 Anthropic API base URL（用于兼容 DeepSeek 等第三方 API）。"""
-    return _as_str(os.getenv("ANTHROPIC_API_BASE"))
+    """返回自定义 API base URL。
+
+    SDK 内部会自动追加 ``/v1/messages`` 路径，所以此处返回的 base URL
+    **不能**包含 ``/v1`` 后缀，否则会拼出 ``/v1/v1/messages`` 双路径。
+
+    优先级：
+    1. ANTHROPIC_API_BASE（由 Settings 页面设置或手动配置）
+    2. LLM_API_BASE（Settings 页面的通用 API Base 字段）
+    3. 模型名以 ``deepseek`` 开头时自动使用 DeepSeek 兼容端点
+    """
+    url = _as_str(os.getenv("ANTHROPIC_API_BASE"))
+    if not url:
+        url = _as_str(os.getenv("LLM_API_BASE"))
+    if not url:
+        model = _model_name()
+        if model.startswith("deepseek"):
+            url = "https://api.deepseek.com/anthropic"
+    # 去掉可能残留的 /v1 后缀（SDK 会自动拼接 /v1/messages）
+    if url:
+        url = url.rstrip("/")
+        if url.endswith("/v1"):
+            url = url[:-3]
+    return url
 
 
 # ── Skill → Tool definitions ──────────────────────────────────────────────
@@ -149,6 +205,7 @@ async def _execute_tool_call(
     """
     from ai.runtime.tools import ToolAdapter
     from ai.command.normalizer import normalize_command_spec
+    from ai.command.compiler import compile_command
     from ai.skills.loader import load_skill_steps, resolve_skill_path
     from ai.skills.base import SkillContext
 
@@ -178,6 +235,7 @@ async def _execute_tool_call(
                             "command": spec.get("command", ""),
                             "target_kind": _as_str(spec.get("target_kind", "k8s_cluster")),
                             "target_identity": _as_str(spec.get("target_identity", "")),
+                            "purpose": _as_str(spec.get("purpose", "")),
                             "timeout_seconds": int(spec.get("timeout_seconds", 20)),
                         }
                     )
@@ -186,14 +244,21 @@ async def _execute_tool_call(
                     outputs.append(f"### {step.title}\n执行失败: 无效的命令规范 (tool={spec.get('tool')})")
                     continue
                 try:
+                    # Compile CommandSpec → CompiledCommand (ToolAdapter requires
+                    # CompiledCommand with .spec + .shell_command fields)
+                    compiled = compile_command(command_spec, namespace=namespace)
+                except Exception:
+                    outputs.append(f"### {step.title}\n执行失败: 无法编译命令")
+                    continue
+                try:
                     result = await adapter.execute(
-                        command_spec,
+                        compiled,
                         session_id=run_id,
                         message_id="",
                         action_id=step.step_id,
                     )
-                    out = _as_str(result.get("stdout") or result.get("output") or "")
-                    err = _as_str(result.get("stderr"))
+                    out = _as_str(result.stdout)
+                    err = _as_str(result.stderr)
                     if err:
                         out += f"\n[stderr] {err}" if out else f"[stderr] {err}"
                     outputs.append(f"### {step.title}\n```\n{out[:3000]}\n```")
@@ -207,10 +272,119 @@ async def _execute_tool_call(
 
 # ── Main loop ──────────────────────────────────────────────────────────────
 
+
+def _get_runtime_service():
+    """Get AgentRuntimeService for event emission (lazy import avoids circular deps)."""
+    try:
+        from ai.agent_runtime.service import get_agent_runtime_service
+        return get_agent_runtime_service()
+    except Exception:
+        return None
+
+
+async def _stream_llm_turn(
+    client: "anthropic.AsyncAnthropic",
+    system_prompt: str,
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    run_id: str,
+    runtime_service: Any,
+) -> Tuple[str, List[Dict[str, Any]], bool]:
+    """Stream one LLM turn, emit assistant_delta tokens, return (text, tool_blocks, is_final).
+
+    Falls back to non-streaming ``client.messages.create()`` if the streaming
+    API raises (handles DeepSeek compatibility gaps gracefully).
+    """
+    collected_text = ""
+    collected_tool_blocks: List[Dict[str, Any]] = []
+
+    # ── Try streaming first ───────────────────────────────────────────
+    try:
+        async with client.messages.stream(
+            model=_model_name(),
+            max_tokens=_max_tokens(),
+            system=system_prompt,
+            messages=messages,
+            tools=tools,
+        ) as stream:
+            async for event in stream:
+                if event.type == "content_block_start":
+                    cb = event.content_block
+                    if getattr(cb, "type", None) == "text":
+                        text = _as_str(getattr(cb, "text", ""))
+                        if text:
+                            collected_text += text
+                            if runtime_service:
+                                runtime_service.append_assistant_delta(
+                                    run_id, text=text
+                                )
+
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if getattr(delta, "type", None) == "text_delta":
+                        text = _as_str(getattr(delta, "text", ""))
+                        if text:
+                            collected_text += text
+                            if runtime_service:
+                                runtime_service.append_assistant_delta(
+                                    run_id, text=text
+                                )
+
+            # Get the complete Message for tool_use blocks
+            final_message = await stream.get_final_message()
+            for block in getattr(final_message, "content", []):
+                if getattr(block, "type", None) == "tool_use":
+                    collected_tool_blocks.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": dict(block.input or {}),
+                    })
+
+    except Exception as exc:
+        logger.warning("Streaming LLM call failed, falling back to non-streaming: %s", exc)
+        # ── Fallback: non-streaming ───────────────────────────────────
+        try:
+            response = await client.messages.create(
+                model=_model_name(),
+                max_tokens=_max_tokens(),
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+        except Exception as create_exc:
+            logger.error("Non-streaming LLM call also failed: %s", create_exc)
+            return collected_text, [], True  # treat as final to break the loop
+
+        for block in response.content:
+            if block.type == "text":
+                text = _as_str(block.text)
+                if text:
+                    collected_text += text
+                    if runtime_service:
+                        runtime_service.append_assistant_delta(run_id, text=text)
+            elif block.type == "tool_use":
+                collected_tool_blocks.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": dict(block.input or {}),
+                })
+
+    is_final = len(collected_tool_blocks) == 0
+    return collected_text, collected_tool_blocks, is_final
+
+
 async def _run_claude_loop(
     request: RuntimeBackendRequest,
 ) -> RuntimeBackendResult:
-    """Run the Claude agent loop: plan → tool_call → observe → continue → done."""
+    """Run the Claude agent loop: plan → tool_call → observe → continue → done.
+
+    Uses streaming for real-time token output (``assistant_delta`` events),
+    with per-turn fallback to non-streaming if the API does not support it.
+    Emits ``tool_call_started`` / ``tool_call_finished`` events for every
+    tool execution so the frontend can show live progress.
+    """
     import anthropic
 
     base_url = _api_base_url()
@@ -228,66 +402,84 @@ async def _run_claude_loop(
     max_turns = _max_turns()
     final_answer = ""
 
+    runtime_service = _get_runtime_service()
+
     while turn_count < max_turns:
         turn_count += 1
         logger.debug("Claude SDK turn %d/%d", turn_count, max_turns)
 
-        response = await client.messages.create(
-            model=_model_name(),
-            max_tokens=_max_tokens(),
-            system=system_prompt,
-            messages=messages,
-            tools=tools,
+        # ── Stream LLM response ──────────────────────────────────────
+        collected_text, tool_blocks, is_final = await _stream_llm_turn(
+            client, system_prompt, messages, tools,
+            request.run_id, runtime_service,
         )
 
-        # Collect assistant text
-        for block in response.content:
-            if block.type == "text":
-                text = _as_str(block.text)
-                if text:
-                    thoughts.append(text)
+        if collected_text:
+            thoughts.append(collected_text)
 
-        # Check for tool calls
-        tool_blocks = [b for b in response.content if b.type == "tool_use"]
-        if not tool_blocks:
-            # No more tool calls → done
-            for block in response.content:
-                if block.type == "text":
-                    final_answer = _as_str(block.text)
+        if is_final:
+            final_answer = collected_text
             break
 
-        # Process each tool call
+        # ── Build assistant message for history ───────────────────────
         assistant_msg: Dict[str, Any] = {"role": "assistant", "content": []}
-        for block in response.content:
-            if block.type == "text":
-                assistant_msg["content"].append({"type": "text", "text": block.text})
-            elif block.type == "tool_use":
-                assistant_msg["content"].append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
+        if collected_text:
+            assistant_msg["content"].append({"type": "text", "text": collected_text})
+        for tb in tool_blocks:
+            assistant_msg["content"].append(tb)
         messages.append(assistant_msg)
 
-        # Execute tool calls and collect results
-        for block in tool_blocks:
-            tool_name = _as_str(block.name)
-            tool_input = dict(block.input or {})
+        # ── Execute tool calls with streaming events ──────────────────
+        tool_results: List[Dict[str, Any]] = []
+        for tb in tool_blocks:
+            tool_name = _as_str(tb.get("name", ""))
+            tool_input = dict(tb.get("input", {}) or {})
             tool_calls.append({"tool_name": tool_name, "tool_args": tool_input})
 
-            logger.debug("Executing tool: %s", tool_name)
-            output = await _execute_tool_call(tool_name, tool_input, request.run_id)
+            # Emit tool_call_started
+            if runtime_service:
+                runtime_service.append_event(
+                    request.run_id,
+                    event_protocol.TOOL_CALL_STARTED,
+                    {"tool_name": tool_name, "tool_input": tool_input},
+                )
 
+            logger.debug("Executing tool: %s", tool_name)
+            try:
+                output = await _execute_tool_call(tool_name, tool_input, request.run_id)
+                success = True
+            except Exception as exc:
+                output = f"Tool execution failed: {exc}"
+                success = False
+                logger.warning("Tool %s failed: %s", tool_name, exc)
+
+            # Emit tool_call_finished
+            if runtime_service:
+                runtime_service.append_event(
+                    request.run_id,
+                    event_protocol.TOOL_CALL_FINISHED,
+                    {
+                        "tool_name": tool_name,
+                        "success": success,
+                        "output": output[:500],
+                    },
+                )
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tb.get("id", ""),
+                "content": output[:10000],
+            })
+
+        # All tool_results from the same assistant turn must be placed in a
+        # single user message.  DeepSeek's Anthropic-compatible API enforces
+        # this strictly — multiple consecutive user messages with tool_result
+        # blocks cause 400 errors:
+        #   "tool_use ids were found without tool_result blocks immediately after"
+        if tool_results:
             messages.append({
                 "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": output[:10000],
-                    }
-                ],
+                "content": tool_results,
             })
 
     return RuntimeBackendResult(
