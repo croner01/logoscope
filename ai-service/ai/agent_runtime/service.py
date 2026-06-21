@@ -34,17 +34,17 @@ from ai.agent_runtime.status import (
 from ai.agent_runtime.store import AgentRuntimeStore
 from ai.agent_runtime.timeout_recovery import attempt_timeout_recovery
 from ai.agent_runtime.user_question_adapter import build_business_question
-from ai.followup_command import (
-    _is_truthy_env,
-    _normalize_followup_command_line,
-    _repair_clickhouse_query_text,
-    _resolve_followup_command_meta,
+from ai.command._followup_compat import (
+    build_self_repair_payload,
+    compile_command_compat,
+    normalize_command_spec_compat,
+    normalize_reason_code,
+    resolve_command_meta,
 )
-from ai.followup_command_spec import (
-    build_command_spec_self_repair_payload,
-    compile_followup_command_spec,
-    normalize_followup_command_spec,
-    normalize_followup_reason_code,
+from ai.command.line_normalizer import (
+    is_truthy_env,
+    normalize_command_line,
+    repair_clickhouse_query_text,
 )
 from ai.json_dict_helpers import _parse_llm_json_dict
 from ai.llm_service import get_llm_service
@@ -70,19 +70,19 @@ def _as_list(value: Any) -> List[Any]:
 
 
 def _require_spec_for_repair_enabled() -> bool:
-    return _is_truthy_env("AI_FOLLOWUP_COMMAND_REQUIRE_SPEC_FOR_REPAIR", False)
+    return is_truthy_env("AI_FOLLOWUP_COMMAND_REQUIRE_SPEC_FOR_REPAIR", False)
 
 
 def _require_structured_actions_enabled() -> bool:
-    return _is_truthy_env("AI_RUNTIME_REQUIRE_STRUCTURED_ACTIONS", True)
+    return is_truthy_env("AI_RUNTIME_REQUIRE_STRUCTURED_ACTIONS", True)
 
 
 def _diagnosis_contract_gate_enabled() -> bool:
-    return _is_truthy_env("AI_RUNTIME_DIAGNOSIS_CONTRACT_ENFORCED", True)
+    return is_truthy_env("AI_RUNTIME_DIAGNOSIS_CONTRACT_ENFORCED", True)
 
 
 def _sql_llm_repair_enabled() -> bool:
-    return _is_truthy_env("AI_RUNTIME_SQL_LLM_REPAIR_ENABLED", True)
+    return is_truthy_env("AI_RUNTIME_SQL_LLM_REPAIR_ENABLED", True)
 
 
 _AI_RUNTIME_LAB_PROFILE = "ai_runtime_lab"
@@ -1836,7 +1836,7 @@ class AgentRuntimeService:
             return {"status": "skipped", "reason": "llm_sql_repair_disabled"}
         if not bool(runtime_options.get("use_llm", True)):
             return {"status": "skipped", "reason": "llm_disabled_by_runtime_options"}
-        safe_spec = normalize_followup_command_spec(command_spec)
+        safe_spec = normalize_command_spec_compat(command_spec)
         if not safe_spec:
             return {"status": "skipped", "reason": "missing_structured_spec"}
         args = safe_spec.get("args") if isinstance(safe_spec.get("args"), dict) else {}
@@ -1892,7 +1892,7 @@ class AgentRuntimeService:
                 "execution_sql": repaired_query,
                 "display_sql": repaired_query,
             }
-            compile_result = compile_followup_command_spec(repaired_spec, run_sql_preflight=True)
+            compile_result = compile_command_compat(repaired_spec, run_sql_preflight=True)
             if not bool(compile_result.get("ok")):
                 return {
                     "status": "ask_user",
@@ -1903,7 +1903,7 @@ class AgentRuntimeService:
                 }
             return {
                 "status": "recovered",
-                "command": _normalize_followup_command_line(compile_result.get("command")),
+                "command": normalize_command_line(compile_result.get("command")),
                 "command_spec": (
                     compile_result.get("command_spec")
                     if isinstance(compile_result.get("command_spec"), dict)
@@ -2093,7 +2093,7 @@ class AgentRuntimeService:
                 )
             self._update_run_summary(run, **summary_updates)
             if _as_str(timeout_recovery.get("status")).strip().lower() == "recovered":
-                recovered_command = _normalize_followup_command_line(timeout_recovery.get("command"))
+                recovered_command = normalize_command_line(timeout_recovery.get("command"))
                 recovered_command_spec = (
                     timeout_recovery.get("command_spec")
                     if isinstance(timeout_recovery.get("command_spec"), dict)
@@ -2190,7 +2190,7 @@ class AgentRuntimeService:
             "safe_action_id": _as_str(action_id) or safe_tool_call_id,
             "safe_purpose": _as_str(purpose).strip(),
             "structured_required": _require_structured_actions_enabled(),
-            "safe_command_spec": normalize_followup_command_spec(command_spec),
+            "safe_command_spec": normalize_command_spec_compat(command_spec),
             "runtime_options": runtime_options,
             "command_recovery_max_rounds": max(1, _as_int(runtime_options.get("command_recovery_max_rounds"), 2)),
             "safe_recovery_depth": max(0, _as_int(recovery_depth, 0)),
@@ -2289,7 +2289,7 @@ class AgentRuntimeService:
                 _as_str(recovery_failure_code).strip().lower()
                 or ("sql_preflight_failed" if "sql_preflight_failed" in safe_message else "missing_or_invalid_command_spec")
             )
-            recovery_payload = build_command_spec_self_repair_payload(
+            recovery_payload = build_self_repair_payload(
                 reason=safe_recovery_failure_code,
                 detail=safe_message,
                 command_spec=current_command_spec,
@@ -2319,7 +2319,7 @@ class AgentRuntimeService:
                 max_rounds=command_recovery_max_rounds,
             )
             if _as_str(recovery.get("status")).strip().lower() == "recovered":
-                recovered_command = _normalize_followup_command_line(recovery.get("command")) or current_command
+                recovered_command = normalize_command_line(recovery.get("command")) or current_command
                 recovered_command_spec = (
                     recovery.get("command_spec")
                     if isinstance(recovery.get("command_spec"), dict)
@@ -2360,7 +2360,7 @@ class AgentRuntimeService:
                     failure_message=_as_str(recovery.get("failure_message")).strip() or safe_message,
                 )
                 if _as_str(llm_recovery.get("status")).strip().lower() == "recovered":
-                    recovered_command = _normalize_followup_command_line(llm_recovery.get("command")) or current_command
+                    recovered_command = normalize_command_line(llm_recovery.get("command")) or current_command
                     recovered_command_spec = (
                         llm_recovery.get("command_spec")
                         if isinstance(llm_recovery.get("command_spec"), dict)
@@ -2393,7 +2393,7 @@ class AgentRuntimeService:
 
             final_failure_code = _as_str(recovery.get("failure_code")).strip() or safe_recovery_failure_code
             final_failure_message = _as_str(recovery.get("failure_message")).strip() or safe_message
-            recovery_payload = build_command_spec_self_repair_payload(
+            recovery_payload = build_self_repair_payload(
                 reason=final_failure_code,
                 detail=final_failure_message,
                 command_spec=current_command_spec,
@@ -2439,7 +2439,7 @@ class AgentRuntimeService:
             }
 
         if safe_command_spec:
-            compile_result = compile_followup_command_spec(safe_command_spec, run_sql_preflight=True)
+            compile_result = compile_command_compat(safe_command_spec, run_sql_preflight=True)
             if not bool(compile_result.get("ok")):
                 compile_reason = _as_str(compile_result.get("reason"), "compile failed")
                 compile_detail = _as_str(compile_result.get("detail")).strip()
@@ -2449,7 +2449,7 @@ class AgentRuntimeService:
                     else f"invalid command_spec: {compile_reason}: {compile_detail}"
                 )
                 if structured_required:
-                    normalized_raw_command = _normalize_followup_command_line(raw_command) or _as_str(raw_command).strip()
+                    normalized_raw_command = normalize_command_line(raw_command) or _as_str(raw_command).strip()
                     structured_result = await _return_waiting_for_structured_spec(
                         detail,
                         normalized_raw_command,
@@ -2463,7 +2463,7 @@ class AgentRuntimeService:
                         if isinstance(structured_result.get("command_spec"), dict)
                         else safe_command_spec
                     )
-                    safe_command = _normalize_followup_command_line(structured_result.get("command")) or normalized_raw_command
+                    safe_command = normalize_command_line(structured_result.get("command")) or normalized_raw_command
                 else:
                     raise ValueError(detail)
                 if _as_str(structured_result.get("status")).strip().lower() == "recovered":
@@ -2486,7 +2486,7 @@ class AgentRuntimeService:
                     if isinstance(compile_result.get("command_spec"), dict)
                     else safe_command_spec
                 )
-                safe_command = _normalize_followup_command_line(compile_result.get("command"))
+                safe_command = normalize_command_line(compile_result.get("command"))
                 self.append_event(
                     run.run_id,
                     "action_spec_validated",
@@ -2501,7 +2501,7 @@ class AgentRuntimeService:
                     },
                 )
         else:
-            safe_command = _normalize_followup_command_line(raw_command) or _as_str(raw_command).strip()
+            safe_command = normalize_command_line(raw_command) or _as_str(raw_command).strip()
             if structured_required:
                 structured_result = await _return_waiting_for_structured_spec(
                     "missing_or_invalid_command_spec: command_spec is required when AI_RUNTIME_REQUIRE_STRUCTURED_ACTIONS=true",
@@ -2510,7 +2510,7 @@ class AgentRuntimeService:
                 )
                 if _as_str(structured_result.get("status")).strip().lower() != "recovered":
                     return structured_result
-                safe_command = _normalize_followup_command_line(structured_result.get("command")) or safe_command
+                safe_command = normalize_command_line(structured_result.get("command")) or safe_command
                 safe_command_spec = (
                     structured_result.get("command_spec")
                     if isinstance(structured_result.get("command_spec"), dict)
@@ -2521,7 +2521,7 @@ class AgentRuntimeService:
         if not safe_purpose:
             raise ValueError("purpose is required")
         try:
-            command_meta, _ = _resolve_followup_command_meta(safe_command)
+            command_meta, _ = resolve_command_meta(safe_command)
         except Exception:
             command_meta = {}
         is_write_command = bool(command_meta.get("requires_write_permission")) or (
@@ -3194,7 +3194,7 @@ class AgentRuntimeService:
                 "command_execution_key": command_execution_key,
             }
             normalized_unknown_reason = unknown_reason.lower()
-            normalized_failure_reason = normalize_followup_reason_code(unknown_reason)
+            normalized_failure_reason = normalize_reason_code(unknown_reason)
             if "sql_preflight_failed" in normalized_unknown_reason:
                 unknown_failure_code = "sql_preflight_failed"
             elif normalized_failure_reason != "other":
@@ -3215,7 +3215,7 @@ class AgentRuntimeService:
                 max_rounds=command_recovery_max_rounds,
             )
             if _as_str(recovery.get("status")).strip().lower() == "recovered":
-                recovered_command = _normalize_followup_command_line(recovery.get("command")) or safe_command
+                recovered_command = normalize_command_line(recovery.get("command")) or safe_command
                 recovered_command_spec = (
                     recovery.get("command_spec")
                     if isinstance(recovery.get("command_spec"), dict)
@@ -3257,7 +3257,7 @@ class AgentRuntimeService:
                 failure_message=_as_str(recovery.get("failure_message")).strip() or unknown_reason,
             )
             if _as_str(llm_recovery.get("status")).strip().lower() == "recovered":
-                recovered_command = _normalize_followup_command_line(llm_recovery.get("command")) or safe_command
+                recovered_command = normalize_command_line(llm_recovery.get("command")) or safe_command
                 recovered_command_spec = (
                     llm_recovery.get("command_spec")
                     if isinstance(llm_recovery.get("command_spec"), dict)

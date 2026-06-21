@@ -21,14 +21,16 @@ from ai.agent_runtime.exec_client import (
     list_command_run_events,
     precheck_command,
 )
-from ai.followup_command import (
-    _FOLLOWUP_COMMAND_DEFAULT_TIMEOUT,
-    _is_truthy_env,
-    _normalize_followup_command_match_key,
-    _normalize_followup_command_line,
-    _resolve_followup_command_meta,
+from ai.command._followup_compat import (
+    compile_command_compat,
+    normalize_command_spec_compat,
+    resolve_command_meta,
 )
-from ai.followup_command_spec import compile_followup_command_spec, normalize_followup_command_spec
+from ai.command.line_normalizer import (
+    is_truthy_env,
+    normalize_command_line,
+    normalize_command_match_key,
+)
 
 _AUTO_EXEC_SAFE_QUERY_HEADS = {
     "kubectl",
@@ -65,8 +67,8 @@ def _as_list(value: Any) -> List[Any]:
 
 
 def _build_auto_exec_dedupe_key(command: str, command_spec: Optional[Dict[str, Any]]) -> str:
-    normalized_command = _normalize_followup_command_line(command)
-    safe_spec = normalize_followup_command_spec(command_spec)
+    normalized_command = normalize_command_line(command)
+    safe_spec = normalize_command_spec_compat(command_spec)
     if not normalized_command and not safe_spec:
         return ""
     args = safe_spec.get("args") if isinstance(safe_spec.get("args"), dict) else {}
@@ -258,7 +260,7 @@ def _build_clickhouse_metrics_evidence_command(
 
 
 def _derive_template_expected_signal(command: str) -> str:
-    safe_command = _normalize_followup_command_line(command).strip().lower()
+    safe_command = normalize_command_line(command).strip().lower()
     if "from system.processes" in safe_command:
         return "命中故障时间窗内的长耗时查询、读行量或内存占用异常。"
     if "from system.metrics" in safe_command:
@@ -345,9 +347,9 @@ def _summarize_iteration_actions(actions: List[Dict[str, Any]], *, max_items: in
     labels: List[str] = []
     for action in _as_list(actions):
         action_dict = action if isinstance(action, dict) else {}
-        command = _normalize_followup_command_line(_as_str(action_dict.get("command"))).strip()
-        action_text = _normalize_followup_command_line(_as_str(action_dict.get("action"))).strip()
-        title = _normalize_followup_command_line(_as_str(action_dict.get("title"))).strip()
+        command = normalize_command_line(_as_str(action_dict.get("command"))).strip()
+        action_text = normalize_command_line(_as_str(action_dict.get("action"))).strip()
+        title = normalize_command_line(_as_str(action_dict.get("title"))).strip()
         label = command or action_text or title
         if not label:
             continue
@@ -366,11 +368,11 @@ def _is_low_trust_non_executable_action(action_dict: Dict[str, Any]) -> bool:
 
 
 def _normalize_non_executable_template_command(command: str) -> str:
-    safe_command = _normalize_followup_command_line(command).strip()
+    safe_command = normalize_command_line(command).strip()
     if not safe_command:
         return ""
     try:
-        command_meta, _ = _resolve_followup_command_meta(safe_command)
+        command_meta, _ = resolve_command_meta(safe_command)
     except Exception:
         return ""
     if (
@@ -378,7 +380,7 @@ def _normalize_non_executable_template_command(command: str) -> str:
         or _as_str(command_meta.get("command_type")).strip().lower() != "query"
     ):
         return ""
-    compiled = compile_followup_command_spec(
+    compiled = compile_command_compat(
         {
             "tool": "generic_exec",
             "args": {
@@ -390,8 +392,8 @@ def _normalize_non_executable_template_command(command: str) -> str:
     )
     if not bool(compiled.get("ok")):
         return ""
-    compiled_command = _normalize_followup_command_line(_as_str(compiled.get("command"))).strip()
-    compiled_spec = normalize_followup_command_spec(compiled.get("command_spec"))
+    compiled_command = normalize_command_line(_as_str(compiled.get("command"))).strip()
+    compiled_spec = normalize_command_spec_compat(compiled.get("command_spec"))
     if not compiled_command or not compiled_spec:
         return ""
     args = compiled_spec.get("args") if isinstance(compiled_spec.get("args"), dict) else {}
@@ -450,7 +452,7 @@ def _build_non_executable_command_templates(
         action_dict = action if isinstance(action, dict) else {}
         if bool(action_dict.get("executable")):
             continue
-        command = _normalize_followup_command_line(_as_str(action_dict.get("command"))).strip()
+        command = normalize_command_line(_as_str(action_dict.get("command"))).strip()
         if command:
             if _is_low_trust_non_executable_action(action_dict):
                 command = ""
@@ -507,7 +509,7 @@ def _build_non_executable_command_templates(
 
 
 def _is_low_signal_template_command(command: str) -> bool:
-    safe_command = _normalize_followup_command_line(command).strip().lower()
+    safe_command = normalize_command_line(command).strip().lower()
     if not safe_command:
         return True
     if re.match(r"^kubectl\s+get\s+pods\s+(-A|-a)\s+--show-labels$", safe_command):
@@ -516,7 +518,7 @@ def _is_low_signal_template_command(command: str) -> bool:
 
 
 def _build_template_action_id(command: str) -> str:
-    normalized = _normalize_followup_command_line(command).strip()
+    normalized = normalize_command_line(command).strip()
     if not normalized:
         return "tmpl-unknown"
     digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
@@ -543,7 +545,7 @@ def _build_structured_template_actions(
         if not isinstance(obs, dict):
             continue
         status = _as_str(obs.get("status")).lower()
-        command = _normalize_followup_command_line(_as_str(obs.get("command"))).strip()
+        command = normalize_command_line(_as_str(obs.get("command"))).strip()
         if not command:
             continue
         is_failed = (
@@ -605,7 +607,7 @@ def _build_structured_template_actions(
             continue
         if normalized_command in failed_commands:
             continue
-        compiled = compile_followup_command_spec(
+        compiled = compile_command_compat(
             {
                 "tool": "generic_exec",
                 "args": {
@@ -617,8 +619,8 @@ def _build_structured_template_actions(
         )
         if not bool(compiled.get("ok")):
             continue
-        command_spec = normalize_followup_command_spec(compiled.get("command_spec"))
-        compiled_command = _normalize_followup_command_line(_as_str(compiled.get("command")))
+        command_spec = normalize_command_spec_compat(compiled.get("command_spec"))
+        compiled_command = normalize_command_line(_as_str(compiled.get("command")))
         if not command_spec or not compiled_command:
             continue
         if compiled_command in existing_command_to_id:
@@ -730,7 +732,7 @@ def _resolve_followup_timeout_profile() -> Dict[str, int]:
 
 
 def _resolve_followup_auto_exec_readonly_enabled() -> bool:
-    return _is_truthy_env("AI_FOLLOWUP_AUTO_EXEC_READONLY_ENABLED", True)
+    return is_truthy_env("AI_FOLLOWUP_AUTO_EXEC_READONLY_ENABLED", True)
 
 
 def _resolve_followup_auto_exec_max_actions() -> int:
@@ -745,7 +747,7 @@ def _resolve_followup_auto_exec_timeout_seconds() -> int:
             int(
                 _as_float(
                     os.getenv("AI_FOLLOWUP_AUTO_EXEC_COMMAND_TIMEOUT_SECONDS"),
-                    _FOLLOWUP_COMMAND_DEFAULT_TIMEOUT,
+                    20,
                 )
             ),
         ),
@@ -758,13 +760,13 @@ def _describe_template_action_execution_mode(*, allow_auto_exec_readonly: bool) 
         return "当前运行已禁用只读自动执行，请手动执行或开启自动执行后继续。"
     if not _resolve_followup_auto_exec_readonly_enabled():
         return "系统当前已关闭只读自动执行，请手动执行模板命令后继续。"
-    if not _is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
+    if not is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
         return "命令执行链路当前不可用，请手动执行模板命令后继续。"
     return "已进入自动执行链路。"
 
 
 def _require_spec_for_repair_enabled() -> bool:
-    return _is_truthy_env("AI_FOLLOWUP_COMMAND_REQUIRE_SPEC_FOR_REPAIR", False)
+    return is_truthy_env("AI_FOLLOWUP_COMMAND_REQUIRE_SPEC_FOR_REPAIR", False)
 
 
 def _resolve_followup_react_max_iterations() -> int:
@@ -859,13 +861,13 @@ def _resolve_latest_success_observation(
     command: str,
     observations: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    command_key = _normalize_followup_command_match_key(command).lower()
+    command_key = normalize_command_match_key(command).lower()
     if not command_key:
         return None
     latest: Optional[Dict[str, Any]] = None
     for item in _as_list(observations):
         obs = item if isinstance(item, dict) else {}
-        if _normalize_followup_command_match_key(_as_str(obs.get("command"))).lower() != command_key:
+        if normalize_command_match_key(_as_str(obs.get("command"))).lower() != command_key:
             continue
         status = _as_str(obs.get("status")).strip().lower()
         exit_code = int(_as_float(obs.get("exit_code"), 0))
@@ -1200,7 +1202,7 @@ def _is_auto_exec_safe_query_command(raw_command: str, command_meta: Dict[str, A
         if isinstance(command_meta.get("command_spec"), dict)
         else {}
     )
-    safe_spec = normalize_followup_command_spec(command_spec)
+    safe_spec = normalize_command_spec_compat(command_spec)
     if not safe_spec:
         return False
     tool = _as_str(safe_spec.get("tool")).strip().lower()
@@ -1240,7 +1242,7 @@ async def _run_followup_readonly_auto_exec(
         return []
     if not _resolve_followup_auto_exec_readonly_enabled():
         return []
-    if not _is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
+    if not is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
         return []
 
     max_actions = _resolve_followup_auto_exec_max_actions()
@@ -1258,8 +1260,8 @@ async def _run_followup_readonly_auto_exec(
             break
         action_dict = action if isinstance(action, dict) else {}
         action_id = _as_str(action_dict.get("id")) or f"auto-{len(observations) + 1}"
-        command_spec = normalize_followup_command_spec(action_dict.get("command_spec"))
-        planned_command = _normalize_followup_command_line(_as_str(action_dict.get("command")))
+        command_spec = normalize_command_spec_compat(action_dict.get("command_spec"))
+        planned_command = normalize_command_line(_as_str(action_dict.get("command")))
         if not command_spec:
             observation = {
                 "status": "semantic_incomplete",
@@ -1276,7 +1278,7 @@ async def _run_followup_readonly_auto_exec(
             await _emit_followup_event(event_callback, "observation", observation, logger=logger)
             continue
 
-        compiled = compile_followup_command_spec(command_spec, run_sql_preflight=True)
+        compiled = compile_command_compat(command_spec, run_sql_preflight=True)
         if not bool(compiled.get("ok")):
             compile_reason = _as_str(compiled.get("reason"), "command_spec compile failed")
             compile_detail = _as_str(compiled.get("detail")).strip()
@@ -1296,7 +1298,7 @@ async def _run_followup_readonly_auto_exec(
             await _emit_followup_event(event_callback, "observation", observation, logger=logger)
             continue
 
-        raw_command = _normalize_followup_command_line(_as_str(compiled.get("command")))
+        raw_command = normalize_command_line(_as_str(compiled.get("command")))
         action_dict["command_spec"] = (
             compiled.get("command_spec")
             if isinstance(compiled.get("command_spec"), dict)
@@ -1375,7 +1377,7 @@ async def _run_followup_readonly_auto_exec(
             continue
 
         safe_precheck = precheck if isinstance(precheck, dict) else {}
-        normalized_command = _normalize_followup_command_line(_as_str(safe_precheck.get("command"), raw_command))
+        normalized_command = normalize_command_line(_as_str(safe_precheck.get("command"), raw_command))
         if not normalized_command:
             normalized_command = raw_command
         dedupe_key = _build_auto_exec_dedupe_key(normalized_command, effective_command_spec)
@@ -1689,7 +1691,7 @@ def _latest_observation_maps(action_observations: List[Dict[str, Any]]) -> tuple
         if not isinstance(item, dict):
             continue
         action_id = _as_str(item.get("action_id"))
-        command = _normalize_followup_command_line(_as_str(item.get("command")))
+        command = normalize_command_line(_as_str(item.get("command")))
         if action_id:
             by_action_id[action_id] = item
         if command:
@@ -1702,7 +1704,7 @@ def _count_command_failures(action_observations: List[Dict[str, Any]]) -> Dict[s
     for item in _as_list(action_observations):
         if not isinstance(item, dict):
             continue
-        cmd_key = _normalize_followup_command_line(_as_str(item.get("command"))).lower()
+        cmd_key = normalize_command_line(_as_str(item.get("command"))).lower()
         if not cmd_key:
             continue
         status = _as_str(item.get("status")).lower()
@@ -1750,7 +1752,7 @@ def _select_followup_react_iteration_actions(
             continue
         if _as_str(action_dict.get("command_type")).lower() != "query":
             continue
-        command = _normalize_followup_command_line(_as_str(action_dict.get("command")))
+        command = normalize_command_line(_as_str(action_dict.get("command")))
         if not command:
             continue
         cmd_key = command.lower()

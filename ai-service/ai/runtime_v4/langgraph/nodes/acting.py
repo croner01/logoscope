@@ -85,22 +85,24 @@ def _find_next_pending_action(state: InnerGraphState) -> Optional[Dict[str, Any]
     return None
 
 
-def _compile_command_spec(command_spec: Dict[str, Any]) -> Dict[str, Any]:
+def _compile_command_spec(command_spec: Dict[str, Any], namespace: str = "islap") -> Dict[str, Any]:
     """
-    Validate and normalise the command_spec via the existing compiler.
+    Normalize and compile command spec using the unified command pipeline.
+
+    Replaces the v1 ``followup_command_spec`` path with the shared
+    ``normalize_command_spec`` + ``compile_command`` chain, matching
+    what ``claude_sdk_backend.py`` uses.
     Falls back to the raw spec if the compiler is unavailable.
     """
     try:
-        from ai.followup_command_spec import (
-            compile_followup_command_spec,
-            normalize_followup_command_spec,
-        )
+        from ai.command.normalizer import normalize_command_spec
+        from ai.command.compiler import compile_command
 
-        normalized = normalize_followup_command_spec(command_spec)
-        compiled = compile_followup_command_spec(normalized)
-        return compiled if isinstance(compiled, dict) else command_spec
+        normalized = normalize_command_spec(command_spec)
+        compiled = compile_command(normalized, namespace=namespace)
+        return compiled.model_dump() if hasattr(compiled, 'model_dump') else command_spec
     except Exception:
-        logger.debug("compile_followup_command_spec unavailable, using raw spec")
+        logger.debug("Command compilation unavailable, using raw spec")
         return command_spec
 
 
@@ -127,7 +129,8 @@ def run_acting(state: InnerGraphState) -> InnerGraphState:
         return state
 
     raw_spec = action.get("command_spec") or {}
-    compiled_spec = _compile_command_spec(raw_spec)
+    namespace = _as_str(state.skill_context.get("namespace"), "islap")
+    compiled_spec = _compile_command_spec(raw_spec, namespace=namespace)
 
     # Mark action as in-flight
     action["status"] = "dispatched"

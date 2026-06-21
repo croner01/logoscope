@@ -9,18 +9,18 @@ import shlex
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from ai.followup_command import (
-    _classify_followup_command,
-    _extract_commands_from_message_content,
-    _normalize_followup_command_match_key,
-    _normalize_followup_command_line,
-    _resolve_followup_command_meta,
+from ai.command._followup_compat import (
+    build_match_key,
+    build_self_repair_payload,
+    classify_followup_command,
+    compile_command_compat,
+    normalize_command_spec_compat,
+    resolve_command_meta,
 )
-from ai.followup_command_spec import (
-    build_command_spec_self_repair_payload,
-    build_followup_command_spec_match_key,
-    compile_followup_command_spec,
-    normalize_followup_command_spec,
+from ai.command.line_normalizer import (
+    extract_commands_from_text,
+    normalize_command_line,
+    normalize_command_match_key,
 )
 
 
@@ -87,17 +87,17 @@ def _unknown_command_meta() -> Dict[str, Any]:
 
 
 def _resolve_action_command_meta(command: str) -> Dict[str, Any]:
-    normalized_command = _normalize_followup_command_line(command)
+    normalized_command = normalize_command_line(command)
     if not _as_str(normalized_command):
         return {}
     try:
-        command_meta, _ = _resolve_followup_command_meta(normalized_command)
+        command_meta, _ = resolve_command_meta(normalized_command)
         if isinstance(command_meta, dict):
             return command_meta
     except Exception:
         pass
     try:
-        return _classify_followup_command(shlex.split(normalized_command))
+        return classify_followup_command(shlex.split(normalized_command))
     except Exception:
         return _unknown_command_meta()
 
@@ -119,7 +119,7 @@ def _infer_query_template_command_spec(
     仅返回只读 query 命令，避免把高风险或语义不完整命令带入下一轮。
     根据命令前缀自动注入 target_kind/target_identity，提高模板可用性。
     """
-    normalized_command = _normalize_followup_command_line(command)
+    normalized_command = normalize_command_line(command)
     if not _as_str(normalized_command):
         return "", {}
     command_meta = _resolve_action_command_meta(normalized_command)
@@ -152,7 +152,7 @@ def _infer_query_template_command_spec(
         args["target_identity"] = "database:logs"
     # else: 其他命令由 compile 内部自动推断
 
-    compiled = compile_followup_command_spec(
+    compiled = compile_command_compat(
         {
             "tool": "generic_exec",
             "args": args,
@@ -161,7 +161,7 @@ def _infer_query_template_command_spec(
     if not bool(compiled.get("ok")):
         return "", {}
     compiled_command = _as_str(compiled.get("command")).strip()
-    compiled_spec = normalize_followup_command_spec(compiled.get("command_spec"))
+    compiled_spec = normalize_command_spec_compat(compiled.get("command_spec"))
     if not compiled_command or not compiled_spec:
         return "", {}
     return compiled_command, compiled_spec
@@ -178,7 +178,7 @@ def _extract_command_from_hint_line(text: str) -> str:
     marker_index = body.find("（")
     if marker_index >= 0:
         body = body[:marker_index]
-    normalized = _normalize_followup_command_line(body)
+    normalized = normalize_command_line(body)
     return re.sub(r"(?i)\bclickhouse\s+-client\b", "clickhouse-client", normalized)
 
 
@@ -520,7 +520,7 @@ def _build_followup_subgoals(
     # loop to exit before executing a single command.
     _exec_cmds = _as_list(analysis_context.get("_runtime_executed_commands"))
     _has_executed_commands = any(
-        _normalize_followup_command_line(cmd) for cmd in _exec_cmds
+        normalize_command_line(cmd) for cmd in _exec_cmds
     )
 
     data_flow = (
@@ -734,8 +734,8 @@ def _build_followup_actions(
         if len(actions) >= safe_max_items:
             return
         command_key = _as_str(action_payload.get("command")).replace("\n", " ").strip()
-        command_match_key = _normalize_followup_command_match_key(command_key)
-        command_spec_key = build_followup_command_spec_match_key(action_payload.get("command_spec"))
+        command_match_key = normalize_command_match_key(command_key)
+        command_spec_key = build_match_key(action_payload.get("command_spec"))
         title_key = _as_str(action_payload.get("title")).strip().lower()
         if command_match_key:
             dedupe_key = f"cmd::{command_match_key}"
@@ -755,7 +755,7 @@ def _build_followup_actions(
         return _as_str(mask_fn(text))
 
     def _normalize_action_command(raw: Any) -> str:
-        normalized = _normalize_followup_command_line(raw)
+        normalized = normalize_command_line(raw)
         # Keep canonical ClickHouse client head to avoid turning it into
         # `clickhouse -client` after generic normalization.
         return re.sub(r"(?i)\bclickhouse\s+-client\b", "clickhouse-client", normalized)
@@ -826,7 +826,7 @@ def _build_followup_actions(
         compile_detail: str = "",
     ) -> tuple[Dict[str, Any], str, str]:
         safe_command = _normalize_action_command(command)
-        safe_spec = normalize_followup_command_spec(command_spec)
+        safe_spec = normalize_command_spec_compat(command_spec)
         safe_reason = _as_str(compile_reason).strip()
         safe_detail = _as_str(compile_detail).strip()
         if not safe_command and not safe_spec:
@@ -836,13 +836,13 @@ def _build_followup_actions(
         if not repair_reason or repair_reason == "missing_structured_spec":
             repair_reason = "missing_or_invalid_command_spec"
 
-        repair_payload = build_command_spec_self_repair_payload(
+        repair_payload = build_self_repair_payload(
             reason=repair_reason,
             detail=safe_detail,
             command_spec=safe_spec,
             raw_command=safe_command,
         )
-        suggested_spec = normalize_followup_command_spec(
+        suggested_spec = normalize_command_spec_compat(
             repair_payload.get("suggested_command_spec")
             if isinstance(repair_payload.get("suggested_command_spec"), dict)
             else {}
@@ -850,7 +850,7 @@ def _build_followup_actions(
         if not suggested_spec:
             return safe_spec, safe_reason, safe_command
 
-        compiled_suggested = compile_followup_command_spec(suggested_spec)
+        compiled_suggested = compile_command_compat(suggested_spec)
         if not bool(compiled_suggested.get("ok")):
             fallback_reason = safe_reason or _as_str(compiled_suggested.get("reason"))
             return suggested_spec, fallback_reason, safe_command
@@ -880,11 +880,11 @@ def _build_followup_actions(
             action_text = _normalize_action_text(candidate_item.get("action"))
             action_title = _normalize_action_text(candidate_item.get("title"))
             skill_name = _as_str(candidate_item.get("skill_name")).strip()
-            command_spec = normalize_followup_command_spec(candidate_item.get("command_spec"))
+            command_spec = normalize_command_spec_compat(candidate_item.get("command_spec"))
             command_spec_compile_reason = ""
             command_spec_compile_detail = ""
             if command_spec:
-                compiled = compile_followup_command_spec(command_spec)
+                compiled = compile_command_compat(command_spec)
                 if bool(compiled.get("ok")):
                     compiled_command_spec = (
                         compiled.get("command_spec")
@@ -927,7 +927,7 @@ def _build_followup_actions(
                     command_spec_compile_reason = "missing_structured_spec"
             if not command:
                 fallback_source = action_text or action_title
-                commands = _extract_commands_from_message_content(fallback_source, limit=1)
+                commands = extract_commands_from_text(fallback_source, limit=1)
                 command = _normalize_action_command(_as_str(commands[0]) if commands else "")
                 if command and not command_spec_compile_reason:
                     command_spec_compile_reason = "missing_structured_spec"
@@ -1064,7 +1064,7 @@ def _build_followup_actions(
                 }
             )
 
-    for command in _extract_commands_from_message_content(answer, limit=safe_max_items):
+    for command in extract_commands_from_text(answer, limit=safe_max_items):
         if len(actions) >= safe_max_items:
             break
         command_text = _as_str(command)
@@ -1125,7 +1125,7 @@ def _build_followup_actions(
         action_text = _normalize_action_text(item)
         if not action_text:
             continue
-        commands = _extract_commands_from_message_content(action_text, limit=1)
+        commands = extract_commands_from_text(action_text, limit=1)
         command = _as_str(commands[0]) if commands else ""
         inferred_spec, inferred_reason, inferred_command = _try_repair_structured_spec(
             command=command,
@@ -1319,7 +1319,7 @@ def _build_followup_react_loop(
     obs_by_command: Dict[str, Dict[str, Any]] = {}
     for item in safe_observations:
         action_id = _as_str(item.get("action_id"))
-        command_key = _normalize_followup_command_match_key(_as_str(item.get("command")))
+        command_key = normalize_command_match_key(_as_str(item.get("command")))
         if action_id:
             _upsert_preferred_observation(obs_by_action_id, action_id, item)
         if command_key:
@@ -1330,7 +1330,7 @@ def _build_followup_react_loop(
         safe_command = _as_str(action_payload.get("command")).strip()
         observation = obs_by_action_id.get(safe_action_id)
         if observation is None and safe_command:
-            observation = obs_by_command.get(_normalize_followup_command_match_key(safe_command))
+            observation = obs_by_command.get(normalize_command_match_key(safe_command))
         return observation
 
     def _resolve_evidence_slot_id(
@@ -1344,7 +1344,7 @@ def _build_followup_react_loop(
         if action_id:
             return f"action:{action_id}"
         command = _as_str(action_payload.get("command")).strip()
-        command_match_key = _normalize_followup_command_match_key(command)
+        command_match_key = normalize_command_match_key(command)
         if command_match_key:
             return f"command:{command_match_key}"
         return f"slot:{fallback_index}"
@@ -1410,7 +1410,7 @@ def _build_followup_react_loop(
         obs_dict = obs if isinstance(obs, dict) else {}
         if _resolve_evidence_quality(obs_dict) != "full":
             continue
-        command_key = _normalize_followup_command_match_key(_as_str(obs_dict.get("command")))
+        command_key = normalize_command_match_key(_as_str(obs_dict.get("command")))
         if command_key and command_key not in full_evidence_by_command:
             full_evidence_by_command[command_key] = obs_dict
         command_run_id = _as_str(obs_dict.get("command_run_id")).strip()
@@ -1783,7 +1783,7 @@ def _build_followup_react_loop(
                     required_evidence_slots.remove(slot_id)
             elif status == "skipped" and reason_code == "duplicate_skipped":
                 supporting_obs: Optional[Dict[str, Any]] = None
-                command_key = _normalize_followup_command_match_key(command)
+                command_key = normalize_command_match_key(command)
                 if command_run_id and command_run_id in full_evidence_by_run_id:
                     supporting_obs = full_evidence_by_run_id.get(command_run_id)
                 elif command_key and command_key in full_evidence_by_command:
@@ -1929,7 +1929,7 @@ def _build_followup_react_loop(
         if execution_disposition == "skipped_duplicate":
             continue
         action_id = _as_str(replan_item.get("action_id")).strip()
-        slot_id = f"action:{action_id}" if action_id else f"command:{_normalize_followup_command_match_key(command) or command[:80]}"
+        slot_id = f"action:{action_id}" if action_id else f"command:{normalize_command_match_key(command) or command[:80]}"
         dedupe_key = f"{slot_id}|{command}"
         if dedupe_key in next_best_seen:
             continue
@@ -2129,7 +2129,7 @@ def _append_followup_react_summary(
     window_end_iso = ""
     for item in safe_actions:
         command = _as_str(item.get("command")).strip()
-        command_spec = normalize_followup_command_spec(item.get("command_spec"))
+        command_spec = normalize_command_spec_compat(item.get("command_spec"))
         if not window_start_iso:
             window_start_iso = _as_str(item.get("evidence_window_start")).strip()
         if not window_end_iso:

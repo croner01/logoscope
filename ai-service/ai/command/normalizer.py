@@ -62,7 +62,11 @@ def _infer_command_type(command: str, tool: ToolType) -> CommandType:
         return CommandType.REPAIR
     # generic_exec — check for kubectl write verbs
     lower = text.lower()
-    write_verbs = ("delete", "apply", "patch", "edit", "create", "update", "scale", "drain", "cordon", "uncordon")
+    write_verbs = (
+        "delete", "apply", "patch", "edit", "create", "update",
+        "scale", "drain", "cordon", "uncordon",
+        "set", "label", "annotate", "rollout",
+    )
     for verb in write_verbs:
         if lower.startswith(f"kubectl {verb}"):
             return CommandType.REPAIR

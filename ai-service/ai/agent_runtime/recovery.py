@@ -6,12 +6,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ai.followup_command import (
-    _normalize_followup_command_line,
-    _repair_clickhouse_query_text,
-    _resolve_followup_command_meta,
+from ai.command._followup_compat import (
+    compile_command_compat,
+    normalize_command_spec_compat,
+    resolve_command_meta,
 )
-from ai.followup_command_spec import compile_followup_command_spec, normalize_followup_command_spec
+from ai.command.line_normalizer import (
+    normalize_command_line,
+    repair_clickhouse_query_text,
+)
 
 _NON_RECOVERABLE_STRUCTURED_FAILURE_CODES = {
     "glued_sql_tokens",
@@ -73,7 +76,7 @@ def _diagnosis_contract_missing_fields(contract: Any) -> List[str]:
 
 
 def _compile_structured_spec(spec: Dict[str, Any], *, run_sql_preflight: bool) -> Dict[str, Any]:
-    compile_result = compile_followup_command_spec(spec, run_sql_preflight=run_sql_preflight)
+    compile_result = compile_command_compat(spec, run_sql_preflight=run_sql_preflight)
     if bool(compile_result.get("ok")):
         return {
             "ok": True,
@@ -82,7 +85,7 @@ def _compile_structured_spec(spec: Dict[str, Any], *, run_sql_preflight: bool) -
                 if isinstance(compile_result.get("command_spec"), dict)
                 else spec
             ),
-            "command": _normalize_followup_command_line(compile_result.get("command")),
+            "command": normalize_command_line(compile_result.get("command")),
         }
     detail = _as_str(compile_result.get("detail")).strip()
     reason = _as_str(compile_result.get("reason"), "compile failed").strip()
@@ -94,7 +97,7 @@ def _compile_structured_spec(spec: Dict[str, Any], *, run_sql_preflight: bool) -
 
 
 def _repair_structured_clickhouse_query_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = normalize_followup_command_spec(spec)
+    normalized = normalize_command_spec_compat(spec)
     if not normalized:
         return {}
     args = normalized.get("args") if isinstance(normalized.get("args"), dict) else {}
@@ -128,8 +131,8 @@ def attempt_command_recovery(
     failure_message: str = "",
     max_rounds: int = 2,
 ) -> Dict[str, Any]:
-    safe_command = _normalize_followup_command_line(command) or _as_str(command).strip()
-    safe_command_spec = normalize_followup_command_spec(command_spec)
+    safe_command = normalize_command_line(command) or _as_str(command).strip()
+    safe_command_spec = normalize_command_spec_compat(command_spec)
     safe_contract = _normalize_diagnosis_contract(diagnosis_contract)
     safe_purpose = _as_str(purpose).strip()
     safe_failure_code = _as_str(failure_code).strip().lower() or "command_recovery_needed"
@@ -302,7 +305,7 @@ def attempt_command_recovery(
     current_failure_message = safe_failure_message or "unable to resolve executable command"
     for index in range(safe_rounds):
         try:
-            command_meta, _ = _resolve_followup_command_meta(safe_command)
+            command_meta, _ = resolve_command_meta(safe_command)
         except Exception:
             command_meta = {}
         resolved_type = _as_str(command_meta.get("command_type")).strip().lower()

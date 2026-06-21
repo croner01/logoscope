@@ -8,10 +8,10 @@ import copy
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai.followup_command_spec import (
-    build_followup_command_spec_match_key,
-    compile_followup_command_spec,
-    normalize_followup_command_spec,
+from ai.command._followup_compat import (
+    build_match_key,
+    compile_command_compat,
+    normalize_command_spec_compat,
 )
 
 
@@ -57,7 +57,7 @@ def _replace_query(spec: Dict[str, Any], query: str) -> Dict[str, Any]:
     next_spec["query"] = query
     next_spec["sql"] = query
     next_spec["display_sql"] = query
-    return normalize_followup_command_spec(next_spec)
+    return normalize_command_spec_compat(next_spec)
 
 
 def _rewrite_limit(query: str) -> Tuple[str, Optional[Dict[str, Any]]]:
@@ -157,7 +157,7 @@ def attempt_timeout_recovery(
 ) -> Dict[str, Any]:
     safe_command = _as_str(command).strip()
     safe_purpose = _as_str(purpose).strip()
-    safe_spec = normalize_followup_command_spec(command_spec)
+    safe_spec = normalize_command_spec_compat(command_spec)
     safe_rounds = max(1, min(4, _as_int(max_rounds, 2)))
     attempts: List[Dict[str, Any]] = []
     known_keys = _normalize_history_keys(recovery_history)
@@ -185,7 +185,7 @@ def attempt_timeout_recovery(
             if isinstance(candidate.get("command_spec"), dict)
             else {}
         )
-        match_key = build_followup_command_spec_match_key(candidate_spec)
+        match_key = build_match_key(candidate_spec)
         if not match_key or match_key in known_keys:
             attempts.append(
                 {
@@ -198,7 +198,7 @@ def attempt_timeout_recovery(
                 }
             )
             continue
-        compile_result = compile_followup_command_spec(candidate_spec, run_sql_preflight=False)
+        compile_result = compile_command_compat(candidate_spec, run_sql_preflight=False)
         attempts.append(
             {
                 "round": index,

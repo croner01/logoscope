@@ -13,10 +13,10 @@ from ai.langchain_runtime.memory import build_memory_context
 from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT, build_followup_prompt
 from ai.langchain_runtime.schemas import ActionItem, StructuredAnswer
 from ai.langchain_runtime.tools import collect_tool_observations
-from ai.followup_command_spec import (
-    _normalize_embedded_command_text,
-    compile_followup_command_spec,
-    normalize_followup_command_spec,
+from ai.command._followup_compat import (
+    compile_command_compat as compile_followup_command_spec,
+    normalize_command_spec_compat as normalize_followup_command_spec,
+    normalize_embedded_command_text as _normalize_embedded_command_text,
 )
 from ai.followup_planning_helpers import _extract_namespace_from_question, _resolve_followup_evidence_window
 from ai.llm_service import _is_reasoning_model

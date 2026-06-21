@@ -24,15 +24,24 @@ import uuid
 from datetime import datetime, timezone
 
 from ai.analyzer import get_log_analyzer
-from ai import followup_command as followup_command_utils
-from ai.followup_command import (
-    _FOLLOWUP_COMMAND_DEFAULT_TIMEOUT,
-    _assert_followup_command_is_suggested,
-    _build_followup_exec_disabled_response,
-    _is_truthy_env,
-    _normalize_followup_command_line,
-    _normalize_followup_command_match_key,
-    _validate_requested_followup_command,
+from ai.command._followup_compat import (
+    _assert_command_is_suggested,
+    _build_exec_disabled_response,
+    _validate_requested_command,
+    build_match_key,
+    build_self_repair_payload,
+    compile_command_compat,
+    map_reason_group,
+    normalize_command_spec_compat,
+    normalize_reason_code,
+    resolve_command_meta,
+)
+from ai.command.line_normalizer import (
+    ALLOWED_HEADS as _FOLLOWUP_COMMAND_ALLOWED_HEADS,
+    BLOCKED_OPERATORS as _FOLLOWUP_COMMAND_BLOCKED_OPERATORS,
+    is_truthy_env,
+    normalize_command_line,
+    normalize_command_match_key,
 )
 from ai.langchain_runtime import run_followup_langchain
 from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
@@ -85,13 +94,7 @@ from ai.agent_runtime.exec_client import (
 from ai.agent_runtime.user_question_adapter import build_business_question
 from ai.agent_runtime.status import is_terminal_run_status
 from ai.followup_context_helpers import _build_context_pills, _build_followup_references
-from ai.followup_command_spec import (
-    build_command_spec_self_repair_payload,
-    compile_followup_command_spec,
-    map_followup_reason_group,
-    normalize_followup_command_spec,
-    normalize_followup_reason_code,
-)
+# NOTE: followup_command_spec functions imported from ai.command._followup_compat above
 from ai.followup_persistence_helpers import (
     _persist_followup_messages_and_history,
     _update_followup_session_summary,
@@ -211,10 +214,10 @@ DEFAULT_LLM_DEPLOYMENT_FILE = os.path.abspath(
 )
 DEFAULT_KB_DEPLOYMENT_FILE = DEFAULT_LLM_DEPLOYMENT_FILE
 # 兼容旧测试/外部引用：继续从 api.ai 暴露这些常量。
-_FOLLOWUP_COMMAND_BLOCKED_OPERATORS = followup_command_utils._FOLLOWUP_COMMAND_BLOCKED_OPERATORS
-_FOLLOWUP_COMMAND_FENCE_PATTERN = followup_command_utils._FOLLOWUP_COMMAND_FENCE_PATTERN
-_FOLLOWUP_COMMAND_INLINE_PATTERN = followup_command_utils._FOLLOWUP_COMMAND_INLINE_PATTERN
-_FOLLOWUP_COMMAND_ALLOWED_HEADS = followup_command_utils._FOLLOWUP_COMMAND_ALLOWED_HEADS
+import re as _re
+_FOLLOWUP_COMMAND_FENCE_PATTERN = _re.compile(r"```(?:bash|sh|shell|zsh)?\s*([\s\S]*?)```", _re.IGNORECASE)
+_FOLLOWUP_COMMAND_INLINE_PATTERN = _re.compile(r"`([^`\n]+)`")
+_FOLLOWUP_COMMAND_DEFAULT_TIMEOUT = max(3, min(120, int(__import__("os").getenv("AI_FOLLOWUP_COMMAND_TIMEOUT_SECONDS", "20"))))
 
 _RUNTIME_V1_API_GUARD_BYPASS: ContextVar[bool] = ContextVar("runtime_v1_api_guard_bypass", default=False)
 
@@ -554,7 +557,7 @@ def _extract_success_commands_from_assistant_message(message: Dict[str, Any]) ->
             continue
         if int(_as_float(payload.get("exit_code"), 1)) != 0:
             continue
-        command = _normalize_followup_command_line(_as_str(payload.get("command")))
+        command = normalize_command_line(_as_str(payload.get("command")))
         if command and command not in commands:
             commands.append(command)
     return commands
@@ -1028,7 +1031,7 @@ def _find_completed_command_reuse(
     command: str,
 ) -> Dict[str, Any]:
     safe_summary = summary if isinstance(summary, dict) else {}
-    normalized_command = _normalize_followup_command_line(command)
+    normalized_command = normalize_command_line(command)
     if not normalized_command:
         return {}
 
@@ -1041,7 +1044,7 @@ def _find_completed_command_reuse(
         if not isinstance(entry, dict):
             continue
         entry_status = _as_str(entry.get("status")).strip().lower()
-        entry_command = _normalize_followup_command_line(_as_str(entry.get("command")))
+        entry_command = normalize_command_line(_as_str(entry.get("command")))
         entry_action_id = _as_str(entry.get("action_id")).strip()
         entry_exit_code = int(_as_float(entry.get("exit_code"), 1))
         if entry_status not in {"completed", "succeeded", "success"}:
@@ -1056,9 +1059,9 @@ def _find_completed_command_reuse(
         }
 
     executed_commands = {
-        _normalize_followup_command_line(item)
+        normalize_command_line(item)
         for item in _as_list(safe_summary.get("executed_commands"))
-        if _normalize_followup_command_line(item)
+        if normalize_command_line(item)
     }
     if normalized_command in executed_commands:
         return {"command_run_id": "", "command": normalized_command}
@@ -1368,7 +1371,7 @@ async def _emit_followup_runtime_event(
         purpose = str(safe_payload.get("purpose") or "").strip()
         command_run_id = str(safe_payload.get("command_run_id") or "").strip()
         reason_code = str(safe_payload.get("reason_code") or "").strip().lower()
-        normalized_command_for_key = _normalize_followup_command_line(command) or command
+        normalized_command_for_key = normalize_command_line(command) or command
         normalized_status = str(safe_payload.get("status") or "").strip().lower() or "running"
         if command_run_id:
             observation_key = f"command_run:{command_run_id}"
@@ -1552,11 +1555,11 @@ async def _emit_followup_runtime_event(
             if latest_run is not None:
                 summary_payload = latest_run.summary_json if isinstance(latest_run.summary_json, dict) else {}
                 executed_commands = [
-                    _normalize_followup_command_line(item)
+                    normalize_command_line(item)
                     for item in _as_list(summary_payload.get("executed_commands"))
-                    if _normalize_followup_command_line(item)
+                    if normalize_command_line(item)
                 ]
-                normalized_command = _normalize_followup_command_line(command)
+                normalized_command = normalize_command_line(command)
                 if normalized_command and normalized_command not in executed_commands:
                     executed_commands.append(normalized_command)
                     runtime_service._update_run_summary(  # noqa: SLF001
@@ -1906,9 +1909,9 @@ async def _run_followup_runtime_task(
     followup_task_count = max(0, int(_as_float(summary_payload.get("followup_runtime_task_count"), 0))) + 1
     suppress_bootstrap_plan = followup_task_count > 1
     previous_executed_commands = [
-        _normalize_followup_command_line(item)
+        normalize_command_line(item)
         for item in _as_list(summary_payload.get("executed_commands"))
-        if _normalize_followup_command_line(item)
+        if normalize_command_line(item)
     ]
     previous_action_observations = [
         item
@@ -1920,11 +1923,11 @@ async def _run_followup_runtime_task(
     # which stores results in last_command_* fields but NOT in action_observations.
     # Without this, _build_structured_template_actions cannot detect failed commands
     # and would regenerate the same template on resume.
-    last_command_raw = _normalize_followup_command_line(
+    last_command_raw = normalize_command_line(
         _as_str(summary_payload.get("last_command")).strip()
     )
     if last_command_raw and not any(
-        _normalize_followup_command_line(_as_str(o.get("command"))).strip() == last_command_raw
+        normalize_command_line(_as_str(o.get("command"))).strip() == last_command_raw
         for o in previous_action_observations
     ):
         last_status = _as_str(summary_payload.get("last_command_status")).lower()
@@ -1965,7 +1968,7 @@ async def _run_followup_runtime_task(
                 command = _as_str(preview.get("command")).strip()
                 if not command:
                     continue
-                normalized = _normalize_followup_command_line(command)
+                normalized = normalize_command_line(command)
                 if normalized and normalized in previous_executed_commands:
                     continue
 
@@ -2578,15 +2581,15 @@ def _runtime_command_requires_write(
     command: str,
     command_spec: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    safe_command = _normalize_followup_command_line(command)
+    safe_command = normalize_command_line(command)
     if not safe_command:
         return False
-    if isinstance(command_spec, dict) and normalize_followup_command_spec(command_spec):
-        compile_result = compile_followup_command_spec(command_spec)
+    if isinstance(command_spec, dict) and normalize_command_spec_compat(command_spec):
+        compile_result = compile_command_compat(command_spec)
         if bool(compile_result.get("ok")):
-            safe_command = _normalize_followup_command_line(compile_result.get("command")) or safe_command
+            safe_command = normalize_command_line(compile_result.get("command")) or safe_command
     try:
-        command_meta, _ = followup_command_utils._resolve_followup_command_meta(safe_command)  # type: ignore[attr-defined]
+        command_meta, _ = resolve_command_meta(safe_command)  # type: ignore[attr-defined]
     except Exception:
         return False
     return bool(command_meta.get("requires_write_permission")) or (
@@ -2648,7 +2651,7 @@ async def _prepare_runtime_diagnosis_contract(
     missing_fields = _diagnosis_contract_missing_fields(merged_contract)
     model_fill_enabled = (
         os.environ.get("PYTEST_CURRENT_TEST") is None
-        and _is_truthy_env("AI_RUNTIME_DIAGNOSIS_CONTRACT_MODEL_FILL_ENABLED", True)
+        and is_truthy_env("AI_RUNTIME_DIAGNOSIS_CONTRACT_MODEL_FILL_ENABLED", True)
     )
     if missing_fields and model_fill_enabled:
         timeout_seconds = int(
@@ -3121,7 +3124,7 @@ async def execute_ai_run_command(run_id: str, request: AIRunCommandRequest) -> D
         raise HTTPException(status_code=400, detail="purpose is required")
     structured_required = True
     request_command_spec = request.command_spec if isinstance(request.command_spec, dict) else {}
-    safe_command_spec = normalize_followup_command_spec(request_command_spec)
+    safe_command_spec = normalize_command_spec_compat(request_command_spec)
     _metric_inc(AI_RUNTIME_COMMAND_ACTION_REQUEST_TOTAL)
     if safe_command_spec:
         _metric_inc(AI_RUNTIME_STRUCTURED_SPEC_PRESENT_TOTAL)
@@ -3133,7 +3136,7 @@ async def execute_ai_run_command(run_id: str, request: AIRunCommandRequest) -> D
             run = runtime_service.get_run(run_id)
             if run is None:
                 raise HTTPException(status_code=404, detail="run not found")
-            recovery_payload = build_command_spec_self_repair_payload(
+            recovery_payload = build_self_repair_payload(
                 reason="missing_or_invalid_command_spec",
                 detail="missing_or_invalid_command_spec: command_spec is required",
                 command_spec=request_command_spec,
@@ -3150,7 +3153,7 @@ async def execute_ai_run_command(run_id: str, request: AIRunCommandRequest) -> D
                 },
                 "recovery": recovery_payload,
             }
-        compile_result = compile_followup_command_spec(safe_command_spec, run_sql_preflight=True)
+        compile_result = compile_command_compat(safe_command_spec, run_sql_preflight=True)
         if not bool(compile_result.get("ok")):
             if _as_str(compile_result.get("reason")).strip().lower() == "sql_preflight_failed":
                 _metric_inc(AI_RUNTIME_SQL_PREFLIGHT_FAIL_TOTAL)
@@ -3165,7 +3168,7 @@ async def execute_ai_run_command(run_id: str, request: AIRunCommandRequest) -> D
                 if not compile_detail
                 else f"invalid command_spec: {compile_reason}: {compile_detail}"
             )
-            recovery_payload = build_command_spec_self_repair_payload(
+            recovery_payload = build_self_repair_payload(
                 reason=compile_reason,
                 detail=compile_detail or compile_reason,
                 command_spec=safe_command_spec,
@@ -5633,14 +5636,14 @@ def _resolve_followup_command_purpose(
     if explicit_purpose:
         return explicit_purpose[:220]
 
-    match_key = _normalize_followup_command_match_key(raw_command)
+    match_key = normalize_command_match_key(raw_command)
     actions = message_metadata.get("actions") if isinstance(message_metadata.get("actions"), list) else []
     for item in actions:
         payload = item if isinstance(item, dict) else {}
-        action_command = _normalize_followup_command_line(payload.get("command"))
+        action_command = normalize_command_line(payload.get("command"))
         if not action_command:
             continue
-        action_key = _normalize_followup_command_match_key(action_command)
+        action_key = normalize_command_match_key(action_command)
         if not action_key or action_key != match_key:
             continue
         action_purpose = (
@@ -5656,12 +5659,12 @@ def _resolve_followup_command_purpose(
 
 def _followup_require_spec_for_repair_enabled() -> bool:
     """高风险写命令是否要求 command_spec。默认关闭，按环境变量开启。"""
-    return _is_truthy_env("AI_FOLLOWUP_COMMAND_REQUIRE_SPEC_FOR_REPAIR", False)
+    return is_truthy_env("AI_FOLLOWUP_COMMAND_REQUIRE_SPEC_FOR_REPAIR", False)
 
 
 def _runtime_require_structured_actions_enabled() -> bool:
     """运行态命令执行是否强制要求结构化 ActionSpec。默认开启，可按环境变量降级。"""
-    return _is_truthy_env("AI_RUNTIME_REQUIRE_STRUCTURED_ACTIONS", True)
+    return is_truthy_env("AI_RUNTIME_REQUIRE_STRUCTURED_ACTIONS", True)
 
 
 def _build_missing_or_invalid_command_spec_response(
@@ -5678,7 +5681,7 @@ def _build_missing_or_invalid_command_spec_response(
     safe_status = _as_str(status).strip().lower()
     if safe_status not in {"blocked", "waiting_user_input"}:
         safe_status = "blocked"
-    recovery_payload = build_command_spec_self_repair_payload(
+    recovery_payload = build_self_repair_payload(
         reason=reason,
         detail=detail,
         command_spec=command_spec,
@@ -5688,7 +5691,7 @@ def _build_missing_or_invalid_command_spec_response(
         "status": safe_status,
         "session_id": session_id,
         "message_id": message_id,
-        "command": _normalize_followup_command_line(command),
+        "command": normalize_command_line(command),
         "purpose": _as_str(purpose),
         "command_type": "unknown",
         "risk_level": "high",
@@ -5735,7 +5738,7 @@ def _map_followup_exec_response(
         "elevation_required",
     }:
         status = "failed"
-    safe_command = _normalize_followup_command_line(_as_str(safe_payload.get("command"), command)) or command
+    safe_command = normalize_command_line(_as_str(safe_payload.get("command"), command)) or command
     requires_write_permission = bool(safe_payload.get("requires_write_permission"))
     requires_elevation = bool(safe_payload.get("requires_elevation")) or status == "elevation_required"
     requires_confirmation = bool(safe_payload.get("requires_confirmation")) or status in {
@@ -5789,8 +5792,8 @@ async def execute_followup_command(
 ) -> Dict[str, Any]:
     """执行 AI 回答中生成的查询/修复命令，并返回执行结果。"""
     try:
-        if not _is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
-            return _build_followup_exec_disabled_response(session_id, message_id, request.command)
+        if not is_truthy_env("AI_FOLLOWUP_COMMAND_EXEC_ENABLED", True):
+            return _build_exec_disabled_response(session_id, message_id, request.command)
 
         session_store = get_ai_session_store(storage)
         message_content, message_metadata, _session_context = await _load_followup_command_message_context(
@@ -5801,9 +5804,9 @@ async def execute_followup_command(
             as_str=_as_str,
         )
         structured_required = True
-        safe_command_spec = normalize_followup_command_spec(request.command_spec)
+        safe_command_spec = normalize_command_spec_compat(request.command_spec)
         if safe_command_spec:
-            compile_result = compile_followup_command_spec(safe_command_spec, run_sql_preflight=True)
+            compile_result = compile_command_compat(safe_command_spec, run_sql_preflight=True)
             if not bool(compile_result.get("ok")):
                 compile_reason = _as_str(compile_result.get("reason"), "compile failed")
                 compile_detail = _as_str(compile_result.get("detail")).strip()
@@ -5829,7 +5832,7 @@ async def execute_followup_command(
                 if isinstance(compile_result.get("command_spec"), dict)
                 else safe_command_spec
             )
-            raw_command = _normalize_followup_command_line(compile_result.get("command"))
+            raw_command = normalize_command_line(compile_result.get("command"))
         else:
             if structured_required:
                 return _build_missing_or_invalid_command_spec_response(
@@ -5842,9 +5845,9 @@ async def execute_followup_command(
                     reason="missing_or_invalid_command_spec",
                     status="blocked",
                 )
-            raw_command = _normalize_followup_command_line(request.command)
-        _validate_requested_followup_command(raw_command)
-        _assert_followup_command_is_suggested(raw_command, message_content, message_metadata)
+            raw_command = normalize_command_line(request.command)
+        _validate_requested_command(raw_command)
+        _assert_command_is_suggested(raw_command, message_content, message_metadata)
         purpose = _resolve_followup_command_purpose(
             raw_command=raw_command,
             message_metadata=message_metadata,
@@ -6598,9 +6601,9 @@ async def _run_follow_up_analysis_core(
             dedupe_commands = _extract_success_commands_from_assistant_message(assistant_message)
             if dedupe_commands:
                 existing_runtime_commands = [
-                    _normalize_followup_command_line(item)
+                    normalize_command_line(item)
                     for item in _as_list(analysis_context.get("_runtime_executed_commands"))
-                    if _normalize_followup_command_line(item)
+                    if normalize_command_line(item)
                 ]
                 merged_runtime_commands = existing_runtime_commands[:]
                 for command in dedupe_commands:
@@ -6917,9 +6920,9 @@ async def _run_follow_up_analysis_core(
         ),
     )
     executed_commands_set = {
-        _normalize_followup_command_line(item)
+        normalize_command_line(item)
         for item in _as_list(analysis_context.get("_runtime_executed_commands"))
-        if _normalize_followup_command_line(item)
+        if normalize_command_line(item)
     }
     prior_action_observations = [
         item
@@ -7133,7 +7136,7 @@ async def _run_follow_up_analysis_core(
     if bool((react_loop.get("replan") or {}).get("needed")):
         _metric_inc(AI_FOLLOWUP_REACT_REPLAN_TOTAL)
     if any(
-        normalize_followup_reason_code((item if isinstance(item, dict) else {}).get("reason"))
+        normalize_reason_code((item if isinstance(item, dict) else {}).get("reason"))
         == "no_executable_query_candidates"
         for item in _as_list((react_replan or {}).get("items"))
     ):
@@ -7141,22 +7144,22 @@ async def _run_follow_up_analysis_core(
 
     for action in followup_actions:
         action_dict = action if isinstance(action, dict) else {}
-        reason_code = normalize_followup_reason_code(action_dict.get("reason"))
+        reason_code = normalize_reason_code(action_dict.get("reason"))
         if not bool(action_dict.get("executable")) and reason_code in _FOLLOWUP_SPEC_COMPILE_FAILURE_REASON_CODES:
             _metric_inc(
                 AI_FOLLOWUP_ACTION_SPEC_COMPILE_FAILED_TOTAL,
                 labels={
                     "reason": reason_code,
-                    "reason_group": map_followup_reason_group(reason_code),
+                    "reason_group": map_reason_group(reason_code),
                 },
             )
-        repair_reason_code = normalize_followup_reason_code(action_dict.get("spec_repair_from_reason"))
+        repair_reason_code = normalize_reason_code(action_dict.get("spec_repair_from_reason"))
         if bool(action_dict.get("spec_repaired")) and repair_reason_code in _FOLLOWUP_GLUE_REASON_CODES:
             _metric_inc(
                 AI_FOLLOWUP_GLUE_REPAIR_SUCCESS_TOTAL,
                 labels={
                     "reason": repair_reason_code,
-                    "reason_group": map_followup_reason_group(repair_reason_code),
+                    "reason_group": map_reason_group(repair_reason_code),
                 },
             )
 
@@ -7164,7 +7167,7 @@ async def _run_follow_up_analysis_core(
         observation = item if isinstance(item, dict) else {}
         if _as_str(observation.get("status")).lower() != "semantic_incomplete":
             continue
-        reason_code = normalize_followup_reason_code(
+        reason_code = normalize_reason_code(
             observation.get("message")
             or observation.get("reason")
         )
@@ -7172,7 +7175,7 @@ async def _run_follow_up_analysis_core(
             AI_FOLLOWUP_SEMANTIC_INCOMPLETE_TOTAL,
             labels={
                 "reason": reason_code,
-                "reason_group": map_followup_reason_group(reason_code),
+                "reason_group": map_reason_group(reason_code),
             },
         )
 
