@@ -197,11 +197,21 @@ async def _execute_tool_call(
     tool_name: str,
     tool_input: Dict[str, Any],
     run_id: str,
+    *,
+    source_target: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Execute a single tool call via ToolAdapter and return output text.
 
     Maps skill tool names to actual command execution via the shared
     ToolAdapter → exec-service pipeline.
+
+    Args:
+        tool_name: Name of the skill/tool to execute.
+        tool_input: Input dict from the LLM tool call.
+        run_id: Current agent run ID.
+        source_target: Optional source_target metadata from analysis context.
+            Passed to ``normalize_command_spec`` so kubectl/SSH commands
+            get the correct ``target_identity`` for remote cluster routing.
     """
     from ai.runtime.tools import ToolAdapter
     from ai.command.normalizer import normalize_command_spec
@@ -229,6 +239,10 @@ async def _execute_tool_call(
                 try:
                     # Use normalize_command_spec for alias mapping
                     # (kubectl_clickhouse_query → clickhouse_query, etc.)
+                    # Pass source_target so remote cluster routing works:
+                    # the normalizer builds target_identity from source_target
+                    # (e.g. namespace:ems → openstack-cluster-01 via registry),
+                    # and compile_command uses it to select the right executor.
                     command_spec = normalize_command_spec(
                         {
                             "tool": spec.get("tool", "generic_exec"),
@@ -237,7 +251,8 @@ async def _execute_tool_call(
                             "target_identity": _as_str(spec.get("target_identity", "")),
                             "purpose": _as_str(spec.get("purpose", "")),
                             "timeout_seconds": int(spec.get("timeout_seconds", 20)),
-                        }
+                        },
+                        source_target=source_target,
                     )
                 except Exception:
                     # Fallback: skip steps with invalid tool/command spec
@@ -402,6 +417,14 @@ async def _run_claude_loop(
     max_turns = _max_turns()
     final_answer = ""
 
+    # Extract source_target from analysis context for remote cluster routing.
+    # source_target is set by the semantic engine (e.g. -> {namespace: "ems", pod_name: "..."}),
+    # and normalize_command_spec uses it to build the correct target_identity
+    # matching the remote target registry (e.g. openstack-cluster-01).
+    ctx = request.analysis_context or {}
+    source_target: Optional[Dict[str, Any]] = ctx.get("source_target")
+    source_target = source_target if isinstance(source_target, dict) else None
+
     runtime_service = _get_runtime_service()
 
     while turn_count < max_turns:
@@ -446,7 +469,10 @@ async def _run_claude_loop(
 
             logger.debug("Executing tool: %s", tool_name)
             try:
-                output = await _execute_tool_call(tool_name, tool_input, request.run_id)
+                output = await _execute_tool_call(
+                    tool_name, tool_input, request.run_id,
+                    source_target=source_target,
+                )
                 success = True
             except Exception as exc:
                 output = f"Tool execution failed: {exc}"
