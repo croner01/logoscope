@@ -58,14 +58,17 @@ def _api_base_url() -> str:
 
 def _load_skills_as_tools() -> List[Dict[str, Any]]:
     """加载 YAML skills 并转为 Claude tool 定义。"""
-    from ai.skills.loader import load_builtin_skills
+    from ai.skills.loader import list_skill_names, load_skill_by_name
     try:
-        skills = load_builtin_skills()
+        names = list_skill_names()
         tools = []
-        for skill in skills:
-            tool_def = getattr(skill, "to_tool_definition", None)
-            if tool_def:
-                tools.append(tool_def())
+        for name in names:
+            result = load_skill_by_name(name, backend="claude_sdk")
+            if result:
+                if isinstance(result, list):
+                    tools.extend(result)
+                else:
+                    tools.append(result)
         return tools
     except Exception as e:
         logger.warning("Failed to load skills as tools: %s", e)
@@ -111,7 +114,6 @@ async def _execute_tool_call(
     from ai.command.normalizer import normalize_command_spec
     from ai.command.compiler import compile_command
     from ai.command.security import evaluate_command
-    from ai.command.spec import CommandSpec
     from ai.runtime.tools import ToolAdapter
 
     spec = normalize_command_spec({
@@ -168,7 +170,7 @@ async def _stream_llm_turn(
             elif event.type == "content_block_start":
                 block = event.content_block
                 if getattr(block, "type", None) == "tool_use":
-                    tool_use = {"name": block.name, "input": block.input}
+                    tool_use = {"id": block.id, "name": block.name, "input": block.input}
             elif event.type == "message_delta":
                 delta = event.delta
                 stop_reason = getattr(delta, "stop_reason", None) if delta else None
@@ -232,7 +234,7 @@ async def _run_claude_loop(
                 "content": [
                     {
                         "type": "tool_result",
-                        "tool_use_id": tool_name,
+                        "tool_use_id": tool_use["id"],
                         "content": output,
                     }
                 ],
