@@ -43,7 +43,7 @@ from ai.command.line_normalizer import (
     normalize_command_line,
     normalize_command_match_key,
 )
-from ai.langchain_runtime import run_followup_langchain
+from ai.command._v1_helpers.langchain_runtime import run_followup_langchain
 from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
 from ai.runtime.bridge import unified_diagnosis_bridge, _is_unified_engine_enabled
 from ai.knowledge_provider import get_knowledge_gateway, shutdown_knowledge_gateway, reload_knowledge_gateway
@@ -76,7 +76,7 @@ from ai.command._v1_helpers.runtime_helpers import (
     _build_followup_runtime_thread_memory,
     _resolve_followup_answer_bundle,
 )
-from ai.followup_planning_helpers import (
+from ai.command._v1_helpers.planning_helpers import (
     _append_followup_react_summary,
     _build_followup_actions,
     _build_llm_replan_context,
@@ -84,14 +84,14 @@ from ai.followup_planning_helpers import (
     _build_followup_subgoals,
     _prioritize_followup_actions_with_react_memory,
 )
-from ai.followup_orchestration_helpers import (
+from ai.command._v1_helpers.orchestration_helpers import (
     _emit_followup_event,
     _format_sse_event,
     _remaining_timeout,
     _run_followup_auto_exec_react_loop,
     _resolve_followup_timeout_profile,
 )
-from ai.followup_v2_adapter import run_followup_v2_adapter
+from ai.command._v1_helpers.v2_adapter import run_followup_v2_adapter
 from ai.agent_runtime import event_protocol, get_agent_runtime_service
 from ai.agent_runtime.models import build_id
 from ai.agent_runtime.exec_client import (

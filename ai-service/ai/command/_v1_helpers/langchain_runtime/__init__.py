@@ -28,7 +28,7 @@ async def run_followup_langchain(
     stream_token_callback: Any = None,
 ) -> Dict[str, Any]:
     """惰性导入运行时，避免 package import 带入重依赖。"""
-    from ai.langchain_runtime.service import run_followup_langchain as _run_followup_langchain
+    from ai.command._v1_helpers.langchain_runtime.service import run_followup_langchain as _run_followup_langchain
 
     return await _run_followup_langchain(
         question=question,

@@ -9,10 +9,10 @@ import os
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from ai.langchain_runtime.memory import build_memory_context
-from ai.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT, build_followup_prompt
-from ai.langchain_runtime.schemas import ActionItem, StructuredAnswer
-from ai.langchain_runtime.tools import collect_tool_observations
+from ai.command._v1_helpers.langchain_runtime.memory import build_memory_context
+from ai.command._v1_helpers.langchain_runtime.prompts import FOLLOWUP_SYSTEM_PROMPT, build_followup_prompt
+from ai.command._v1_helpers.langchain_runtime.schemas import ActionItem, StructuredAnswer
+from ai.command._v1_helpers.langchain_runtime.tools import collect_tool_observations
 from ai.command._followup_compat import (
     compile_command_compat as compile_followup_command_spec,
     normalize_command_spec_compat as normalize_followup_command_spec,
@@ -480,7 +480,7 @@ async def _extract_commands_from_nl(
     从 LLM 返回的自然语言文本中提取可执行诊断命令。
     返回 list[dict]（可直接用于构建 ActionItem）或 None。
     """
-    from ai.langchain_runtime.prompts import NL_COMMAND_EXTRACTION_PROMPT
+    from ai.command._v1_helpers.langchain_runtime.prompts import NL_COMMAND_EXTRACTION_PROMPT
 
     extraction_prompt = NL_COMMAND_EXTRACTION_PROMPT.format(
         nl_text=nl_text[:4000],
@@ -620,7 +620,7 @@ async def _repair_malformed_action_commands(
     if not malformed:
         return False
 
-    from ai.langchain_runtime.prompts import COMMAND_REPAIR_PROMPT
+    from ai.command._v1_helpers.langchain_runtime.prompts import COMMAND_REPAIR_PROMPT
 
     commands_json = json.dumps([m["command"] for m in malformed], ensure_ascii=False)
     repair_prompt = COMMAND_REPAIR_PROMPT.format(commands_json=commands_json)
