@@ -272,6 +272,12 @@ class ClaudeSdkBackend(DiagnosisBackend):
     async def run(self, request: BackendRequest) -> BackendResult:
         ctx = request.context
 
+        # 检查 API key 是否配置 — 未配置时优雅降级
+        api_key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
+        if not api_key:
+            logger.warning("ANTHROPIC_API_KEY not set — ClaudeSdkBackend returns empty result")
+            return BackendResult(summary="Claude SDK 未配置 (ANTHROPIC_API_KEY 未设置)")
+
         # 1. 加载 YAML skills → Claude @tool 定义
         tools = _load_skills_as_tools()
 

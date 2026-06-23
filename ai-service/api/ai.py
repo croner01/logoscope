@@ -45,7 +45,7 @@ from ai.command.line_normalizer import (
 )
 from ai.command._v1_helpers.langchain_runtime import run_followup_langchain
 from ai.llm_service import get_llm_service, get_provider_models, PROVIDER_MODELS, reset_llm_service
-from ai.runtime.bridge import unified_diagnosis_bridge, _is_unified_engine_enabled
+# BackendRequest, get_backend 在 _run_follow_up_analysis_core 内局部导入
 from ai.knowledge_provider import get_knowledge_gateway, shutdown_knowledge_gateway, reload_knowledge_gateway
 from ai.command._v1_helpers.context_helpers import (
     _build_context_pills,
@@ -6559,45 +6559,40 @@ async def _run_follow_up_analysis_core(
     persist_user_message = ctx.persist_user_message
     token_estimation = ctx.token_estimation
 
-    # ── Unified engine path (opt-in via env var) ──────────────────────────
-    if _is_unified_engine_enabled():
-        llm_service = get_llm_service()
-        react_exec_bundle = await unified_diagnosis_bridge(
-            session_id=analysis_session_id,
-            message_id=assistant_message_id,
-            actions=followup_actions,
-            analysis_context=analysis_context,
-            allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
-            executed_commands=executed_commands_set,
-            initial_action_observations=prior_action_observations,
-            initial_evidence_gaps=evidence_gap_queue_for_execution,
-            initial_summary=answer_summary_seed,
-            emit_iteration_thoughts=bool(show_thought),
-            run_blocking=_run_blocking,
-            build_react_loop_fn=_build_followup_react_loop,
-            event_callback=event_callback,
-            logger=logger,
-            llm_replan_callback=_llm_replan_callback,
-            llm_service=llm_service,
-        )
-    else:
-        react_exec_bundle = await _run_followup_auto_exec_react_loop(
-            session_id=analysis_session_id,
-            message_id=assistant_message_id,
-            actions=followup_actions,
-            analysis_context=analysis_context,
-            allow_auto_exec_readonly=bool(getattr(request, "auto_exec_readonly", True)),
-            executed_commands=executed_commands_set,
-            initial_action_observations=prior_action_observations,
-            initial_evidence_gaps=evidence_gap_queue_for_execution,
-            initial_summary=answer_summary_seed,
-            emit_iteration_thoughts=bool(show_thought),
-            run_blocking=_run_blocking,
-            build_react_loop_fn=_build_followup_react_loop,
-            event_callback=event_callback,
-            logger=logger,
-            llm_replan_callback=_llm_replan_callback,
-        )
+    # ── 后端选择 ──────────────────────────────────────────────────────────
+    from ai.runtime.backend import get_backend, BackendRequest
+    from ai.runtime.events import EventEmitter
+    from ai.runtime.memory import SessionMemory
+    from ai.runtime.tools import ToolAdapter
+
+    backend = get_backend()  # AI_RUNTIME_BACKEND=claude-sdk | langgraph
+
+    event_emitter = EventEmitter()
+    tools = ToolAdapter()
+    memory = SessionMemory()
+
+    backend_request = BackendRequest(
+        context=ctx,
+        event_emitter=event_emitter,
+        tools=tools,
+        memory=memory,
+    )
+
+    if event_callback:
+        queue = event_emitter.subscribe(ctx.session_id)
+        async def _event_relay():
+            async for event_type, event_data in queue:
+                await event_callback(event_type, event_data)
+        asyncio.ensure_future(_event_relay())
+
+    result = await backend.run(backend_request)
+
+    react_exec_bundle = {
+        "actions": result.actions,
+        "action_observations": result.action_observations,
+        "react_loop": {"replan": {"needed": False}, "summary": result.summary},
+        "react_iterations": result.iterations,
+    }
     promoted_actions = [
         item
         for item in _as_list(react_exec_bundle.get("actions"))
