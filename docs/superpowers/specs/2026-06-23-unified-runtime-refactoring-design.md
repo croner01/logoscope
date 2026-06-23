@@ -32,6 +32,13 @@ Logoscope AI Service 当前有 3 个互不兼容的诊断执行引擎：
 - ❌ 不改动 YAML 技能定义格式
 - ❌ 不改动执行层（ToolAdapter、exec-service、toolbox-gateway）
 - ❌ 不改动前端事件消费逻辑
+- ❌ 不改动 `ai/runtime_v4/langgraph/graph.py`（`run_inner_graph()` 仍被 `run_diagnosis()` 内部引用）
+
+### 1.4 向后兼容与迁移
+
+- **env var 兼容**：旧的 `AI_RUNTIME_UNIFIED_ENGINE_ENABLED=true` 继续有效，等价于 `AI_RUNTIME_BACKEND=claude-sdk`。新部署应改用量 `AI_RUNTIME_BACKEND`。
+- **默认后端变化**：当前生产默认走 v1 路径，重构后默认走 `claude-sdk` 后端。设置 `AI_RUNTIME_BACKEND=langgraph` 可切回类 v1 的本地执行路径。
+- **无停机迁移**：Phase 0-2 保持 `_is_unified_engine_enabled()` 垫片可用，Phase 3 最终删除前通过 deprecation warning 通知。
 
 ## 2. 架构
 
@@ -168,7 +175,20 @@ async def build_diagnosis_context(
 
 **副作用：** 唯一副作用是 session 创建/查询和 memory 加载（都需要异步 IO）。这些都是纯读取，不修改全局状态。
 
-### 3.2 `ai/runtime/backend.py` — 统一后端接口
+### 3.2 `ai/runtime_v4/backend/` 目录的处理
+
+Phase 1 之后，`ai/runtime_v4/backend/` 目录的内容迁移如下：
+
+| 当前文件 | 去向 | 说明 |
+|---------|------|------|
+| `base.py` (`RuntimeBackend` Protocol) | **删除** | 被 `ai/runtime/backend.py` (`DiagnosisBackend` ABC) 取代 |
+| `claude_sdk_backend.py` | **迁移** → `ai/runtime/backends/claude_sdk.py` | 改为异步接口，移除线程 hack |
+| `langgraph_backend.py` | **删除** | 被 `ai/runtime/backends/langgraph.py` 取代（直接包装 `run_diagnosis()`) |
+| `orchestration_bridge.py` | **保留** | 独立工具编排功能，非后端实现 |
+
+`ai/runtime_v4/langgraph/` 目录（`graph.py` 等）**保留**——其中的 `run_inner_graph()` 仍然被 `run_diagnosis()` 内部的 PLAN→ACT→OBSERVE→REPLAN 循环引用，但不是后端的直接入口。
+
+### 3.3 `ai/runtime/backend.py` — 统一后端接口
 
 ```python
 @dataclass
@@ -214,9 +234,9 @@ def get_backend(name: Optional[str] = None) -> DiagnosisBackend:
     return cls()
 ```
 
-### 3.3 `ai/runtime/backends/` — 两个后端的实现
+### 3.4 `ai/runtime/backends/` — 两个后端的实现
 
-#### 3.3.1 `ai/runtime/backends/claude_sdk.py`
+#### 3.4.1 `ai/runtime/backends/claude_sdk.py`
 
 **现状：** `ai/runtime_v4/backend/claude_sdk_backend.py`（580 行）
 
@@ -254,7 +274,7 @@ class ClaudeSdkBackend(DiagnosisBackend):
 
 **`_run_claude_loop` 保持 Messages API 原生调用不变**（~250 行代码无需改动）
 
-#### 3.3.2 `ai/runtime/backends/langgraph.py`
+#### 3.4.2 `ai/runtime/backends/langgraph.py`
 
 **现状：** `run_diagnosis()` 在 `ai/runtime/engine.py` + `LangGraphBackend` 在 `ai/runtime_v4/backend/langgraph_backend.py`
 
@@ -288,20 +308,46 @@ class LangGraphBackend(DiagnosisBackend):
 - 从 `DiagnosisContext` 注入历史、LTM、reflection 到 `RuntimeState`
 - 现有的 `ai/runtime_v4/langgraph/` 目录保留但不再作为后端主要入口
 
-#### 3.3.3 后端选择逻辑
+#### 3.4.3 后端选择逻辑 + 旧变量兼容
+
+```python
+# ai/runtime/backend.py — 注册 + 选择
+
+_registry: Dict[str, Type[DiagnosisBackend]] = {}
+
+def register_backend(name: str, cls: Type[DiagnosisBackend]):
+    _registry[name] = cls
+
+def get_backend(name: Optional[str] = None) -> DiagnosisBackend:
+    """获取后端实例。保留旧 AI_RUNTIME_UNIFIED_ENGINE_ENABLED 兼容。"""
+    if name is None:
+        # 兼容旧变量：AI_RUNTIME_UNIFIED_ENGINE_ENABLED=true → claude-sdk
+        if _is_legacy_unified_engine_enabled():
+            name = "claude-sdk"
+        else:
+            name = os.getenv("AI_RUNTIME_BACKEND", "claude-sdk")
+    cls = _registry.get(name)
+    if cls is None:
+        raise KeyError(f"Unknown backend: {name}, available: {list(_registry.keys())}")
+    return cls()
+
+def _is_legacy_unified_engine_enabled() -> bool:
+    val = os.getenv("AI_RUNTIME_UNIFIED_ENGINE_ENABLED", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+```
 
 ```python
 # api/ai.py（post-refactor）
 
 context = await build_diagnosis_context(request, ...)
 
-backend = get_backend()  # AI_RUNTIME_BACKEND=claude-sdk | langgraph
+backend = get_backend()  # 优先识别旧变量 → 否则读 AI_RUNTIME_BACKEND
 
 event_emitter = EventEmitter()
 tools = ToolAdapter()
 memory = SessionMemory()
 
-request = BackendRequest(
+backend_request = BackendRequest(
     context=context,
     event_emitter=event_emitter,
     tools=tools,
@@ -314,16 +360,26 @@ if context.event_callback:
     queue = event_emitter.subscribe(context.session_id)
     # 启动 event relay（同现有 unified_diagnosis_bridge 的模式）
 
-result = await backend.run(request)
+result = await backend.run(backend_request)
 
 # 后续处理（不变）
 promoted_actions, action_observations = _merge_result(result, context)
 # ... metrics、answer 重写 ...
 ```
 
-### 3.4 流式输出
+**env var 迁移对照表：**
 
-#### 3.4.1 Claude SDK（已有，保持）
+| 旧变量 | 新变量 | 效果 |
+|--------|--------|------|
+| `AI_RUNTIME_UNIFIED_ENGINE_ENABLED=true` | 继续有效 ← `_is_legacy_unified_engine_enabled()` | 选择 claude-sdk |
+| `AI_RUNTIME_UNIFIED_ENGINE_ENABLED` 未设置 | `AI_RUNTIME_BACKEND=claude-sdk`（默认） | 选择 claude-sdk |
+| 不关心 | `AI_RUNTIME_BACKEND=langgraph` | 选择 langgraph |
+
+> **迁移路径**：部署配置中 `AI_RUNTIME_UNIFIED_ENGINE_ENABLED=true` 保持兼容；新部署应改用 `AI_RUNTIME_BACKEND=claude-sdk`。
+
+### 3.5 流式输出
+
+#### 3.5.1 Claude SDK（已有，保持）
 
 ```python
 # claude_sdk_backend.py 中的 _stream_llm_turn
@@ -339,7 +395,7 @@ async with client.messages.stream(...) as stream:
                     await event_emitter.emit(run_id, "assistant_delta", {"text": text})
 ```
 
-#### 3.4.2 LangGraph / `run_diagnosis()`（新增）
+#### 3.5.2 LangGraph / `run_diagnosis()`（新增）
 
 改动点：`run_diagnosis()` 的 LLM 规划阶段
 
@@ -379,12 +435,39 @@ async def _stream_llm_plan(plan_fn, sp, tp, schema, state, mem, lc, ee):
 ```python
 # ai/llm_service.py
 async def chat_stream(self, message: str, *, context=None, response_format=None) -> AsyncIterator[str]:
-    """流式 chat 调用，逐 token 产出字符串。"""
-    # 适配 OpenAI / DeepSeek 流式 API
-    # 返回 AsyncIterator[str]
+    """流式 chat 调用，逐 token 产出字符串。
+    
+    适配 OpenAI / DeepSeek 流式 API。
+    如果底层 LLM 不支持流式（stream_options={stream: true} 被拒绝），
+    降级为完整输出后 yield 一次 """。
+    # 优先尝试流式 API
+    # 如果流式失败 → 回退到非流式 chat() 并 yield full_text
+    # 超时/中断：AsyncIterator 正常结束，由上游 _stream_llm_plan 处理不完整 JSON
 ```
 
-### 3.5 删除 `_v1_helpers/`
+`_stream_llm_plan` 需要处理流式场景下的不完整 JSON：
+
+```python
+async def _stream_llm_plan(plan_fn, sp, tp, schema, state, mem, lc, ee):
+    """流式 LLM 规划：边收集边推送 token。"""
+    if lc is None:
+        return LlmPlanResult(actions=[], summary="no LLM configured")
+    
+    collected = ""
+    try:
+        async for chunk in lc(sp, tp, schema):
+            collected += chunk
+            if ee:
+                await ee.emit(state.run_id, "assistant_delta", {"text": chunk})
+    except (TimeoutError, ConnectionError) as exc:
+        logger.warning("LLM stream interrupted: %s", exc)
+        # 用已收集的不完整输出做 best-effort 解析
+    
+    # 解析 JSON（等效当前 _default_llm_plan 的 JSON 解析逻辑）
+    return _parse_llm_result(collected)
+```
+
+### 3.6 删除 `_v1_helpers/`
 
 条件：以上三步完成后验证通过。
 
@@ -446,7 +529,10 @@ _followup_* 前缀的内部函数 — 待确认是否继续使用后逐一评估
 ```
 文件: ai/diagnosis/context.py (~550 行)
 动作: 从 api/ai.py:6491-7047 中纯提取，不改变逻辑
-测试: pytest 全部通过
+测试:
+  1. 提取前：为当前函数写一个集成测试（mock 外部依赖），记录输出基线（日记）
+  2. 提取后：用同样输入调用 build_diagnosis_context()，断言输出一致
+  3. pytest 全部通过
 ```
 
 ### Phase 1（1-2 天）：创建统一接口 + 后端路由
@@ -478,13 +564,18 @@ _followup_* 前缀的内部函数 — 待确认是否继续使用后逐一评估
 
 ### Phase 3（1 天）：删除 v1 代码
 
+**前置条件：** 确认 `grep -rn "from ai.followup\|from ai.langchain_runtime\|from ai.command._v1_helpers\|import _v1_helpers" ai/ --include="*.py"` 除 `ai/bridge.py` 兼容垫片外无匹配。
+
 ```
 动作:
-  - 删除 _v1_helpers/ 目录
+  - 删除 _v1_helpers/ 目录（约 8,200 行代码）
   - 删除 langchain_runtime/ 目录
   - 删除遗留测试文件
   - 清理 ai/command/_followup_compat.py 中未导出的函数
-  - 精简 api/ai.py 中不再需要的函数
+  - 精简 api/ai.py 中不再需要的函数（约 15 个 _followup_* 函数）
+  - 删除 ai/bridge.py 中 _is_legacy_unified_engine_enabled()（兼容期结束后）
+  - 删除 ai/runtime_v4/backend/base.py（RuntimeBackend Protocol）
+  - 删除 ai/runtime_v4/backend/langgraph_backend.py
   - grep 验证无残留导入
 ```
 
