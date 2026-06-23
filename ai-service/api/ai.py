@@ -6581,8 +6581,14 @@ async def _run_follow_up_analysis_core(
     if event_callback:
         queue = event_emitter.subscribe(ctx.session_id)
         async def _event_relay():
-            async for event_type, event_data in queue:
-                await event_callback(event_type, event_data)
+            while True:
+                try:
+                    event = await queue.get()
+                    await event_callback(event["type"], event["payload"])
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    logger.exception("event_relay error")
         asyncio.ensure_future(_event_relay())
 
     result = await backend.run(backend_request)
@@ -6590,7 +6596,7 @@ async def _run_follow_up_analysis_core(
     react_exec_bundle = {
         "actions": result.actions,
         "action_observations": result.action_observations,
-        "react_loop": {"replan": {"needed": False}, "summary": result.summary},
+        "react_loop": {"replan": {"needed": result.replan_needed}, "summary": result.summary},
         "react_iterations": result.iterations,
     }
     promoted_actions = [

@@ -1840,7 +1840,7 @@ class AgentRuntimeService:
         if not safe_spec:
             return {"status": "skipped", "reason": "missing_structured_spec"}
         args = safe_spec.get("args") if isinstance(safe_spec.get("args"), dict) else {}
-        safe_query = _as_str(args.get("query") or safe_spec.get("query") or safe_spec.get("sql")).strip()
+        safe_query = _as_str(args.get("query") or safe_spec.get("query") or safe_spec.get("sql") or safe_spec.get("command")).strip()
         if not safe_query:
             return {"status": "skipped", "reason": "missing_query"}
         safe_tool = _as_str(safe_spec.get("tool")).strip().lower()
@@ -1883,6 +1883,7 @@ class AgentRuntimeService:
                 return {"status": "skipped", "reason": "llm_repair_empty"}
             repaired_spec = {
                 **safe_spec,
+                "command": repaired_query,
                 "args": {
                     **args,
                     "query": repaired_query,

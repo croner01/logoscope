@@ -10,9 +10,10 @@ RUN python -m venv /opt/venv
 
 COPY ai-service/requirements-runtime.txt /app/ai-service/requirements-runtime.txt
 RUN pip install  --prefer-binary -r /app/ai-service/requirements-runtime.txt
-# typing_extensions>=4.11 replaces typing._collect_parameters with PEP 696
-# validation that breaks langsmith 0.1.147. Force-downgrade to 4.10.0.
-RUN pip install "typing_extensions==4.10.0" --force-reinstall --no-deps
+# typing_extensions 4.14.0 is pinned in requirements-runtime.txt to support
+# anthropic 0.109.2's extra_items usage (TypedDict with extra_items=object).
+# The previous force-downgrade to 4.10.0 (langsmith 0.1.147 PEP 696 workaround)
+# is no longer needed — 4.14.0 works fine with both langsmith and anthropic.
 
 RUN python -m venv /opt/openharness-venv
 COPY ai-service/requirements-openharness.txt /app/ai-service/requirements-openharness.txt

@@ -1,14 +1,17 @@
-"""Runtime v4 backend factory and helpers."""
+"""Runtime v4 backend factory and helpers.
+
+Types that were previously in ``base.py`` now live in ``types.py``
+(avoiding a circular import between ``__init__`` and the backends).
+"""
 
 from __future__ import annotations
 
 import os
-from typing import Dict
+from typing import Any, Dict
 
-from ai.runtime_v4.backend.base import RuntimeBackend
+from ai.runtime_v4.backend.types import RuntimeBackend, RuntimeBackendRequest, RuntimeBackendResult
 from ai.runtime_v4.backend.langgraph_backend import LangGraphBackend
 from ai.runtime_v4.backend.claude_sdk_backend import ClaudeSdkBackend
-
 
 _runtime_backends: Dict[str, RuntimeBackend] = {}
 

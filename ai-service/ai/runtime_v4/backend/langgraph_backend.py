@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ai.runtime_v4.backend.base import RuntimeBackendRequest, RuntimeBackendResult
+from ai.runtime_v4.backend.types import RuntimeBackendRequest, RuntimeBackendResult
 from ai.runtime_v4.langgraph import InnerGraphState, inner_engine_name, run_inner_graph
 
 

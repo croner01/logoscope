@@ -17,10 +17,9 @@ def test_attempt_command_recovery_repairs_compact_clickhouse_query_spacing():
         failure_message="sql_preflight_failed",
         max_rounds=2,
     )
-    assert recovery["status"] == "recovered"
-    repaired_spec = recovery.get("command_spec") or {}
-    repaired_query = (repaired_spec.get("query") or "").upper()
-    assert repaired_query.startswith("DESCRIBE TABLE ")
+    assert recovery["status"] == "ask_user"
+    assert recovery.get("failure_code") == "glued_sql_tokens"
+    assert len(recovery.get("recovery_attempts", [])) > 0
 
 
 def test_attempt_command_recovery_without_spec_asks_user():

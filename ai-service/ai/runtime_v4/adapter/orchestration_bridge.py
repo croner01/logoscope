@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Dict, List
 
+logger = logging.getLogger(__name__)
+
+_FINALIZE_BACKEND_NAMES = {"claude-sdk-v1", "claude-sdk"}
+
 from ai.runtime_v4.backend import RuntimeBackend, get_runtime_backend, validate_runtime_backend_readiness
-from ai.runtime_v4.backend.base import RuntimeBackendRequest
+from ai.runtime_v4.backend.types import RuntimeBackendRequest
 from ai.runtime_v4.store import RuntimeV4ThreadStore
 from ai.runtime_v4.temporal.client import TemporalOuterClient
 
@@ -124,6 +130,40 @@ def _emit_backend_preview_events(run_id: str, *, inner_engine: str, backend_payl
         return
 
 
+async def _finalize_backend_run(run_id: str, backend_result: "RuntimeBackendResult") -> None:
+    """backend.run() 同步执行完毕后 finalize run。
+
+    如果 run 尚未到达 terminal 状态，调用 finish_run() 正常结束。
+    这是 V4 bridge 与 V1 agent runtime 之间的关键协调点：
+    V4 backend 执行完毕后必须通知 runtime service 更新状态，
+    否则 AgentRun 会永久 stuck 在 running。
+    """
+    if not _as_str(run_id).strip():
+        return
+    try:
+        from ai.agent_runtime.status import is_terminal_run_status
+        from api.ai import get_agent_runtime_service
+
+        def _do_finalize():
+            svc = get_agent_runtime_service()
+            run = svc.get_run(run_id)
+            if run is None or is_terminal_run_status(run.status):
+                return None
+            svc.finish_run(
+                run_id,
+                final_status="completed",
+                summary_updates={"backend_finalized_by": "orchestration_bridge"},
+                payload={"inner_engine": _as_str(backend_result.inner_engine)},
+            )
+            return True
+
+        finalized = await asyncio.get_event_loop().run_in_executor(None, _do_finalize)
+        if finalized:
+            logger.info("bridge: finalized backend run %s via finish_run", run_id)
+    except Exception:
+        logger.exception("bridge: failed to finalize backend run %s", run_id)
+
+
 class RuntimeV4OrchestrationBridge:
     """Bridge API v2 contract to the current runtime implementation."""
 
@@ -185,6 +225,12 @@ class RuntimeV4OrchestrationBridge:
             inner_engine=_as_str(backend_result.inner_engine),
             backend_payload=backend_result.payload,
         )
+        # 仅对全执行后端（如 Claude SDK）调用 _finalize_backend_run。
+        # LangGraph 是规划后端，工具执行由 V1 followup runtime 异步完成，
+        # 在此 finalize 会导致后续审批/用户输入等信号路径失效。
+        backend_name = _as_str(backend_result.inner_engine)
+        if backend_name in _FINALIZE_BACKEND_NAMES:
+            await _finalize_backend_run(run_id, backend_result)
 
         return {
             "workflow_id": _as_str((start_result or {}).get("workflow_id")),

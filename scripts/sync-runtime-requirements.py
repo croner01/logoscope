@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_VERSIONS = {
     "aiokafka": "0.12.0",
     "aiohttp": "3.9.5",
-    "anthropic": "0.49.0",
+    "anthropic": "0.109.2",
     "clickhouse-driver": "0.2.10",
     "pyyaml": "6.0.2",
     "fastapi": "0.104.1",
@@ -36,10 +36,10 @@ PACKAGE_VERSIONS = {
     "requests": "2.31.0",
     "tenacity": "8.2.3",
     "temporalio": "1.9.0",
-    # NOTE: The actual runtime uses typing_extensions==4.10.0 (to avoid PEP 696 validation
-    # that breaks langsmith 0.1.147 on Python 3.11+). The version here satisfies openai's
-    # constraint so pip resolves cleanly; the Dockerfile overrides it with --no-deps.
-    "typing_extensions": "4.12.2",
+    # NOTE: Version 4.14.0 is required by anthropic 0.109.2 for TypedDict extra_items
+    # support. Earlier versions (<4.14) lack extra_items on Python <3.11 and crash
+    # when anthropic's BetaFallbackParam is defined. Must stay >=4.14,<5.
+    "typing_extensions": "4.14.0",
     "uvicorn[standard]": "0.24.0",
 }
 

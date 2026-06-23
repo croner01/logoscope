@@ -15,7 +15,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ai.agent_runtime import event_protocol
-from ai.runtime_v4.backend.base import RuntimeBackend, RuntimeBackendRequest, RuntimeBackendResult
+from ai.runtime_v4.backend.types import RuntimeBackend, RuntimeBackendRequest, RuntimeBackendResult
 
 logger = logging.getLogger(__name__)
 

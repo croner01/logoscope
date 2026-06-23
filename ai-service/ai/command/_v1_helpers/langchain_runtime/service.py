@@ -18,7 +18,7 @@ from ai.command._followup_compat import (
     normalize_command_spec_compat as normalize_followup_command_spec,
     normalize_embedded_command_text as _normalize_embedded_command_text,
 )
-from ai.followup_planning_helpers import _extract_namespace_from_question, _resolve_followup_evidence_window
+from ai.command._v1_helpers.planning_helpers import _extract_namespace_from_question, _resolve_followup_evidence_window
 from ai.llm_service import _is_reasoning_model
 from ai.llm_stream_helpers import collect_chat_response
 

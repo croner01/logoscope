@@ -34,6 +34,7 @@ class BackendResult:
     action_observations: List[Dict[str, Any]] = field(default_factory=list)
     iterations: List[Dict[str, Any]] = field(default_factory=list)
     summary: str = ""
+    replan_needed: bool = False
 
 
 class DiagnosisBackend(ABC):

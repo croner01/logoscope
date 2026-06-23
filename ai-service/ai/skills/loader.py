@@ -141,6 +141,7 @@ def load_skill_steps(source: Any, context: Optional[SkillContext] = None) -> Lis
             "command": command,
             "target_kind": "k8s_cluster",
             "target_identity": "",
+            "purpose": step_data["purpose"],
             "timeout_seconds": step_data["timeout"],
         }
 

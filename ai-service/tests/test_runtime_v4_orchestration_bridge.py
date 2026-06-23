@@ -10,7 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from ai.runtime_v4.backend.base import RuntimeBackendResult
+from ai.runtime_v4.backend.types import RuntimeBackendResult
 from ai.runtime_v4.adapter.orchestration_bridge import RuntimeV4OrchestrationBridge
 
 

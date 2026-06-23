@@ -172,19 +172,32 @@ def _apply_kb_runtime_update(normalized: Dict[str, Any]) -> None:
 
 
 def _apply_llm_runtime_update(normalized: Dict[str, Any]) -> None:
-    """将 runtime 配置更新到当前进程环境变量。"""
-    provider = normalized["provider"]
+    """将 runtime 配置更新到当前进程环境变量。
 
+    统一设置所有后端（LangGraph / Claude SDK）需要的环境变量，
+    确保前端 Settings 页面的 LLM Runtime Configuration 能全局生效。
+    """
+    provider = normalized["provider"]
+    model = normalized["model"]
+    api_base = normalized["api_base"]
+    api_key = normalized["api_key"]
+
+    # ── 通用 LLM 配置 ──────────────────────────────────────────────────────
     _set_env_if_present("LLM_PROVIDER", provider)
-    _set_env_if_present("LLM_MODEL", normalized["model"])
-    _set_env_if_present("LLM_API_BASE", normalized["api_base"])
+    _set_env_if_present("LLM_MODEL", model)
+    _set_env_if_present("LLM_API_BASE", api_base)
     _set_env_if_present("LOCAL_MODEL_PATH", normalized["local_model_path"])
 
-    if provider == "local":
-        _set_env_if_present("LOCAL_MODEL_API_BASE", normalized["api_base"])
-    elif provider == "claude":
-        _set_env_if_present("ANTHROPIC_API_BASE", normalized["api_base"])
+    # ── V4 Claude SDK 后端配置 ──────────────────────────────────────────────
+    _set_env_if_present("CLAUDE_SDK_MODEL", model)
+    if api_base:
+        _set_env_if_present("ANTHROPIC_API_BASE", api_base)
 
+    # ── 本地模型特殊处理 ────────────────────────────────────────────────────
+    if provider == "local":
+        _set_env_if_present("LOCAL_MODEL_API_BASE", api_base)
+
+    # ── API Key ────────────────────────────────────────────────────────────
     if normalized["clear_api_key"]:
         for key in [
             "LLM_API_KEY",
@@ -195,7 +208,6 @@ def _apply_llm_runtime_update(normalized: Dict[str, Any]) -> None:
         ]:
             os.environ.pop(key, None)
 
-    api_key = normalized["api_key"]
     if api_key:
         os.environ["LLM_API_KEY"] = api_key
         provider_specific_key = {
@@ -206,6 +218,20 @@ def _apply_llm_runtime_update(normalized: Dict[str, Any]) -> None:
         }.get(provider)
         if provider_specific_key:
             os.environ[provider_specific_key] = api_key
+
+        # 关键：Anthropic SDK 总是用 ANTHROPIC_API_KEY 来设 x-api-key header。
+        # 如果用 DeepSeek 兼容端点，旧 ANTHROPIC_API_KEY 可能还存在（来自 ConfigMap
+        # 或之前的配置），且 _api_key() 的优先级是 ANTHROPIC_API_KEY 优先于
+        # DEEPSEEK_API_KEY。所以必须同步更新 ANTHROPIC_API_KEY。
+        if provider in ("claude", "deepseek"):
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+
+    # 重置 LLM 服务缓存，使配置立即生效
+    try:
+        from ai.llm_service import reset_llm_service
+        reset_llm_service()
+    except ImportError:
+        pass
 
 
 def _resolve_llm_deployment_file_path(extra: Dict[str, Any]) -> str:

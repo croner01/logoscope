@@ -51,6 +51,9 @@ def _normalize_history_keys(history: Any) -> set[str]:
 
 def _replace_query(spec: Dict[str, Any], query: str) -> Dict[str, Any]:
     next_spec = copy.deepcopy(spec)
+    # Always set command so that normalize_command_spec_compat picks it up,
+    # even when the spec has already been normalized.
+    next_spec["command"] = query
     args = next_spec.get("args") if isinstance(next_spec.get("args"), dict) else {}
     args["query"] = query
     next_spec["args"] = args
@@ -126,6 +129,7 @@ def _candidate_specs(spec: Dict[str, Any], purpose: str) -> List[Dict[str, Any]]
         ((spec.get("args") or {}) if isinstance(spec.get("args"), dict) else {}).get("query")
         or spec.get("query")
         or spec.get("sql")
+        or spec.get("command")
     ).strip()
     if not query:
         return []

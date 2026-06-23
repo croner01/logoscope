@@ -7,10 +7,11 @@ analysis_context 传给 RuntimeState，由 PromptBuilder 消费。
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
+from ai.llm_service import get_llm_service
 from ai.runtime.backend import DiagnosisBackend, BackendRequest, BackendResult
-from ai.runtime.engine import run_diagnosis
+from ai.runtime.engine import run_diagnosis, _stream_llm_plan
 from ai.runtime.prompt import PromptBuilder
 from ai.runtime.state import RuntimeState
 
@@ -67,19 +68,46 @@ class LangGraphBackend(DiagnosisBackend):
             max_iterations=6,
         )
 
-        # 3. 构建 LLM 调用
-        async def _llm_call(system_prompt: str, task_prompt: str, tool_schema: Any) -> Any:
-            """内部 LLM 调用适配器 — 暂返回空计划，Phase 2 改为流式。"""
-            return None
+        # 3. 构建流式 LLM generator + streaming plan function
+        async def _stream_llm_generator(
+            system_prompt: str, task_prompt: str, tool_schema: Any
+        ) -> AsyncIterator[str]:
+            """Async generator yielding tokens from LLMService.chat_stream()."""
+            llm = get_llm_service()
+            async for chunk in llm.chat_stream(
+                task_prompt,
+                system_prompt=system_prompt,
+                response_format={"type": "json_object"},
+            ):
+                yield chunk
 
-        # 4. 调用 run_diagnosis
+        async def _streaming_plan_fn(
+            system_prompt: str,
+            task_prompt: str,
+            tool_schema: dict,
+            state: RuntimeState,
+            memory: Any,
+            llm_call: Any,
+        ) -> Any:
+            """Streaming plan: emit token events, collect full result, parse actions."""
+            return await _stream_llm_plan(
+                system_prompt=system_prompt,
+                task_prompt=task_prompt,
+                tool_schema=tool_schema,
+                state=state,
+                memory=memory,
+                llm_call=_stream_llm_generator,
+                event_emitter=request.event_emitter,
+            )
+
+        # 4. 调用 run_diagnosis（使用流式 plan function）
         result = await run_diagnosis(
             state=state,
             tools=request.tools,
             prompt_builder=PromptBuilder(),
             memory=request.memory,
             event_emitter=request.event_emitter,
-            llm_call=_llm_call,
+            llm_plan=_streaming_plan_fn,
             logger=logger,
         )
 

@@ -124,6 +124,8 @@ def _resolve_llm_model(provider: str) -> str:
 
     if provider == "deepseek":
         return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    if provider == "claude":
+        return os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
     if provider == "local":
         return os.getenv("LOCAL_MODEL_NAME", "qwen2.5:7b")
 
@@ -156,6 +158,8 @@ def _resolve_llm_api_base(provider: str) -> Optional[str]:
 
     if provider == "openai":
         return os.getenv("OPENAI_API_BASE")
+    if provider == "claude":
+        return os.getenv("ANTHROPIC_API_BASE")
     if provider == "deepseek":
         return os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
     if provider == "local":
@@ -464,98 +468,6 @@ class OpenAIProvider(BaseLLMProvider):
                 yield content
 
 
-class ClaudeProvider(BaseLLMProvider):
-    """Claude 提供者"""
-
-    def __init__(self, config: LLMConfig):
-        super().__init__(config)
-        self.api_key = config.api_key or os.getenv("ANTHROPIC_API_KEY")
-        self.api_base = config.api_base or os.getenv("ANTHROPIC_API_BASE") or ""
-        self._client = None
-
-    async def _get_client(self):
-        """获取 Claude 客户端"""
-        if self._client is None:
-            try:
-                from anthropic import AsyncAnthropic
-                kwargs = dict(
-                    api_key=self.api_key,
-                    timeout=self.config.timeout,
-                )
-                if self.api_base:
-                    kwargs["base_url"] = self.api_base
-                self._client = AsyncAnthropic(**kwargs)
-            except ImportError:
-                raise ImportError("请安装 anthropic: pip install anthropic")
-        return self._client
-
-    async def generate(
-        self,
-        prompt: str,
-        system_prompt: str = "",
-        **kwargs
-    ) -> LLMResponse:
-        """生成响应"""
-        cache_key = self._get_cache_key(prompt, system_prompt)
-        cached = self._get_cached(cache_key)
-        if cached:
-            return LLMResponse(
-                content=cached,
-                model=self.config.model,
-                provider="claude",
-                cached=True,
-            )
-
-        start_time = datetime.now()
-
-        try:
-            client = await self._get_client()
-
-            response = await client.messages.create(
-                model=kwargs.get("model", self.config.model),
-                max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
-                system=system_prompt if system_prompt else None,
-                messages=[{"role": "user", "content": prompt}],
-            )
-
-            # 遍历 content blocks，合并所有 text block（跳过 thinking / tool_use）
-            parts: list[str] = []
-            for block in response.content:
-                if getattr(block, "type", None) == "text":
-                    parts.append(block.text or "")
-            content = "".join(parts)
-            latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-
-            self._set_cache(cache_key, content)
-
-            return LLMResponse(
-                content=content,
-                model=response.model,
-                provider="claude",
-                usage=_usage_to_dict(getattr(response, "usage", None)),
-                latency_ms=latency_ms,
-            )
-
-        except Exception as e:
-            logger.error(f"Claude API error: {e}")
-            return LLMResponse(
-                content="",
-                model=self.config.model,
-                provider="claude",
-                error=str(e),
-            )
-
-    async def generate_stream(
-        self,
-        prompt: str,
-        system_prompt: str = "",
-        **kwargs
-    ) -> AsyncIterator[str]:
-        """Claude SDK 流式在当前工程先降级到一次性响应。"""
-        response = await self.generate(prompt, system_prompt, **kwargs)
-        content = str(response.content or "")
-        if content:
-            yield content
 
 
 class LocalModelProvider(BaseLLMProvider):
@@ -729,7 +641,7 @@ class LLMService:
         """创建提供者"""
         providers = {
             "openai": OpenAIProvider,
-            "claude": ClaudeProvider,
+            "claude": DeepSeekProvider,
             "local": LocalModelProvider,
             "deepseek": DeepSeekProvider,
         }
@@ -937,9 +849,18 @@ class LLMService:
         message: str,
         context: Dict[str, Any] = None,
         response_format: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None,
     ) -> AsyncIterator[str]:
-        """通用对话（流式）。"""
-        system_prompt = "你是一个专业的可观测性和日志分析助手。"
+        """通用对话（流式）。
+
+        Args:
+            message: 用户消息。
+            context: 可选上下文 dict，自动拼入 prompt。
+            response_format: 可选的 response_format 参数。
+            system_prompt: 可选的 system prompt，None 时使用默认值。
+        """
+        if system_prompt is None:
+            system_prompt = "你是一个专业的可观测性和日志分析助手。"
 
         prompt = message
         if context:
@@ -957,8 +878,23 @@ _llm_service: Optional[LLMService] = None
 
 
 def get_llm_service() -> LLMService:
-    """获取 LLM 服务实例"""
+    """获取 LLM 服务实例
+
+    每次调用都会验证缓存的 provider 是否与当前环境变量匹配。
+    如果用户通过 Settings 页面更换了 LLM_PROVIDER 但没有触发
+    reset_llm_service()（例如滚动更新、worker 竞争条件），
+    此处会自动检测并重建实例，防止使用过时的 provider。
+    """
     global _llm_service
+    if _llm_service is not None:
+        current_provider = _resolve_provider()
+        cached_provider = _llm_service.config.provider
+        if current_provider != cached_provider:
+            logger.info(
+                "LLM provider mismatch: cached=%s env=%s — resetting service",
+                cached_provider, current_provider,
+            )
+            _llm_service = None
     if _llm_service is None:
         provider = _resolve_provider()
         model = _resolve_llm_model(provider)

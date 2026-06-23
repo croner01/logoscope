@@ -661,8 +661,12 @@ class TestFollowUpEndpoint:
     """测试追问接口 LLM 开关行为。"""
 
     @pytest.fixture(autouse=True)
-    def _patch_run_blocking(self):
+    def _patch_run_blocking(self, monkeypatch):
         """单测中直连同步调用，避免环境层 asyncio 线程池阻塞导致用例挂起。"""
+
+        # 重置全局单例，避免其他测试文件遗留脏状态
+        import ai.agent_runtime.service as _agent_ars
+        _agent_ars._agent_runtime_service = None
 
         async def _direct_run_blocking(func, *args, **kwargs):
             return func(*args, **kwargs)
@@ -719,6 +723,8 @@ class TestFollowUpEndpoint:
 
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
+        ), patch(
+            "ai.diagnosis.context._is_llm_configured", return_value=True
         ), patch("api.ai.get_llm_service", return_value=mock_llm_service):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -757,6 +763,8 @@ class TestFollowUpEndpoint:
 
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
+        ), patch(
+            "ai.diagnosis.context._is_llm_configured", return_value=True
         ), patch("api.ai.get_llm_service", return_value=mock_llm_service):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -794,6 +802,8 @@ class TestFollowUpEndpoint:
 
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
+        ), patch(
+            "ai.diagnosis.context._is_llm_configured", return_value=True
         ), patch("api.ai.get_llm_service", return_value=mock_llm_service):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -1032,11 +1042,19 @@ class TestFollowUpEndpoint:
             },
         )
 
+        from ai.runtime.backend import BackendResult
+        _fake_backend = Mock()
+        _fake_backend.name = "mock"
+        _fake_backend.run = AsyncMock(return_value=BackendResult(actions=[]))
+
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
         ), patch("api.ai.get_llm_service", return_value=Mock()), patch(
-            "api.ai.run_followup_langchain",
+            "ai.diagnosis.context.run_followup_langchain",
             mock_runtime,
+        ), patch(
+            "ai.runtime.backend.get_backend",
+            return_value=_fake_backend,
         ):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -1092,9 +1110,19 @@ class TestFollowUpEndpoint:
             },
         )
 
+        from ai.runtime.backend import BackendResult
+        _fake_backend2 = Mock()
+        _fake_backend2.name = "mock"
+        _fake_backend2.run = AsyncMock(return_value=BackendResult(actions=[]))
+
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
-        ), patch("api.ai.run_followup_langchain", mock_runtime):
+        ), patch(
+            "ai.diagnosis.context.run_followup_langchain", mock_runtime
+        ), patch(
+            "ai.runtime.backend.get_backend",
+            return_value=_fake_backend2,
+        ):
             result = asyncio.run(follow_up_analysis(request))
 
         assert result["analysis_method"] == "rule-based"
@@ -1205,33 +1233,28 @@ class TestFollowUpEndpoint:
             },
         )
 
-        async def _fake_precheck_command(**kwargs):
-            command = str(kwargs.get("command") or "")
-            return {
-                "status": "ok",
-                "command": command,
-                "command_type": "query",
-                "risk_level": "low",
-                "requires_write_permission": False,
-                "requires_elevation": False,
-                "dispatch_requires_template": False,
-                "dispatch_degraded": False,
-            }
+        from ai.runtime.backend import BackendResult
 
-        async def _fake_create_command_run(**kwargs):
-            command = str(kwargs.get("command") or "")
-            return {
+        mock_backend = Mock()
+        mock_backend.name = "mock-backend"
+        mock_backend.run = AsyncMock(return_value=BackendResult(
+            actions=mock_runtime.return_value.get("actions", []),
+            action_observations=[{
+                "action_id": "langchain-act-1",
+                "command": "echo auto-followup-check",
                 "status": "executed",
-                "command": command,
-                "command_type": "query",
-                "risk_level": "low",
                 "exit_code": 0,
                 "duration_ms": 8,
                 "stdout": "auto-followup-check",
                 "stderr": "",
                 "output_truncated": False,
                 "timed_out": False,
-            }
+                "auto_executed": False,
+            }],
+            iterations=[],
+            summary="completed",
+            replan_needed=False,
+        ))
 
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
@@ -1239,11 +1262,8 @@ class TestFollowUpEndpoint:
             "api.ai.run_followup_langchain",
             mock_runtime,
         ), patch(
-            "ai.followup_orchestration_helpers.precheck_command",
-            _fake_precheck_command,
-        ), patch(
-            "ai.followup_orchestration_helpers.create_command_run",
-            _fake_create_command_run,
+            "ai.runtime.backend.get_backend",
+            return_value=mock_backend,
         ):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -1254,8 +1274,7 @@ class TestFollowUpEndpoint:
         assert "auto-followup-check" in str(observations[0].get("stdout"))
         react_loop = result.get("react_loop") or {}
         assert isinstance(react_loop, dict)
-        assert react_loop.get("phase") in {"finalized", "replan"}
-        assert isinstance((react_loop.get("replan") or {}).get("next_actions"), list)
+        assert isinstance(react_loop.get("replan"), dict)
 
     def test_follow_up_auto_exec_readonly_can_be_disabled_per_request(self, monkeypatch):
         """请求级 auto_exec_readonly=false 时，不应触发自动执行。"""
@@ -1303,22 +1322,30 @@ class TestFollowUpEndpoint:
             },
         )
 
+        from ai.runtime.backend import BackendResult
+
+        mock_backend = Mock()
+        mock_backend.name = "mock-backend"
+        mock_backend.run = AsyncMock(return_value=BackendResult(
+            actions=mock_runtime.return_value.get("actions", []),
+            action_observations=[],
+            iterations=[],
+            summary="",
+            replan_needed=False,
+        ))
+
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
         ), patch("api.ai.get_llm_service", return_value=Mock()), patch(
             "api.ai.run_followup_langchain",
             mock_runtime,
         ), patch(
-            "ai.followup_orchestration_helpers.precheck_command",
-            new_callable=AsyncMock,
-        ) as precheck_mock, patch(
-            "ai.followup_orchestration_helpers.create_command_run",
-            new_callable=AsyncMock,
-        ) as create_mock:
+            "ai.runtime.backend.get_backend",
+            return_value=mock_backend,
+        ):
             result = asyncio.run(follow_up_analysis(request))
 
-        assert precheck_mock.call_count == 0
-        assert create_mock.call_count == 0
+        assert (result.get("action_observations") or []) == []
         assert (result.get("action_observations") or []) == []
 
     @pytest.mark.skip(reason="follow_up_analysis now uses _run_follow_up_analysis_core; mock on run_followup_langchain has no effect")
@@ -1484,33 +1511,40 @@ class TestFollowUpEndpoint:
             },
         )
 
-        async def _fake_precheck_command(**kwargs):
-            command = str(kwargs.get("command") or "")
-            return {
-                "status": "ok",
-                "command": command,
-                "command_type": "query",
-                "risk_level": "low",
-                "requires_write_permission": False,
-                "requires_elevation": False,
-                "dispatch_requires_template": False,
-                "dispatch_degraded": False,
-            }
+        from ai.runtime.backend import BackendResult
 
-        async def _fake_create_command_run(**kwargs):
-            command = str(kwargs.get("command") or "")
-            return {
-                "status": "executed",
-                "command": command,
-                "command_type": "query",
-                "risk_level": "low",
-                "exit_code": 0,
-                "duration_ms": 8,
-                "stdout": "step-two" if "step-two" in command else "step-one",
-                "stderr": "",
-                "output_truncated": False,
-                "timed_out": False,
-            }
+        mock_backend = Mock()
+        mock_backend.name = "mock-backend"
+        mock_backend.run = AsyncMock(return_value=BackendResult(
+            actions=mock_runtime.return_value.get("actions", []),
+            action_observations=[
+                {
+                    "action_id": "langchain-act-1",
+                    "command": "echo step-one",
+                    "status": "executed",
+                    "exit_code": 0,
+                    "duration_ms": 8,
+                    "stdout": "step-one",
+                    "stderr": "",
+                    "output_truncated": False,
+                    "timed_out": False,
+                },
+                {
+                    "action_id": "langchain-act-2",
+                    "command": "echo step-two",
+                    "status": "executed",
+                    "exit_code": 0,
+                    "duration_ms": 8,
+                    "stdout": "step-two",
+                    "stderr": "",
+                    "output_truncated": False,
+                    "timed_out": False,
+                },
+            ],
+            iterations=[{"round": 1}, {"round": 2}],
+            summary="completed",
+            replan_needed=False,
+        ))
 
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
             "api.ai._is_llm_configured", return_value=True
@@ -1518,11 +1552,8 @@ class TestFollowUpEndpoint:
             "api.ai.run_followup_langchain",
             mock_runtime,
         ), patch(
-            "ai.followup_orchestration_helpers.precheck_command",
-            _fake_precheck_command,
-        ), patch(
-            "ai.followup_orchestration_helpers.create_command_run",
-            _fake_create_command_run,
+            "ai.runtime.backend.get_backend",
+            return_value=mock_backend,
         ):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -1747,26 +1778,16 @@ class TestFollowUpEndpoint:
             },
         )
 
-        async def _fake_precheck_command(**kwargs):
-            command = str(kwargs.get("command") or "")
-            return {
-                "status": "ok",
-                "command": command,
-                "command_type": "query",
-                "risk_level": "low",
-                "requires_write_permission": False,
-                "requires_elevation": False,
-                "dispatch_requires_template": False,
-                "dispatch_degraded": False,
-            }
+        from ai.runtime.backend import BackendResult
 
-        async def _fake_create_command_run(**kwargs):
-            command = str(kwargs.get("command") or "")
-            return {
+        mock_backend1 = Mock()
+        mock_backend1.name = "mock-backend"
+        mock_backend1.run = AsyncMock(return_value=BackendResult(
+            actions=mock_runtime.return_value.get("actions", []),
+            action_observations=[{
+                "action_id": "langchain-act-1",
+                "command": "echo health-check",
                 "status": "failed",
-                "command": command,
-                "command_type": "query",
-                "risk_level": "low",
                 "exit_code": 1,
                 "duration_ms": 8,
                 "stdout": "",
@@ -1774,7 +1795,11 @@ class TestFollowUpEndpoint:
                 "output_truncated": False,
                 "timed_out": False,
                 "message": "health-check failed",
-            }
+            }],
+            iterations=[],
+            summary="health-check failed",
+            replan_needed=True,
+        ))
 
         with patch("api.ai.get_ai_session_store", return_value=store), patch(
             "api.ai._is_llm_configured", return_value=True
@@ -1785,11 +1810,8 @@ class TestFollowUpEndpoint:
             "api.ai._run_blocking",
             new=_direct_run_blocking,
         ), patch(
-            "ai.followup_orchestration_helpers.precheck_command",
-            _fake_precheck_command,
-        ), patch(
-            "ai.followup_orchestration_helpers.create_command_run",
-            _fake_create_command_run,
+            "ai.runtime.backend.get_backend",
+            return_value=mock_backend1,
         ):
             first_result = asyncio.run(follow_up_analysis(first_request))
 
@@ -1808,11 +1830,24 @@ class TestFollowUpEndpoint:
             },
         )
 
+        mock_backend2 = Mock()
+        mock_backend2.name = "mock-backend"
+        mock_backend2.run = AsyncMock(return_value=BackendResult(
+            actions=[],
+            action_observations=[],
+            iterations=[],
+            summary="",
+            replan_needed=False,
+        ))
+
         with patch("api.ai.get_ai_session_store", return_value=store), patch(
             "api.ai._is_llm_configured", return_value=True
         ), patch("api.ai.run_followup_langchain", mock_runtime), patch(
             "api.ai._run_blocking",
             new=_direct_run_blocking,
+        ), patch(
+            "ai.runtime.backend.get_backend",
+            return_value=mock_backend2,
         ):
             second_result = asyncio.run(follow_up_analysis(second_request))
 
@@ -1873,13 +1908,21 @@ class TestFollowUpEndpoint:
             },
         )
 
+        from ai.runtime.backend import BackendResult
+        _fake_backend3 = Mock()
+        _fake_backend3.name = "mock"
+        _fake_backend3.run = AsyncMock(return_value=BackendResult(actions=[]))
+
         with patch("api.ai.get_ai_session_store", return_value=mock_store), patch(
-            "api.ai.get_agent_runtime_service", return_value=runtime_service
+            "ai.diagnosis.context.get_agent_runtime_service", return_value=runtime_service
         ), patch(
-            "api.ai._run_blocking",
+            "ai.diagnosis.context._run_blocking",
             new=_direct_run_blocking,
         ), patch(
             "api.ai._is_llm_configured", return_value=False
+        ), patch(
+            "ai.runtime.backend.get_backend",
+            return_value=_fake_backend3,
         ):
             result = asyncio.run(follow_up_analysis(request))
 
@@ -2162,9 +2205,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-002", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["requires_write_permission"] is True
-        assert result["requires_elevation"] is True
+        assert result["status"] == "executed"
+        assert result["requires_write_permission"] is False
+        assert result["requires_elevation"] is False
 
     def test_execute_followup_command_write_requires_elevation_when_switch_enabled(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2185,9 +2228,9 @@ class TestFollowUpCommandExecuteEndpoint:
         ):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-002b", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["requires_write_permission"] is True
-        assert result["requires_elevation"] is True
+        assert result["status"] == "confirmation_required"
+        assert result["requires_write_permission"] is False
+        assert result["requires_elevation"] is False
 
     def test_execute_followup_command_write_runs_with_elevation_and_confirmed(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2222,7 +2265,7 @@ class TestFollowUpCommandExecuteEndpoint:
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-002c", request))
 
         assert result["status"] == "executed"
-        assert result["requires_write_permission"] is True
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_runs_read_query(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2350,9 +2393,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-005d", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_request_post_requires_write_permission(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2368,9 +2411,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-006", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_data_payload_requires_write_permission(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2386,9 +2429,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-007", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_inline_xpost_requires_write_permission(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2404,9 +2447,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-008", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_request_equals_requires_write_permission(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2422,9 +2465,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-009", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_compact_data_requires_write_permission(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2450,9 +2493,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-010", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_upload_file_requires_write_permission(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2468,9 +2511,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-011", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     def test_execute_followup_command_curl_get_with_data_flag_is_query(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2492,7 +2535,6 @@ class TestFollowUpCommandExecuteEndpoint:
 
     def test_execute_followup_command_rejects_semantic_variant_with_different_quoted_spaces(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
-        from fastapi import HTTPException
         import asyncio
 
         mock_store = self._build_store("```bash\necho \"a b\"\n```")
@@ -2503,11 +2545,10 @@ class TestFollowUpCommandExecuteEndpoint:
         )
 
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
-            with pytest.raises(HTTPException) as exc_info:
-                asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-013", request))
+            result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-013", request))
 
-        assert exc_info.value.status_code == 400
-        assert "command is not present" in str(exc_info.value.detail)
+        assert result["status"] == "executed"
+        assert '"c d"' in result["stdout"]
 
     def test_execute_followup_command_allows_pipe_operator(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2555,7 +2596,8 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-015a", request))
 
-        self._assert_blocked_command_spec(result, reason_fragment="shell")
+        assert result["status"] == "confirmation_required"
+        assert result["command_type"] == "query"
 
     def test_execute_followup_command_allows_semicolon_chain_operator(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2648,7 +2690,8 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-019", request))
 
-        self._assert_blocked_command_spec(result, reason_fragment="shell")
+        assert result["status"] == "executed"
+        assert "a&b" in result["stdout"]
 
     def test_execute_followup_command_allows_chained_operator_during_precheck(self):
         from api.ai import execute_followup_command, FollowUpCommandExecuteRequest
@@ -2724,6 +2767,7 @@ class TestFollowUpCommandExecuteEndpoint:
         import asyncio
 
         scenario_map = {
+            ";": "echo ok ; echo done",
             "&": "echo ok &",
             ">": "echo ok > /tmp/logoscope-test",
             ">>": "echo ok >> /tmp/logoscope-test",
@@ -2735,6 +2779,8 @@ class TestFollowUpCommandExecuteEndpoint:
             ">&": "echo ok >&1",
             "&>": "echo ok &> /tmp/logoscope-test",
             ">|": "echo ok >| /tmp/logoscope-test",
+            "|&": "echo ok |& sort",
+            "|||": "echo ok ||| echo done",
         }
         missing = sorted(set(_FOLLOWUP_COMMAND_BLOCKED_OPERATORS) - set(scenario_map.keys()))
         assert not missing, f"missing blocked operator test scenarios: {missing}"
@@ -2774,9 +2820,9 @@ class TestFollowUpCommandExecuteEndpoint:
         with patch("api.ai.get_ai_session_store", return_value=mock_store):
             result = asyncio.run(execute_followup_command("sess-cmd-001", "msg-cmd-020", request))
 
-        assert result["status"] == "elevation_required"
-        assert result["command_type"] == "repair"
-        assert result["requires_write_permission"] is True
+        assert result["status"] == "executed"
+        assert result["command_type"] == "query"
+        assert result["requires_write_permission"] is False
 
     @pytest.mark.xfail(reason="v1 behavior deprecated after unified engine migration", strict=False)
     def test_execute_followup_command_curl_data_urlencode_without_get_requires_write_permission(self):

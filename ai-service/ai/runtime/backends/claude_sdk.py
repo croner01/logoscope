@@ -21,6 +21,8 @@ from ai.runtime.backend import (
     register_backend,
 )
 from ai.runtime.events import EventEmitter
+from ai.runtime.tools import ToolAdapter
+from ai.runtime.memory import SessionMemory
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +47,22 @@ def _model_name() -> str:
 
 def _api_key() -> str:
     key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
-    if key:
-        return key
-    raise RuntimeError("ANTHROPIC_API_KEY not set")
+    if not key:
+        key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
+    if not key:
+        key = _as_str(os.getenv("DEEPSEEK_API_KEY"))
+    if not key:
+        key = _as_str(os.getenv("LLM_API_KEY"))
+    if not key:
+        raise RuntimeError(
+            "Claude SDK backend needs ANTHROPIC_API_KEY, CLAUDE_SDK_API_KEY, "
+            "DEEPSEEK_API_KEY, or LLM_API_KEY environment variable"
+        )
+    return key
 
 
 def _api_base_url() -> str:
-    return _as_str(os.getenv("ANTHROPIC_BASE_URL")) or "https://api.anthropic.com/v1"
+    return _as_str(os.getenv("ANTHROPIC_API_BASE")) or _as_str(os.getenv("ANTHROPIC_BASE_URL")) or "https://api.anthropic.com/v1"
 
 
 # ── Skills → Tools ─────────────────────────────────────────────────────────
@@ -86,7 +97,9 @@ def _build_messages(context: Any) -> List[Dict[str, Any]]:
         if role in ("user", "assistant"):
             messages.append({"role": role, "content": _as_str(content)})
     if context.question:
-        messages.append({"role": "user", "content": context.question})
+        # 避免重复: 检查最后一条 user 消息是否已包含 question
+        if not messages or messages[-1].get("content") != context.question:
+            messages.append({"role": "user", "content": context.question})
     return messages
 
 
@@ -109,18 +122,23 @@ async def _execute_tool_call(
     source_target: Optional[Dict[str, Any]],
     event_emitter: EventEmitter,
     run_id: str,
+    tools_adapter: ToolAdapter,
+    memory: SessionMemory,
 ) -> Tuple[str, int]:
     """执行 Claude 选择的工具调用。"""
     from ai.command.normalizer import normalize_command_spec
     from ai.command.compiler import compile_command
     from ai.command.security import evaluate_command
-    from ai.runtime.tools import ToolAdapter
 
     spec = normalize_command_spec({
         "command": tool_name,
         "args": tool_input,
         "source_target": source_target,
     })
+
+    # 去重检查
+    if memory and memory.is_duplicate(spec):
+        return f"Command skipped: already executed in this session", 0
 
     # 安全检查
     security = evaluate_command(spec)
@@ -129,10 +147,18 @@ async def _execute_tool_call(
 
     # 编译执行
     compiled = compile_command(spec)
-    adapter = ToolAdapter()
-    result = await adapter.execute(compiled)
+    result = await tools_adapter.execute(compiled)
 
-    return result.output if hasattr(result, "output") else str(result), result.exit_code
+    # 记录到 session memory
+    if memory:
+        memory.record(
+            spec,
+            exit_code=result.exit_code,
+            summary=result.stdout[:120] if result.exit_code == 0 else f"failed: {result.stderr[:120]}",
+            output_preview=result.stdout[:2000],
+        )
+
+    return result.stdout if hasattr(result, "stdout") else str(result), result.exit_code
 
 
 async def _stream_llm_turn(
@@ -152,28 +178,53 @@ async def _stream_llm_turn(
     # tool_choice 构建
     tool_config = {"tools": tools} if tools else {}
 
-    async with client.messages.stream(
-        model=_model_name(),
-        system=system_prompt,
-        messages=messages,
-        max_tokens=max_tokens,
-        **tool_config,
-    ) as stream:
-        async for event in stream:
-            if event.type == "content_block_delta":
-                delta = event.delta
-                if getattr(delta, "type", None) == "text_delta":
-                    text = _as_str(getattr(delta, "text", ""))
-                    if text:
-                        collected_text += text
-                        await event_emitter.emit(run_id, "assistant_delta", {"text": text})
-            elif event.type == "content_block_start":
-                block = event.content_block
-                if getattr(block, "type", None) == "tool_use":
-                    tool_use = {"id": block.id, "name": block.name, "input": block.input}
-            elif event.type == "message_delta":
-                delta = event.delta
-                stop_reason = getattr(delta, "stop_reason", None) if delta else None
+    try:
+        async with client.messages.stream(
+            model=_model_name(),
+            system=system_prompt,
+            messages=messages,
+            max_tokens=max_tokens,
+            **tool_config,
+        ) as stream:
+            async for event in stream:
+                if event.type == "content_block_delta":
+                    delta = event.delta
+                    if getattr(delta, "type", None) == "text_delta":
+                        text = _as_str(getattr(delta, "text", ""))
+                        if text:
+                            collected_text += text
+                            await event_emitter.emit(run_id, "assistant_delta", {"text": text})
+                elif event.type == "content_block_start":
+                    block = event.content_block
+                    if getattr(block, "type", None) == "text":
+                        text = _as_str(getattr(block, "text", ""))
+                        if text:
+                            collected_text += text
+                            await event_emitter.emit(run_id, "assistant_delta", {"text": text})
+                    elif getattr(block, "type", None) == "tool_use":
+                        tool_use = {"id": block.id, "name": block.name, "input": block.input}
+                elif event.type == "message_delta":
+                    delta = event.delta
+                    stop_reason = getattr(delta, "stop_reason", None) if delta else None
+    except Exception:
+        logger.warning("_stream_llm_turn: streaming failed, falling back to non-streaming")
+        response = await client.messages.create(
+            model=_model_name(),
+            system=system_prompt,
+            messages=messages,
+            max_tokens=max_tokens,
+            **tool_config,
+        )
+        collected_text = ""
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                text = _as_str(getattr(block, "text", ""))
+                if text:
+                    collected_text += text
+                    await event_emitter.emit(run_id, "assistant_delta", {"text": text})
+            elif getattr(block, "type", None) == "tool_use":
+                tool_use = {"id": block.id, "name": block.name, "input": block.input}
+        stop_reason = getattr(response, "stop_reason", None)
 
     return collected_text, stop_reason, tool_use
 
@@ -185,6 +236,8 @@ async def _run_claude_loop(
     event_emitter: EventEmitter,
     source_target: Optional[Dict[str, Any]],
     run_id: str,
+    tools_adapter: ToolAdapter,
+    memory: SessionMemory,
     max_turns: int = 10,
 ) -> BackendResult:
     """Claude agent 主循环。"""
@@ -221,7 +274,8 @@ async def _run_claude_loop(
             })
 
             output, exit_code = await _execute_tool_call(
-                tool_name, tool_input, source_target, event_emitter, run_id
+                tool_name, tool_input, source_target, event_emitter, run_id,
+                tools_adapter, memory,
             )
 
             await event_emitter.emit(run_id, "tool_call_finished", {
@@ -273,10 +327,11 @@ class ClaudeSdkBackend(DiagnosisBackend):
         ctx = request.context
 
         # 检查 API key 是否配置 — 未配置时优雅降级
-        api_key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
-        if not api_key:
-            logger.warning("ANTHROPIC_API_KEY not set — ClaudeSdkBackend returns empty result")
-            return BackendResult(summary="Claude SDK 未配置 (ANTHROPIC_API_KEY 未设置)")
+        try:
+            _ = _api_key()
+        except RuntimeError:
+            logger.warning("No API key configured — ClaudeSdkBackend returns empty result")
+            return BackendResult(summary="Claude SDK 未配置 (未找到 API Key)")
 
         # 1. 加载 YAML skills → Claude @tool 定义
         tools = _load_skills_as_tools()
@@ -287,7 +342,11 @@ class ClaudeSdkBackend(DiagnosisBackend):
         # 3. 构建消息列表
         messages = _build_messages(ctx)
 
-        # 4. 执行 agent 循环
+        # 4. 初始化 tools 和 memory
+        tools_adapter = ToolAdapter()
+        memory = SessionMemory()
+
+        # 5. 执行 agent 循环
         return await _run_claude_loop(
             system_prompt=system_prompt,
             messages=messages,
@@ -295,6 +354,8 @@ class ClaudeSdkBackend(DiagnosisBackend):
             event_emitter=request.event_emitter,
             source_target=ctx.source_target,
             run_id=ctx.session_id,
+            tools_adapter=tools_adapter,
+            memory=memory,
         )
 
 

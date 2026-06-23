@@ -317,12 +317,21 @@ def normalize_command_spec_compat(raw: Any) -> Dict[str, Any]:
 def _detect_glued_sql_tokens(text: str) -> bool:
     """Detect SQL keywords glued to adjacent words (e.g. SELECTname, FROMsystem)."""
     import re as _re
+    # Keyword alternation with negative lookaheads for known longer-form
+    # keywords.  Sorted longest-first so that e.g. DESCRIBE matches before
+    # DESC when the full word is DESCRIBE.  The negative lookaheads prevent
+    # a short keyword from falsely matching inside a longer known keyword
+    # when the longer keyword is properly spaced (e.g. AS inside ASC).
     _glued_sql = _re.compile(
-        r"(?i)(SELECT|FROM|WHERE|AND|OR|NOT|IN|ON|AS|WHEN|THEN|ELSE|END|CASE"
-        r"|LIMIT|OFFSET|FORMAT|UNION|ALL|DISTINCT|HAVING|PREWHERE|ARRAY|JOIN"
-        r"|GLOBAL|FINAL|SETTINGS|WITH|TOTALS|DESC|ASC|ORDER|GROUP|PARTITION"
-        r"|BY|LEFT|RIGHT|INNER|CROSS|FULL|OUTER|SEMI|ANTI"
-        r")(?=[A-Za-z0-9_])"
+        r"(?i)\b("
+        r"DESCRIBE|EXPLAIN|SELECT|FROM|WHERE|AND|ORDER|GROUP|PARTITION"
+        r"|LIMIT|OFFSET|FORMAT|UNION|ALL|DISTINCT|HAVING|PREWHERE|ARRAY"
+        r"|INNER|LEFT|RIGHT|CROSS|FULL|OUTER|SEMI|ANTI|JOIN"
+        r"|GLOBAL|FINAL|SETTINGS|WITH|TOTALS|CASE"
+        r"|WHEN|THEN|ELSE|END|NOT"
+        r"|DESC(?!RIBE)|OR(?!DER)|IN(?!NER)|ASC(?!I)|AS(?!C)"
+        r"|ON|BY"
+        r")(?=[A-Za-z0-9])"
     )
     return bool(_glued_sql.search(text))
 
@@ -356,7 +365,7 @@ def compile_command_compat(
                             "detail": f"命令包含不安全片段（禁止重定向/后台执行）: {t}",
                         }
 
-            # Check for glued SQL tokens before normalising
+            # Check for glued SQL tokens before normalising (query/sql/command specs)
             raw_query = _as_str(spec.get("query") or spec.get("sql") or spec.get("command") or "")
             if raw_query and _detect_glued_sql_tokens(raw_query):
                 return {

@@ -9,9 +9,10 @@ Fixes audit H5: approval always goes through EventEmitter.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ai.command.compiler import compile_command
 from ai.command.normalizer import normalize_command_spec
@@ -23,6 +24,8 @@ from ai.runtime.memory import SessionMemory
 from ai.runtime.events import EventEmitter
 from ai.runtime.prompt import PromptBuilder
 from ai.runtime.tools import ToolAdapter
+
+logger = logging.getLogger(__name__)
 
 
 def _as_str(value: Any, default: str = "") -> str:
@@ -111,7 +114,11 @@ async def _default_llm_plan(
             return LlmPlanResult(actions=[], summary=f"LLM returned non-JSON: {raw[:200]}", raw_response=raw)
 
     if isinstance(raw, dict):
-        raw = [raw]
+        # Extract {"actions": [...]} format that the PromptBuilder teaches the LLM
+        if "actions" in raw and isinstance(raw["actions"], list):
+            raw = raw["actions"]
+        else:
+            raw = [raw]
 
     actions = []
     for item in _as_list(raw):
@@ -124,6 +131,66 @@ async def _default_llm_plan(
                 actions.append(item)
 
     return LlmPlanResult(actions=actions, summary="", raw_response=str(raw)[:2000])
+
+
+async def _stream_llm_plan(
+    system_prompt: str,
+    task_prompt: str,
+    tool_schema: dict,
+    state: RuntimeState,
+    memory: SessionMemory,
+    llm_call: Any = None,
+    event_emitter: Optional[EventEmitter] = None,
+) -> LlmPlanResult:
+    """Streaming LLM planning — emit token events while collecting full result.
+
+    llm_call must be an async generator function (returns AsyncIterator[str])
+    that yields text chunks.  This is the streaming counterpart of
+    _default_llm_plan.
+    """
+    if llm_call is None:
+        return LlmPlanResult(actions=[], summary="no LLM client configured")
+
+    collected = ""
+    try:
+        async for chunk in llm_call(system_prompt, task_prompt, tool_schema):
+            collected += chunk
+            if event_emitter and state.run_id:
+                await event_emitter.emit(state.run_id, "assistant_delta", {"text": chunk})
+    except (TimeoutError, ConnectionError) as exc:
+        logger.warning("_stream_llm_plan: LLM stream interrupted: %s", exc)
+        return LlmPlanResult(actions=[], summary=f"LLM stream interrupted: {exc}", raw_response=collected[:2000])
+    except Exception as exc:
+        return LlmPlanResult(actions=[], summary=f"LLM call failed: {exc}")
+
+    if not collected.strip():
+        return LlmPlanResult(actions=[], summary="LLM returned empty response")
+
+    # Same JSON-parsing logic as _default_llm_plan above
+    try:
+        raw = json.loads(collected)
+    except json.JSONDecodeError:
+        return LlmPlanResult(
+            actions=[], summary=f"LLM returned non-JSON", raw_response=collected[:2000],
+        )
+
+    if isinstance(raw, dict):
+        # Extract {"actions": [...]} format that the PromptBuilder teaches the LLM
+        if "actions" in raw and isinstance(raw["actions"], list):
+            raw = raw["actions"]
+        else:
+            raw = [raw]
+
+    actions = []
+    for item in _as_list(raw):
+        if isinstance(item, dict):
+            cmd = item.get("command_spec") or item.get("command") or item
+            if isinstance(cmd, dict):
+                actions.append(cmd)
+            elif isinstance(item, dict) and item.get("command"):
+                actions.append(item)
+
+    return LlmPlanResult(actions=actions, summary="", raw_response=collected[:2000])
 
 
 # ── Runtime Result ─────────────────────────────────────────────────────────
@@ -481,4 +548,4 @@ async def run_diagnosis(
     )
 
 
-__all__ = ["run_diagnosis", "RuntimeResult", "LlmPlanResult", "LlmPlanFn"]
+__all__ = ["run_diagnosis", "RuntimeResult", "LlmPlanResult", "LlmPlanFn", "_stream_llm_plan"]

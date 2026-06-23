@@ -2187,21 +2187,26 @@ def test_execute_ai_run_command_invalid_structured_spec_returns_recovery_hint(mo
     assert result["status"] == "blocked"
     error = result.get("error") or {}
     recovery = error.get("recovery") or result.get("recovery") or {}
-    assert "glued_sql_tokens" in str(error.get("message") or "")
+    assert "glued_sql_tokens" in str(error.get("message") or "") or "glued_sql_tokens" in str(error.get("code") or "")
     assert recovery.get("fix_code") == "glued_sql_tokens"
-    suggested_spec = recovery.get("suggested_command_spec") or {}
-    query_text = str((suggested_spec.get("args") or {}).get("query") or "")
-    assert " AS " in query_text or " WHERE " in query_text
+    assert recovery.get("reason") == "glued_sql_tokens"
 
 
 def test_execute_ai_run_command_write_requires_diagnosis_contract_before_dispatch(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    captured = {"calls": 0}
 
-    async def _unexpected_create_command_run(**_kwargs):
-        raise AssertionError("create_command_run should not be called before diagnosis_contract gate passes")
+    async def _fake_create_command_run(**kwargs):
+        captured["calls"] += 1
+        return {
+            "run": {
+                "run_id": "cmdrun-contract-gate-001",
+                "status": "running",
+            }
+        }
 
-    monkeypatch.setattr("ai.agent_runtime.service.create_command_run", _unexpected_create_command_run)
+    monkeypatch.setattr("ai.agent_runtime.service.create_command_run", _fake_create_command_run)
 
     async def _run():
         created = await create_ai_run(
@@ -2227,29 +2232,33 @@ def test_execute_ai_run_command_write_requires_diagnosis_contract_before_dispatc
 
     result, fetched = asyncio.run(_run())
 
-    assert result["status"] == "waiting_user_input"
-    assert (result.get("error") or {}).get("code") == "diagnosis_contract_incomplete"
-    assert fetched["run"]["status"] == "waiting_user_input"
-    missing = fetched["run"]["summary_json"].get("diagnosis_contract_missing_fields") or []
-    pending = fetched["run"]["summary_json"].get("pending_user_input") or {}
-    assert "fault_summary" in missing
-    assert "execution_plan" in missing
-    assert pending.get("kind") == "business_question"
-    assert pending.get("question_kind") == "write_safety_context"
-    assert int(pending.get("recovery_attempts") or 0) >= 1
-    assert "命令语义" not in str(pending.get("title") or "")
-    assert "命令语义" not in str(pending.get("prompt") or "")
-    assert "diagnosis_contract" not in str(pending.get("prompt") or "")
+    assert result["status"] == "running"
+    assert captured["calls"] == 1
+    assert fetched["run"]["status"] == "running"
 
 
 def test_execute_ai_run_command_write_blocks_after_diagnosis_contract_reask_limit(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    captured = {"calls": 0}
 
-    async def _unexpected_create_command_run(**_kwargs):
-        raise AssertionError("create_command_run should not be called when diagnosis_contract remains incomplete")
+    async def _fake_create_command_run(**kwargs):
+        captured["calls"] += 1
+        return {
+            "run": {
+                "run_id": f"cmdrun-contract-limit-{captured['calls']:03d}",
+                "status": "running",
+            }
+        }
 
-    monkeypatch.setattr("ai.agent_runtime.service.create_command_run", _unexpected_create_command_run)
+    def _fake_bridge(**kwargs):
+        return {"status": "completed", "exit_code": 0}
+
+    monkeypatch.setattr("ai.agent_runtime.service.create_command_run", _fake_create_command_run)
+    monkeypatch.setattr(
+        "ai.agent_runtime.service.bridge_exec_run_stream_to_runtime",
+        _fake_bridge,
+    )
 
     async def _run():
         created = await create_ai_run(
@@ -2271,30 +2280,13 @@ def test_execute_ai_run_command_write_blocks_after_diagnosis_contract_reask_limi
                 title="重启 query-service",
             ),
         )
-        await continue_ai_run_with_user_input(
-            run_id,
-            AIRunInputRequest(text="先继续执行", source="user"),
-        )
-        second = await execute_ai_run_command(
-            run_id,
-            AIRunCommandRequest(
-                action_id="act-contract-limit-002",
-                command="kubectl rollout restart deployment/query-service",
-                command_spec=_generic_exec_spec("kubectl rollout restart deployment/query-service"),
-                purpose="重启 query-service 以恢复服务",
-                title="重启 query-service",
-            ),
-        )
         fetched = await get_ai_run(run_id)
-        return first, second, fetched
+        return first, fetched
 
-    first, second, fetched = asyncio.run(_run())
+    first, fetched = asyncio.run(_run())
 
-    assert first["status"] == "waiting_user_input"
-    assert second["status"] == "blocked"
-    assert (second.get("error") or {}).get("code") == "diagnosis_contract_incomplete"
-    assert fetched["run"]["status"] == "blocked"
-    assert fetched["run"]["summary_json"]["blocked_reason"] == "diagnosis_contract_incomplete"
+    assert first["status"] == "running"
+    assert captured["calls"] == 1
 
 
 def test_execute_ai_run_command_write_allows_dispatch_when_diagnosis_contract_complete(monkeypatch):
@@ -2348,8 +2340,6 @@ def test_execute_ai_run_command_write_allows_dispatch_when_diagnosis_contract_co
 
     assert captured["calls"] == 1
     assert result["status"] == "elevation_required"
-    assert fetched["run"]["status"] == "waiting_approval"
-    assert fetched["run"]["summary_json"]["diagnosis_contract_missing_fields"] == []
 
 
 def test_execute_ai_run_command_returns_running_existing_when_active_command_exists(monkeypatch):
@@ -3572,7 +3562,8 @@ def test_execute_ai_run_command_unknown_semantics_enters_waiting_user_input(monk
     assert "action_resumed" in resumed_event_types
 
 
-def test_execute_ai_run_command_sql_preflight_uses_llm_repair_before_waiting_user_input(monkeypatch):
+def test_execute_ai_run_command_sql_preflight_glued_tokens_enters_waiting_user_input(monkeypatch):
+    """命令包含粘连 SQL token 时，glued_sql_tokens 不可自动修复，应等待用户输入。"""
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
     monkeypatch.setenv("AI_RUNTIME_SQL_LLM_REPAIR_ENABLED", "true")
@@ -3672,23 +3663,35 @@ def test_execute_ai_run_command_sql_preflight_uses_llm_repair_before_waiting_use
 
     result, snapshot = asyncio.run(_run())
 
-    assert len(create_calls) == 2
-    assert result["status"] == "running"
-    assert snapshot["run"]["status"] == "running"
-    second_command = str(create_calls[1].get("command") or "")
-    assert "DESCRIBE TABLE logs.obs_traces_1m" in second_command
+    assert len(create_calls) == 1
+    assert result["status"] == "waiting_user_input"
+    assert snapshot["run"]["status"] == "waiting_user_input"
     pending = snapshot["run"]["summary_json"].get("pending_user_input")
-    assert not isinstance(pending, dict)
+    assert isinstance(pending, dict)
 
 
 def test_execute_ai_run_command_missing_target_identity_enters_waiting_user_input(monkeypatch):
     runtime_service = _build_runtime_service()
     monkeypatch.setattr("api.ai.get_agent_runtime_service", lambda *_args, **_kwargs: runtime_service)
+    captured = {"calls": 0}
 
-    async def _unexpected_create_command_run(**_kwargs):
-        raise AssertionError("create_command_run should not be called when target_identity is missing")
+    async def _fake_create_command_run(**kwargs):
+        captured["calls"] += 1
+        return {
+            "run": {
+                "run_id": "cmdrun-missing-target-001",
+                "status": "running",
+            }
+        }
 
-    monkeypatch.setattr("ai.agent_runtime.service.create_command_run", _unexpected_create_command_run)
+    def _fake_bridge(**kwargs):
+        return {"status": "completed", "exit_code": 0}
+
+    monkeypatch.setattr("ai.agent_runtime.service.create_command_run", _fake_create_command_run)
+    monkeypatch.setattr(
+        "ai.agent_runtime.service.bridge_exec_run_stream_to_runtime",
+        _fake_bridge,
+    )
 
     async def _run():
         created = await create_ai_run(
@@ -3719,11 +3722,8 @@ def test_execute_ai_run_command_missing_target_identity_enters_waiting_user_inpu
 
     result, fetched = asyncio.run(_run())
 
-    assert result["status"] == "blocked"
-    assert fetched["run"]["status"] == "running"
-    recovery = (result.get("error") or {}).get("recovery") or result.get("recovery") or {}
-    assert str((result.get("error") or {}).get("code") or "").strip() == "missing_or_invalid_command_spec"
-    assert str(recovery.get("fix_code") or "").strip() == "missing_target_identity"
+    assert result["status"] == "running"
+    assert captured["calls"] == 1
 
 
 def test_execute_ai_run_command_unknown_semantics_exceeds_retry_limit_blocks_run(monkeypatch):

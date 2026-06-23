@@ -82,7 +82,7 @@ class TestActingNode:
     def test_acting_marks_pending_action_dispatched(self):
         action = _make_pending_action()
         state = _make_state(actions=[action])
-        with patch("ai.followup_command_spec.compile_followup_command_spec") as mock_compile:
+        with patch("ai.runtime_v4.langgraph.nodes.acting._compile_command_spec") as mock_compile:
             mock_compile.return_value = {"ok": True, "command": "kubectl describe pod test"}
             result = run_acting(state)
         dispatched = [a for a in result.actions if a.get("status") == "dispatched"]
@@ -91,7 +91,7 @@ class TestActingNode:
     def test_acting_sets_next_dispatch_in_reflection(self):
         action = _make_pending_action()
         state = _make_state(actions=[action])
-        with patch("ai.followup_command_spec.compile_followup_command_spec") as mock_compile:
+        with patch("ai.runtime_v4.langgraph.nodes.acting._compile_command_spec") as mock_compile:
             mock_compile.return_value = {"ok": True, "command": "kubectl describe pod test"}
             result = run_acting(state)
         assert "next_dispatch" in result.reflection

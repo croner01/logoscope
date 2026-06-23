@@ -1,5 +1,8 @@
-"""Shared runtime backend request/response models."""
+"""Shared runtime backend request/response models.
 
+Originally in ``base.py`` — split into this module to avoid circular imports
+between ``__init__.py`` and the backend implementations.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
