@@ -113,6 +113,14 @@ class DiagnosisContext:
     event_callback: Optional[Callable]
     run_blocking: Callable
 
+    # ── 闭包（在 build_diagnosis_context 内定义，通过 dataclass 传递回 caller） ──
+    thought_timeline: List[Dict[str, Any]] = field(default_factory=list)
+    assistant_message_id: str = ""
+    masked_answer: str = ""
+    emit_thought_callback: Optional[Callable] = None
+    stream_token_callback: Optional[Callable] = None
+    llm_replan_callback: Optional[Callable] = None
+
 
 async def build_diagnosis_context(
     request: Any,
@@ -718,4 +726,11 @@ async def build_diagnosis_context(
         show_thought=show_thought,
         event_callback=event_callback,
         run_blocking=getattr(request, "run_blocking", None),
+        # ── 闭包（定义在 build_diagnosis_context 中，由 caller 消费） ──
+        thought_timeline=thought_timeline,
+        assistant_message_id=assistant_message_id,
+        masked_answer=masked_answer,
+        emit_thought_callback=_emit_thought,
+        stream_token_callback=_stream_token_callback,
+        llm_replan_callback=_llm_replan_callback,
     )
