@@ -121,6 +121,25 @@ class DiagnosisContext:
     stream_token_callback: Optional[Callable] = None
     llm_replan_callback: Optional[Callable] = None
 
+    # ── 衍生字段（后续流程 7049+ 需要，由 build_diagnosis_context 内部计算） ──
+    references: List[Dict[str, Any]] = field(default_factory=list)
+    context_pills: Dict[str, Any] = field(default_factory=dict)
+    history_compacted: bool = False
+    token_estimate: int = 0
+    token_remaining: int = 0
+    token_warning: bool = False
+    llm_timeout_fallback: bool = False
+    long_term_memory_hits: int = 0
+    long_term_memory_summary: str = ""
+    history_timeout: bool = False
+    long_term_memory_timeout: bool = False
+    react_memory_timeout: bool = False
+    answer_generation_timeout: bool = False
+    analysis_method: str = "rule-based"
+    langchain_actions: List[Dict[str, Any]] = field(default_factory=list)
+    user_message: Dict[str, Any] = field(default_factory=dict)
+    persist_user_message: Optional[Dict[str, Any]] = None
+
 
 async def build_diagnosis_context(
     request: Any,
@@ -128,6 +147,8 @@ async def build_diagnosis_context(
     *,
     storage: Any,
     llm_service: Any,
+    event_callback: Optional[Callable] = None,
+    get_llm_service_fn: Optional[Callable[[], Any]] = None,
 ) -> DiagnosisContext:
     """执行所有共享前置逻辑，返回 DiagnosisContext。
 
@@ -138,8 +159,13 @@ async def build_diagnosis_context(
     - request: FollowUpRequest 对象
     - session_store: AI 会话存储
     - storage: 通用存储
-    - llm_service: LLM 服务
+    - llm_service: LLM 服务实例（已初始化）
+    - event_callback: 可选事件回调（若未提供则从 request 读取）
+    - get_llm_service_fn: LLM 服务工厂（默认使用 api.ai.get_llm_service）
     """
+    if get_llm_service_fn is None:
+        get_llm_service_fn = get_llm_service
+
     # ── 输入验证 + 脱敏 ──
     question = _as_str(request.question)
     if not question:
@@ -155,7 +181,7 @@ async def build_diagnosis_context(
     runtime_lab_mode = _is_ai_runtime_lab_mode(analysis_context=analysis_context)
     show_thought = bool(getattr(request, "show_thought", False))
     thought_timeline: List[Dict[str, Any]] = []
-    event_callback = getattr(request, "event_callback", None)
+    event_callback = event_callback if event_callback is not None else getattr(request, "event_callback", None)
 
     # ── api/ai.py:6512-7047 逐行复制 — 从 _emit_thought 到 _llm_replan_callback ──
 
@@ -459,7 +485,7 @@ async def build_diagnosis_context(
                 analysis_session_id=analysis_session_id,
                 resolve_followup_engine=_resolve_followup_engine,
                 run_followup_langchain_fn=run_followup_langchain,
-                get_llm_service_fn=get_llm_service,
+                get_llm_service_fn=get_llm_service_fn,
                 build_followup_fallback_answer=_build_followup_fallback_answer,
                 build_followup_response_instruction=_build_followup_response_instruction,
                 stream_token_callback=_stream_token_callback if callable(event_callback) else None,
@@ -607,7 +633,7 @@ async def build_diagnosis_context(
             remaining_timeout=remaining_timeout,
         )
         try:
-            replan_llm_service = get_llm_service()
+            replan_llm_service = get_llm_service_fn()
         except Exception as exc:
             logger and logger.warning("LLM replan: failed to get llm service: %s", exc)
             return None
@@ -733,4 +759,22 @@ async def build_diagnosis_context(
         emit_thought_callback=_emit_thought,
         stream_token_callback=_stream_token_callback,
         llm_replan_callback=_llm_replan_callback,
+        # ── 衍生字段 ──
+        references=references,
+        context_pills=context_pills,
+        history_compacted=history_compacted,
+        token_estimate=token_estimate,
+        token_remaining=token_remaining,
+        token_warning=token_warning,
+        llm_timeout_fallback=llm_timeout_fallback,
+        long_term_memory_hits=long_term_memory_hits,
+        long_term_memory_summary=long_term_memory_summary,
+        history_timeout=history_timeout,
+        long_term_memory_timeout=long_term_memory_timeout,
+        react_memory_timeout=react_memory_timeout,
+        answer_generation_timeout=answer_generation_timeout,
+        analysis_method=method,
+        langchain_actions=langchain_actions,
+        user_message=user_message,
+        persist_user_message=persist_user_message,
     )
