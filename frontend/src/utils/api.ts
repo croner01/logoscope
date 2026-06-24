@@ -726,6 +726,9 @@ export interface LogsQueryParams {
   end_time?: string;
   exclude_health_check?: boolean;
   search?: string;
+  openstack_request_id?: string;
+  openstack_global_request_id?: string;
+  openstack_trace_mode?: 'and' | 'or' | string;
   source_service?: string;
   target_service?: string;
   source_namespace?: string;

@@ -976,7 +976,14 @@ const LogsExplorer: React.FC = () => {
     if (debouncedRequestIdFilter) params.request_id = debouncedRequestIdFilter;
     if (correlationRequestIds.length > 0) params.request_ids = correlationRequestIds.join(',');
     if (debouncedPodNameFilter) params.pod_name = debouncedPodNameFilter;
-    if (debouncedSearchQuery) params.search = debouncedSearchQuery;
+    // 检测是否为 OpenStack req-id 格式 → 走独立列精准查询
+    if (debouncedSearchQuery && /^req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(debouncedSearchQuery)) {
+      params.openstack_request_id = debouncedSearchQuery;
+      params.openstack_global_request_id = debouncedSearchQuery;
+      params.openstack_trace_mode = 'or';
+    } else if (debouncedSearchQuery) {
+      params.search = debouncedSearchQuery;
+    }
     if (startTime) params.start_time = startTime;
     if (endTime) params.end_time = endTime;
     if (excludeHealthCheck) params.exclude_health_check = true;
