@@ -3760,11 +3760,18 @@ const TopologyPage: React.FC = () => {
                 setFocusServiceFilter(value);
                 // Auto-detect OpenStack req- UUID format → switch to trace mode
                 if (/^req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+                  const requestSeq = ++changeOverlayRequestSeqRef.current;
                   setSearchMode('openstack_trace');
                   try {
                     const response = await api.getOpenstackTraceChain(value);
-                    setOpenstackTraceResult((response?.chains as Record<string, unknown>[]) || []);
+                    if (requestSeq !== changeOverlayRequestSeqRef.current) {
+                      return; // 当前请求已被更新的输入覆盖
+                    }
+                    setOpenstackTraceResult(Array.isArray(response?.chains) ? response.chains : []);
                   } catch (err) {
+                    if (requestSeq !== changeOverlayRequestSeqRef.current) {
+                      return;
+                    }
                     console.error('Failed to fetch OpenStack trace chain:', err);
                     setOpenstackTraceResult([]);
                   }
