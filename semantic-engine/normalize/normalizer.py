@@ -288,6 +288,13 @@ _SPAN_ID_TEXT_PATTERNS = (
     re.compile(r'"span(?:_id)?"\s*[:=]\s*"([0-9a-fA-F]{16})"'),
 )
 
+_OPENSTACK_BRACKET_RE = re.compile(
+    r'\[([^\]]*req-[0-9a-f-]+[^\]]*)\]'
+)
+_OPENSTACK_REQ_ID_RE = re.compile(
+    r'(req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+)
+
 
 def _extract_trace_span_from_log_text(log_data: Dict[str, Any]) -> Dict[str, str]:
     """Fallback parser: extract trace/span ids from raw log message text."""
@@ -325,6 +332,44 @@ def _extract_trace_span_from_log_text(log_data: Dict[str, Any]) -> Dict[str, str
 
         if trace_id or span_id:
             return {"trace_id": trace_id, "span_id": span_id}
+    return {}
+
+
+def extract_openstack_request_ids(log_data: Dict[str, Any]) -> Dict[str, str]:
+    """
+    从 OpenStack 日志消息中提取 request_id 和 global_request_id。
+
+    支持两种 oslo.log format：
+      旧格式: [req-<UUID> <project_id> <user_id> ...] → request_id 有值, global 为空
+      新格式: [req-<UUID> req-<UUID> <project_id> ...] → global=第一个, request_id=第二个
+    0 个 req-id: 不是 OpenStack 请求上下文 → 返回空字典
+
+    Args:
+        log_data: 原始日志数据字典
+
+    Returns:
+        Dict[str, str]: 包含 openstack_request_id 和 openstack_global_request_id 的字典
+    """
+    message = _candidate_text(log_data.get("message")) or _candidate_text(log_data.get("log"))
+    if not message:
+        return {}
+
+    bracket_match = _OPENSTACK_BRACKET_RE.search(message)
+    if not bracket_match:
+        return {}
+
+    req_ids = _OPENSTACK_REQ_ID_RE.findall(bracket_match.group(1))
+
+    if len(req_ids) >= 2:
+        return {
+            "openstack_request_id": req_ids[1],
+            "openstack_global_request_id": req_ids[0],
+        }
+    elif len(req_ids) == 1:
+        return {
+            "openstack_request_id": req_ids[0],
+            "openstack_global_request_id": "",
+        }
     return {}
 
 

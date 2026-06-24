@@ -2,6 +2,8 @@
 测试normalize/normalizer.py模块
 """
 import pytest
+from typing import Any, Dict
+
 from normalize.normalizer import (
     normalize_log,
     extract_service_name,
@@ -11,6 +13,7 @@ from normalize.normalizer import (
     extract_trace_id,
     extract_trace_info,
     extract_span_id,
+    extract_openstack_request_ids,
 )
 
 
@@ -430,3 +433,57 @@ class TestExtractTraceId:
         assert result["context"]["span_id"] == "8682103c981c1c9f"
         assert result["context"]["trace_id_source"] == "otlp"
         assert result["_raw_attributes"]["trace_id_source"] == "otlp"
+
+
+class TestExtractOpenstackRequestIds:
+    """测试 OpenStack request_id 提取函数"""
+
+    def _make_log_data(self, message: str) -> Dict[str, Any]:
+        return {"message": message}
+
+    def test_old_format_single_req_id(self):
+        """旧格式：1 个 req-id，没有 global_request_id"""
+        msg = ('2026-06-22 16:10:47.797 12 INFO nova.api.openstack.wsgi '
+               '[req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c '
+               'c5f2666761c24ec3a4ad4f14fe75f6cd '
+               '4b3634c206414deb85e65c292b78951d - default default] '
+               "Action: 'create'")
+        result = extract_openstack_request_ids(self._make_log_data(msg))
+        assert result["openstack_request_id"] == "req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c"
+        assert result["openstack_global_request_id"] == ""
+
+    def test_new_format_two_req_ids(self):
+        """新格式：2 个 req-id，第一个是 global_request_id"""
+        msg = ('2026-06-22 16:10:53.251 13 INFO cinder.api.openstack.wsgi '
+               '[req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c '
+               'req-db0b50d4-ddba-4053-ad86-3a9fb9d8e846 '
+               'c5f2666761c24ec3a4ad4f14fe75f6cd '
+               '4b3634c206414deb85e65c292b78951d - default default] '
+               'GET http://cinder/v3/volumes')
+        result = extract_openstack_request_ids(self._make_log_data(msg))
+        assert result["openstack_request_id"] == "req-db0b50d4-ddba-4053-ad86-3a9fb9d8e846"
+        assert result["openstack_global_request_id"] == "req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c"
+
+    def test_volume_id_bracket_not_req_id(self):
+        """bracket 内是 volume-xxx 而不是 req- 开头 → 不提取"""
+        msg = '2026-06-22 16:10:53.272 13 INFO ... [volume-0c4dc8e8-bdf4-48a8-b114-9f1d42615158] done'
+        result = extract_openstack_request_ids(self._make_log_data(msg))
+        assert result == {}
+
+    def test_no_openstack_log(self):
+        """非 OpenStack 日志 → 不提取"""
+        msg = '2026-06-22 16:10:53 INFO query-service Starting service'
+        result = extract_openstack_request_ids(self._make_log_data(msg))
+        assert result == {}
+
+    def test_extract_from_log_field(self):
+        """使用 log 字段而不是 message 字段"""
+        log_data = {"log": '[req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c project_id user_id] test'}
+        result = extract_openstack_request_ids(log_data)
+        assert result["openstack_request_id"] == "req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c"
+        assert result["openstack_global_request_id"] == ""
+
+    def test_empty_message(self):
+        """空 message → 不提取"""
+        assert extract_openstack_request_ids({}) == {}
+        assert extract_openstack_request_ids({"message": ""}) == {}
