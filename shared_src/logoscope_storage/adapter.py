@@ -839,21 +839,20 @@ class StorageAdapter:
 
             # 迁移：为存量 logs 表增加 OpenStack 列（幂等）
             try:
+                _ddl_commands = [
+                    "ALTER TABLE logs.logs ADD COLUMN IF NOT EXISTS openstack_request_id String DEFAULT ''",
+                    "ALTER TABLE logs.logs ADD COLUMN IF NOT EXISTS openstack_global_request_id String DEFAULT ''",
+                    "ALTER TABLE logs.logs ADD INDEX IF NOT EXISTS idx_openstack_request_id "
+                    "(openstack_request_id) TYPE bloom_filter(0.01) GRANULARITY 4",
+                    "ALTER TABLE logs.logs ADD INDEX IF NOT EXISTS idx_openstack_global_request_id "
+                    "(openstack_global_request_id) TYPE bloom_filter(0.01) GRANULARITY 4",
+                ]
                 if self.ch_client:
-                    self.ch_client.execute(
-                        "ALTER TABLE logs.logs ADD COLUMN IF NOT EXISTS openstack_request_id String DEFAULT ''"
-                    )
-                    self.ch_client.execute(
-                        "ALTER TABLE logs.logs ADD COLUMN IF NOT EXISTS openstack_global_request_id String DEFAULT ''"
-                    )
-                    self.ch_client.execute(
-                        "ALTER TABLE logs.logs ADD INDEX IF NOT EXISTS idx_openstack_request_id "
-                        "(openstack_request_id) TYPE bloom_filter(0.01) GRANULARITY 4"
-                    )
-                    self.ch_client.execute(
-                        "ALTER TABLE logs.logs ADD INDEX IF NOT EXISTS idx_openstack_global_request_id "
-                        "(openstack_global_request_id) TYPE bloom_filter(0.01) GRANULARITY 4"
-                    )
+                    for ddl in _ddl_commands:
+                        self.ch_client.execute(ddl)
+                else:
+                    for ddl in _ddl_commands:
+                        self._execute_clickhouse_http_ddl(ddl)
             except Exception:
                 logger.warning("Failed to apply OpenStack request_id migration (may already exist)", exc_info=True)
         except Exception as e:
@@ -1064,7 +1063,8 @@ class StorageAdapter:
             query = f"""
                 INSERT INTO logs.logs (
                     id, timestamp, service_name, pod_name, namespace,
-                    node_name, level, message, trace_id, span_id, labels, host_ip,
+                    node_name, level, message, openstack_request_id, openstack_global_request_id,
+                    trace_id, span_id, labels, host_ip,
                     cpu_limit, cpu_request, memory_limit, memory_request,
                     source_cluster
                 ) SETTINGS async_insert = 1, wait_for_async_insert = 0 FORMAT JSONEachRow
@@ -1084,6 +1084,8 @@ class StorageAdapter:
                 'node_name': k8s_context.get('node', host),
                 'level': event.get('event', {}).get('level', 'info'),
                 'message': str(event.get('event', {}).get('raw', ''))[:5000],
+                'openstack_request_id': str(event.get('openstack_request_id', '') or ''),
+                'openstack_global_request_id': str(event.get('openstack_global_request_id', '') or ''),
                 'trace_id': event.get('context', {}).get('trace_id', ''),
                 'span_id': event.get('context', {}).get('span_id', ''),
                 'labels': json.dumps(k8s_context.get('labels', {}), ensure_ascii=False),

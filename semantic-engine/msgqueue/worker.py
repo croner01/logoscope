@@ -482,7 +482,8 @@ class LogWorker:
                     columns=(
                         "id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name, "
                         "pod_id, container_name, container_id, container_image, level, severity_number, "
-                        "message, trace_id, span_id, flags, labels, attributes_json, host_ip, "
+                        "message, openstack_request_id, openstack_global_request_id, "
+                        "trace_id, span_id, flags, labels, attributes_json, host_ip, "
                         "cpu_limit, cpu_request, memory_limit, memory_request, source_cluster"
                     ),
                     async_insert_settings=async_insert_settings,
