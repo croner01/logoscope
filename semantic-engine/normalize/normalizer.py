@@ -187,6 +187,13 @@ def normalize_log(log_data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw_attributes, dict):
         raw_attributes = {}
     raw_attributes = dict(raw_attributes)
+
+    # OpenStack req-id 提取 → 注入 _raw_attributes 和顶层字段
+    openstack_ids = extract_openstack_request_ids(log_data)
+    if openstack_ids:
+        raw_attributes["openstack_request_id"] = openstack_ids.get("openstack_request_id", "")
+        raw_attributes["openstack_global_request_id"] = openstack_ids.get("openstack_global_request_id", "")
+
     existing_source = _candidate_text(raw_attributes.get("trace_id_source")).lower()
     resolved_source = _candidate_text(trace_info.get("source", "missing")).lower() or "missing"
     if resolved_source == "otlp":
@@ -226,6 +233,9 @@ def normalize_log(log_data: Dict[str, Any]) -> Dict[str, Any]:
         # ⭐ P0/P1优化：传递OTLP字段和原始attributes
         "severity_number": severity_number,
         "flags": flags,
+        # OpenStack 请求 ID（独立字段供 _prepare_event_row 写入独立列）
+        "openstack_request_id": openstack_ids.get("openstack_request_id", ""),
+        "openstack_global_request_id": openstack_ids.get("openstack_global_request_id", ""),
         "_raw_attributes": raw_attributes
     }
 
