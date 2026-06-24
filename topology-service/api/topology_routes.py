@@ -473,6 +473,108 @@ async def get_topology_stats(
         }
 
 
+@router.get("/openstack-chain")
+async def get_openstack_chain(
+    global_request_id: Optional[str] = Query(None, description="精确匹配 global_request_id"),
+    time_window: str = Query("1 HOUR", description="时间窗口"),
+    namespace: Optional[str] = Query(None, description="命名空间过滤"),
+    limit: int = Query(1000, ge=1, le=10000, description="最大返回行数"),
+) -> Dict[str, Any]:
+    """
+    查询 OpenStack global_request_id 的完整跨服务调用链。
+
+    返回按 global_request_id 分组、按时间排序的调用跳转链。
+    每个 chain 包含该 request_id 依次经过的服务列表。
+    """
+    if not _HYBRID_BUILDER:
+        raise HTTPException(status_code=503, detail="Topology builder not initialized")
+
+    storage = getattr(_HYBRID_BUILDER, "storage", None)
+    if not storage or not getattr(storage, "ch_client", None):
+        raise HTTPException(status_code=503, detail="Storage not available")
+
+    safe_time_window = _sanitize_interval(time_window)
+
+    try:
+        conditions = [f"timestamp > now() - INTERVAL {safe_time_window}"]
+        conditions.append("openstack_global_request_id != ''")
+
+        if global_request_id:
+            safe_rid = str(global_request_id or "").replace("'", "''")
+            conditions.append(f"openstack_global_request_id = '{safe_rid}'")
+        if namespace:
+            safe_ns = str(namespace or "").replace("'", "''")
+            conditions.append(f"namespace = '{safe_ns}'")
+
+        prewhere_clause = "PREWHERE " + " AND ".join(conditions)
+
+        query = f"""
+        SELECT
+            service_name,
+            openstack_request_id,
+            openstack_global_request_id,
+            timestamp
+        FROM logs.logs
+        {prewhere_clause}
+        ORDER BY openstack_global_request_id, timestamp
+        LIMIT {int(limit)}
+        """
+
+        result = await _run_blocking(storage.execute_query, query)
+
+        if not result:
+            return {"chains": [], "total": 0}
+
+        # 分组并构建 chains
+        groups: Dict[str, List[Dict]] = {}
+        for row in result:
+            if isinstance(row, dict):
+                rid = str(row.get("openstack_global_request_id", "") or "").strip()
+                svc = str(row.get("service_name", "") or "").strip()
+                ts = row.get("timestamp")
+                req_id = str(row.get("openstack_request_id", "") or "").strip()
+                if not rid or not svc:
+                    continue
+                groups.setdefault(rid, []).append({
+                    "service": svc,
+                    "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts or ""),
+                    "request_id": req_id,
+                })
+
+        chains = []
+        for rid, hops in sorted(groups.items(), key=lambda x: -len(x[1])):
+            # 按时间排序
+            hops.sort(key=lambda h: h["timestamp"])
+
+            # 压缩连续相同服务
+            deduped = [hops[0]]
+            for hop in hops[1:]:
+                if hop["service"] != deduped[-1]["service"]:
+                    deduped.append(hop)
+
+            time_span_ms = 0
+            if len(deduped) >= 2:
+                try:
+                    t0 = datetime.fromisoformat(deduped[0]["timestamp"].replace("Z", "+00:00"))
+                    t1 = datetime.fromisoformat(deduped[-1]["timestamp"].replace("Z", "+00:00"))
+                    time_span_ms = int((t1 - t0).total_seconds() * 1000)
+                except Exception:
+                    pass
+
+            chains.append({
+                "global_request_id": rid,
+                "hops": deduped,
+                "hop_count": len(deduped),
+                "time_span_ms": time_span_ms,
+            })
+
+        return {"chains": chains, "total": len(chains)}
+
+    except Exception as e:
+        logger.error(f"获取 OpenStack 链路时出错: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/health")
 async def topology_health() -> Dict[str, Any]:
     """
