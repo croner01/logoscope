@@ -111,6 +111,21 @@ async def start_temporal_worker() -> Optional[Dict[str, Any]]:
     try:
         from temporalio.client import Client
         from temporalio.worker import Worker
+        from temporalio.worker.workflow_sandbox import (
+            SandboxRestrictions,
+            SandboxedWorkflowRunner,
+        )
+
+        # 活动（activity）函数的延迟导入（如 from api.ai import …）会引入
+        # requests → urllib3 → http.client 等非确定性模块。将这些模块标记为
+        # "透传"（passthrough）避免 Temporal 工作流沙箱在验证时拦截它们。
+        _sandbox_restrictions = SandboxRestrictions.default.with_passthrough_modules(
+            "requests",
+            "urllib3",
+            "urllib3.exceptions",
+            "http.client",
+        )
+        _workflow_runner = SandboxedWorkflowRunner(restrictions=_sandbox_restrictions)
 
         client = await asyncio.wait_for(
             Client.connect(cfg.address, namespace=cfg.namespace),
@@ -126,6 +141,7 @@ async def start_temporal_worker() -> Optional[Dict[str, Any]]:
                 activities.submit_user_input_activity,
                 activities.interrupt_run_activity,
             ],
+            workflow_runner=_workflow_runner,
         )
         task = asyncio.create_task(worker.run(), name="runtime-v4-temporal-worker")
         _runtime.running = True
