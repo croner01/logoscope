@@ -295,78 +295,79 @@ async def _run_claude_loop(
     import anthropic
 
     client = anthropic.AsyncAnthropic(api_key=_api_key(), base_url=_api_base_url())
+    try:
+        actions = []
+        action_observations = []
+        iterations = []
+        turn = 0
 
-    actions = []
-    action_observations = []
-    iterations = []
-    turn = 0
-
-    while turn < max_turns:
-        turn += 1
-        text, stop_reason, tool_use = await _stream_llm_turn(
-            client=client,
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=tools,
-            event_emitter=event_emitter,
-            run_id=run_id,
-        )
-
-        if text:
-            messages.append({"role": "assistant", "content": text})
-
-        if tool_use:
-            # 执行工具调用
-            tool_name = tool_use["name"]
-            tool_input = tool_use["input"]
-            await event_emitter.emit(run_id, "tool_call_started", {
-                "tool": tool_name,
-                "input": tool_input,
-            })
-
-            output, exit_code = await _execute_tool_call(
-                tool_name, tool_input, source_target, event_emitter, run_id,
-                tools_adapter, memory,
+        while turn < max_turns:
+            turn += 1
+            text, stop_reason, tool_use = await _stream_llm_turn(
+                client=client,
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=tools,
+                event_emitter=event_emitter,
+                run_id=run_id,
             )
 
-            await event_emitter.emit(run_id, "tool_call_finished", {
-                "tool": tool_name,
-                "output": output[:500],
-            })
+            if text:
+                messages.append({"role": "assistant", "content": text})
 
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use["id"],
-                        "content": output,
-                    }
-                ],
-            })
+            if tool_use:
+                tool_name = tool_use["name"]
+                tool_input = tool_use["input"]
+                await event_emitter.emit(run_id, "tool_call_started", {
+                    "tool": tool_name,
+                    "input": tool_input,
+                })
 
-            actions.append({
-                "id": f"action-{turn}",
-                "command": tool_name,
-                "args": tool_input,
-                "status": "executed" if exit_code == 0 else "failed",
-            })
-            action_observations.append({
-                "action_id": f"action-{turn}",
-                "status": "executed" if exit_code == 0 else "failed",
-                "exit_code": exit_code,
-                "output": output[:1000],
-            })
+                output, exit_code = await _execute_tool_call(
+                    tool_name, tool_input, source_target, event_emitter, run_id,
+                    tools_adapter, memory,
+                )
 
-        if stop_reason == "end_turn" and not tool_use:
-            break
+                await event_emitter.emit(run_id, "tool_call_finished", {
+                    "tool": tool_name,
+                    "output": output[:500],
+                })
 
-    return BackendResult(
-        actions=actions,
-        action_observations=action_observations,
-        iterations=[{"turn": i + 1} for i in range(len(actions))],
-        summary=text or "",
-    )
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use["id"],
+                            "content": output,
+                        }
+                    ],
+                })
+
+                actions.append({
+                    "id": f"action-{turn}",
+                    "command": tool_name,
+                    "args": tool_input,
+                    "status": "executed" if exit_code == 0 else "failed",
+                })
+                action_observations.append({
+                    "action_id": f"action-{turn}",
+                    "status": "executed" if exit_code == 0 else "failed",
+                    "exit_code": exit_code,
+                    "output": output[:1000],
+                })
+
+            if stop_reason == "end_turn" and not tool_use:
+                break
+
+        return BackendResult(
+            actions=actions,
+            action_observations=action_observations,
+            iterations=[{"turn": i + 1} for i in range(len(actions))],
+            summary=text or "",
+        )
+    finally:
+        await client.aclose()
 
 
 class ClaudeSdkBackend(DiagnosisBackend):
