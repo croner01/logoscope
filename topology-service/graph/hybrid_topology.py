@@ -573,11 +573,20 @@ class HybridTopologyBuilder:
                 logger.exception("Error in _get_metrics_topology")
                 metrics_data = {"nodes": [], "edges": []}
 
+            try:
+                openstack_data = self._get_openstack_topology(
+                    safe_time_window, namespace, source_cluster=source_cluster
+                )
+            except Exception:
+                logger.exception("Error in _get_openstack_topology")
+                openstack_data = {"nodes": [], "edges": []}
+
             # ⚠️ 自适应时间窗口：如果所有数据源都为空，扩大到 24 小时
             total_nodes = (
                 len(traces_data.get("nodes", [])) +
                 len(logs_data.get("nodes", [])) +
-                len(metrics_data.get("nodes", []))
+                len(metrics_data.get("nodes", [])) +
+                len(openstack_data.get("nodes", []))
             )
 
             if total_nodes == 0 and safe_time_window != "24 HOUR":
@@ -610,8 +619,16 @@ class HybridTopologyBuilder:
                     logger.error(f"Error in _get_metrics_topology (24H): {e}")
                     metrics_data = {"nodes": [], "edges": []}
 
+                try:
+                    openstack_data = self._get_openstack_topology(
+                        safe_time_window, namespace, source_cluster=source_cluster
+                    )
+                except Exception as e:
+                    logger.error(f"Error in _get_openstack_topology (24H): {e}")
+                    openstack_data = {"nodes": [], "edges": []}
+
             # 2. 合并节点
-            logger.debug(f"Merging nodes: traces={len(traces_data.get('nodes', []))}, logs={len(logs_data.get('nodes', []))}, metrics={len(metrics_data.get('nodes', []))}")
+            logger.debug(f"Merging nodes: traces={len(traces_data.get('nodes', []))}, logs={len(logs_data.get('nodes', []))}, openstack={len(openstack_data.get('nodes', []))}, metrics={len(metrics_data.get('nodes', []))}")
             try:
                 merged_nodes = self._merge_nodes(
                     traces_data.get("nodes", []),
@@ -626,12 +643,13 @@ class HybridTopologyBuilder:
             logger.debug(f"Merged nodes count: {len(merged_nodes)}")
 
             # 3. 合并边并计算置信度
-            logger.debug(f"Merging edges: traces={len(traces_data.get('edges', []))}, logs={len(logs_data.get('edges', []))}, metrics={len(metrics_data.get('edges', []))}")
+            logger.debug(f"Merging edges: traces={len(traces_data.get('edges', []))}, logs={len(logs_data.get('edges', []))}, openstack={len(openstack_data.get('edges', []))}, metrics={len(metrics_data.get('edges', []))}")
             try:
                 merged_edges = self._merge_edges(
                     traces_data.get("edges", []),
                     logs_data.get("edges", []),
-                    metrics_data.get("edges", [])
+                    metrics_data.get("edges", []),
+                    openstack_data.get("edges", []),
                 )
             except Exception as e:
                 logger.error(f"Error in _merge_edges: {e}")
@@ -760,7 +778,7 @@ class HybridTopologyBuilder:
                 inferred_services.add(edge.get("target"))
 
             metadata = {
-                "data_sources": self._get_data_sources(traces_data, logs_data, metrics_data),
+                "data_sources": self._get_data_sources(traces_data, logs_data, metrics_data, openstack_data),
                 "time_window": safe_time_window,
                 "namespace": namespace,
                 "node_count": len(merged_nodes),
@@ -812,6 +830,10 @@ class HybridTopologyBuilder:
                     "metrics": {
                         "nodes": len(metrics_data.get("nodes", [])),
                         "edges": len(metrics_data.get("edges", []))
+                    },
+                    "openstack": {
+                        "nodes": len(openstack_data.get("nodes", [])),
+                        "edges": len(openstack_data.get("edges", []))
                     }
                 }
             }
@@ -2234,20 +2256,23 @@ class HybridTopologyBuilder:
         self,
         traces_edges: List[Dict],
         logs_edges: List[Dict],
-        metrics_edges: List[Dict]
+        metrics_edges: List[Dict],
+        openstack_edges: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """
         合并来自不同数据源的边并计算置信度
 
         策略：
         1. traces 边：置信度 1.0（精确）
-        2. logs 边：置信度 0.3（启发式）
-        3. 如果多个数据源都支持同一关系，提升置信度
+        2. openstack 边：置信度 0.6（global_request_id 链）
+        3. logs 边：置信度 0.3（启发式）
+        4. 如果多个数据源都支持同一关系，提升置信度
         """
         return hybrid_utils.merge_edges(
             traces_edges=traces_edges,
             logs_edges=logs_edges,
             metrics_edges=metrics_edges,
+            openstack_edges=openstack_edges,
             metrics_boost=0.1,
         )
 
@@ -2428,13 +2453,15 @@ class HybridTopologyBuilder:
         self,
         traces_data: Dict,
         logs_data: Dict,
-        metrics_data: Dict
+        metrics_data: Dict,
+        openstack_data: Dict = None,
     ) -> List[str]:
         """获取实际使用的数据源列表"""
         return hybrid_utils.get_data_sources(
             traces_data=traces_data,
             logs_data=logs_data,
             metrics_data=metrics_data,
+            openstack_data=openstack_data,
         )
 
 
