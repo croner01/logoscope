@@ -3323,6 +3323,18 @@ const TopologyPage: React.FC = () => {
         lifecycleDashArray = '6 4';
       }
 
+      // OpenStack-sourced edges get a blue dashed style
+      const openstackMetrics = (edge?.metrics || {}) as Record<string, unknown>;
+      const isOpenstackEdge = String(edge?.metrics?.data_source || '').toLowerCase() === 'openstack'
+        || (Array.isArray(openstackMetrics.data_sources) && (openstackMetrics.data_sources as string[]).includes('openstack'));
+      if (isOpenstackEdge && !lifecycleDashArray) {
+        lifecycleDashArray = '5 5';
+        // Only override color if not already in a risk state
+        if (color.severity === 'normal') {
+          color = { stroke: '#3b82f6', marker: 'arrow-observed', severity: 'normal', meaning: 'OpenStack 追踪' };
+        }
+      }
+
       const score = computeEdgeIssueScore(edge);
       const requestRate = toMetric(edge?.metrics?.rps ?? edge?.metrics?.call_count, 0);
       const baseWidth = Math.min(6.8, Math.max(2.2, Math.log10(requestRate + 10) * 1.75));
@@ -3741,8 +3753,16 @@ const TopologyPage: React.FC = () => {
             <input
               type="text"
               value={focusServiceFilter}
-              onChange={(e) => setFocusServiceFilter(e.target.value)}
-              placeholder="筛选服务名称..."
+              onChange={(e) => {
+                const value = e.target.value;
+                setFocusServiceFilter(value);
+                // Auto-detect OpenStack req- UUID format
+                if (/^req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+                  // Will integrate with openstack-chain API in future enhancement
+                  console.debug('OpenStack request_id detected:', value);
+                }
+              }}
+              placeholder="筛选服务名称... 或 req- 追踪 UUID"
               className="w-44 rounded-lg border border-slate-600 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
             />
             {focusServiceFilter ? (
@@ -5216,6 +5236,24 @@ const TopologyPage: React.FC = () => {
                       <div className="mt-2 text-[10px] text-slate-500">
                         原始 reason: {safeText(selectedEdge?.metrics?.reason || 'unknown')} | data source: {safeText(selectedEdge?.metrics?.data_source || 'unknown')}
                       </div>
+
+                      {/* OpenStack 跨服务追踪 badge */}
+                      {(() => {
+                        const detailMetrics = (selectedEdge?.metrics || {}) as Record<string, unknown>;
+                        const detailDataSource = String(selectedEdge?.metrics?.data_source || '').toLowerCase() === 'openstack'
+                          || (Array.isArray(detailMetrics.data_sources) && (detailMetrics.data_sources as string[]).includes('openstack'));
+                        const detailConfidence = Number(detailMetrics.confidence ?? 0);
+                        return detailDataSource ? (
+                          <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
+                            <div className="flex items-center gap-1 text-blue-700 dark:text-blue-300 text-xs font-medium">
+                              <span>☁ OpenStack 跨服务追踪</span>
+                            </div>
+                            <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                              基于 openstack_global_request_id 检测的跨服务调用链（置信度 {(detailConfidence * 100).toFixed(0)}%）
+                            </div>
+                          </div>
+                        ) : null;
+                      })()}
                     </div>
 
                     <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-3">
