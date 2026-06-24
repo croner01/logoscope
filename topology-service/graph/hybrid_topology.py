@@ -55,6 +55,7 @@ class HybridTopologyBuilder:
         self.WEIGHT_TRACES = 1.0
         self.WEIGHT_LOGS = 0.3
         self.WEIGHT_METRICS = 0.2
+        self.WEIGHT_OPENSTACK = 0.6
 
         # 时间窗口（默认 1 小时）
         self.time_window = "1 HOUR"
@@ -2065,6 +2066,149 @@ class HybridTopologyBuilder:
             evidence_sufficiency_scores=evidence_sufficiency_scores,
         )
         return inferred_edges, stats
+
+    def _get_openstack_topology(
+        self,
+        time_window: str,
+        namespace: str = None,
+        source_cluster: str = None,
+    ) -> Dict[str, Any]:
+        """
+        从 logs 表通过 openstack_global_request_id 重建跨服务调用链。
+
+        核心原理：OpenStack 服务间调用时，caller 和 callee 的日志出现相同的
+        global_request_id。按照 global_request_id 分组、时间戳排序后，相邻且
+        不同 service_name 的条目构成一条调用边。
+
+        Returns:
+            {"nodes": [...], "edges": [...]}
+        """
+        try:
+            if not self.storage.ch_client:
+                return {"nodes": [], "edges": []}
+
+            conditions = [f"timestamp > now() - INTERVAL {time_window}"]
+            conditions.append("openstack_global_request_id != ''")
+
+            if namespace:
+                conditions.append(f"namespace = '{hybrid_utils.escape_sql_literal(namespace)}'")
+            if source_cluster:
+                conditions.append(f"source_cluster = '{hybrid_utils.escape_sql_literal(source_cluster)}'")
+
+            prewhere_clause = "PREWHERE " + " AND ".join(conditions)
+
+            query = f"""
+            SELECT
+                service_name,
+                openstack_request_id,
+                openstack_global_request_id,
+                timestamp
+            FROM logs.logs
+            {prewhere_clause}
+            ORDER BY openstack_global_request_id, timestamp
+            LIMIT {int(self.LOGS_SCAN_LIMIT)}
+            """
+
+            result = self.storage.execute_query(query)
+            logger.debug(f"_get_openstack_topology query returned {len(result) if result else 0} rows")
+
+            if not result:
+                return {"nodes": [], "edges": []}
+
+            # 分组：按 global_request_id
+            groups: Dict[str, List[Dict]] = {}
+            for row in result:
+                if isinstance(row, dict):
+                    rid = str(row.get("openstack_global_request_id", "") or "").strip()
+                    service_name = str(row.get("service_name", "") or "").strip()
+                    if not rid or not service_name:
+                        continue
+                    groups.setdefault(rid, []).append(row)
+                else:
+                    # tuple format fallback
+                    if len(row) < 4:
+                        continue
+                    rid = str(row[2] or "").strip()  # openstack_global_request_id index
+                    service_name = str(row[0] or "").strip()  # service_name index
+                    if not rid or not service_name:
+                        continue
+                    groups.setdefault(rid, []).append({
+                        "service_name": service_name,
+                        "openstack_request_id": str(row[1] or "").strip(),
+                        "openstack_global_request_id": rid,
+                        "timestamp": row[3],
+                    })
+
+            # 生成边：每组内相邻不同 service → 一条边
+            edge_counter: Dict[Tuple[str, str], int] = {}
+            node_services: Set[str] = set()
+
+            for rid, records in groups.items():
+                records.sort(key=lambda r: r.get("timestamp") or "")
+                # 连续相同服务名压缩
+                sequence = hybrid_utils.dedup_service_sequence(records)
+
+                for i in range(len(sequence) - 1):
+                    source = sequence[i].get("service_name", "").strip()
+                    target = sequence[i + 1].get("service_name", "").strip()
+                    if not source or not target or source == target:
+                        continue
+                    node_services.add(source)
+                    node_services.add(target)
+
+                    pair = (source, target)
+                    edge_counter[pair] = edge_counter.get(pair, 0) + 1
+
+            if not edge_counter:
+                logger.debug("No OpenStack cross-service edges found from global_request_id groups")
+                return {"nodes": [], "edges": []}
+
+            # 构建节点
+            nodes = [
+                {
+                    "id": svc,
+                    "label": svc,
+                    "type": "service",
+                    "name": svc,
+                    "metrics": {
+                        "data_source": "openstack",
+                        "confidence": self.WEIGHT_OPENSTACK,
+                    }
+                }
+                for svc in sorted(node_services)
+            ]
+
+            # 构建边
+            edges = [
+                {
+                    "id": f"{source}-{target}-openstack",
+                    "source": source,
+                    "target": target,
+                    "label": "openstack-calls",
+                    "type": "calls",
+                    "metrics": {
+                        "call_count": count,
+                        "confidence": self.WEIGHT_OPENSTACK,
+                        "data_source": "openstack",
+                        "evidence_type": "observed",
+                        "reason": "openstack_global_request_id_chain",
+                    }
+                }
+                for (source, target), count in sorted(edge_counter.items(), key=lambda x: -x[1])
+            ]
+
+            logger.debug(f"OpenStack topology: {len(nodes)} nodes, {len(edges)} edges")
+
+            return {
+                "nodes": nodes,
+                "edges": edges,
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting openstack topology: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"nodes": [], "edges": []}
 
     def _merge_nodes(
         self,
