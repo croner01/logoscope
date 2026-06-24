@@ -1,6 +1,6 @@
 import type { Event } from './api';
 
-const REQUEST_ID_CANDIDATE_KEYS = ['correlation_request_id', 'request_id', 'x_request_id'] as const;
+const REQUEST_ID_CANDIDATE_KEYS = ['correlation_request_id', 'request_id', 'x_request_id', 'openstack_request_id', 'openstack_global_request_id'] as const;
 const TRACE_ID_CANDIDATE_KEYS = ['correlation_trace_id', 'trace_id'] as const;
 
 function normalizeValue(value: unknown): string {
