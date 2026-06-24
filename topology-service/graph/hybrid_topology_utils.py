@@ -563,11 +563,13 @@ def merge_edges(
     traces_edges: List[Dict[str, Any]],
     logs_edges: List[Dict[str, Any]],
     metrics_edges: List[Dict[str, Any]],
+    openstack_edges: Optional[List[Dict[str, Any]]] = None,
     metrics_boost: float = 0.1,
 ) -> List[Dict[str, Any]]:
-    """Merge edges from traces/logs/metrics sources."""
+    """Merge edges from traces/openstack/logs/metrics sources."""
     merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
+    # Phase 1: traces (highest priority)
     for edge in traces_edges:
         key = (edge["source"], edge["target"])
         merged[key] = copy.deepcopy(edge)
@@ -575,6 +577,23 @@ def merge_edges(
         metrics.setdefault("data_source", "traces")
         metrics.setdefault("data_sources", ["traces"])
 
+    # Phase 2: openstack (inserted before logs per priority: traces > openstack > logs > metrics)
+    for edge in (openstack_edges or []):
+        key = (edge["source"], edge["target"])
+        if key in merged:
+            # Already has traces edge — traces keeps priority, do nothing
+            existing = merged[key]
+            existing_metrics = existing.setdefault("metrics", {})
+            data_sources = existing_metrics.setdefault("data_sources", [])
+            if "openstack" not in data_sources:
+                data_sources.append("openstack")
+        else:
+            merged[key] = copy.deepcopy(edge)
+            metrics = merged[key].setdefault("metrics", {})
+            metrics.setdefault("data_source", "openstack")
+            metrics.setdefault("data_sources", ["openstack"])
+
+    # Phase 3: logs
     for edge in logs_edges:
         key = (edge["source"], edge["target"])
         if key in merged:
@@ -591,6 +610,7 @@ def merge_edges(
             metrics.setdefault("data_source", "logs_heuristic")
             metrics.setdefault("data_sources", ["logs_heuristic"])
 
+    # Phase 4: metrics
     for edge in metrics_edges:
         key = (edge["source"], edge["target"])
         if key in merged:
@@ -853,6 +873,7 @@ def get_data_sources(
     traces_data: Dict[str, Any],
     logs_data: Dict[str, Any],
     metrics_data: Dict[str, Any],
+    openstack_data: Dict[str, Any] = None,
 ) -> List[str]:
     """Get enabled data sources list from non-empty node/edge payloads."""
     sources: List[str] = []
@@ -861,6 +882,8 @@ def get_data_sources(
         sources.append("traces")
     if logs_data.get("nodes") or logs_data.get("edges"):
         sources.append("logs")
+    if openstack_data and (openstack_data.get("nodes") or openstack_data.get("edges")):
+        sources.append("openstack")
     if metrics_data.get("nodes") or metrics_data.get("edges"):
         sources.append("metrics")
 
