@@ -589,6 +589,8 @@ _LOGS_LIGHT_FIELDS = """
         service_name,
         level,
         message,
+        openstack_request_id,
+        openstack_global_request_id,
         pod_name,
         namespace,
         node_name,
@@ -744,6 +746,9 @@ def query_logs(
     service_names: Optional[List[str]],
     trace_id: Optional[str],
     request_id: Optional[str] = None,
+    openstack_request_id: Optional[str] = None,
+    openstack_global_request_id: Optional[str] = None,
+    openstack_trace_mode: str = "or",
     pod_name: Optional[str],
     level: Optional[str],
     levels: Optional[List[str]],
@@ -813,6 +818,11 @@ def query_logs(
     )
     requested_trace_ids = normalize_optional_str_list_fn([trace_id or "", *(normalize_optional_str_list_fn(trace_ids))])
     requested_request_ids = normalize_optional_str_list_fn([request_id or "", *(normalize_optional_str_list_fn(request_ids))])
+    normalized_openstack_request_id = normalize_optional_str_fn(openstack_request_id)
+    normalized_openstack_global_request_id = normalize_optional_str_fn(openstack_global_request_id)
+    effective_openstack_trace_mode = str(openstack_trace_mode or "or").strip().lower()
+    if effective_openstack_trace_mode not in ("and", "or"):
+        effective_openstack_trace_mode = "or"
     edge_context_active = bool(
         normalized_source_service
         and normalized_target_service
@@ -982,6 +992,22 @@ def query_logs(
         normalize_optional_str_list_fn=normalize_optional_str_list_fn,
         correlation_mode=effective_correlation_mode,
     )
+    # OpenStack request_id 过滤（使用独立列，避免 attributes_json JSONExtract 全表扫描）
+    if normalized_openstack_request_id or normalized_openstack_global_request_id:
+        openstack_conditions = []
+        if normalized_openstack_request_id:
+            openstack_conditions.append(
+                "openstack_request_id = {openstack_request_id:String}"
+            )
+            params["openstack_request_id"] = normalized_openstack_request_id
+        if normalized_openstack_global_request_id:
+            openstack_conditions.append(
+                "openstack_global_request_id = {openstack_global_request_id:String}"
+            )
+            params["openstack_global_request_id"] = normalized_openstack_global_request_id
+        if openstack_conditions:
+            joiner = " OR " if effective_openstack_trace_mode == "or" else " AND "
+            where_conditions.append(f"({joiner.join(openstack_conditions)})")
     _append_text_search_filter(where_conditions, params, effective_search)
 
     prewhere_clause = f"PREWHERE {' AND '.join(prewhere_conditions)}" if prewhere_conditions else ""

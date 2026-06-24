@@ -1076,6 +1076,9 @@ async def query_logs(
     correlation_mode: Optional[str] = Query("and", description="trace/request 组合模式: and|or"),
     request_id: Optional[str] = Query(None, description="Request ID 精确过滤"),
     request_ids: Optional[List[str]] = Query(None, description="Request ID 多值精确过滤"),
+    openstack_request_id: Optional[str] = Query(None, description="OpenStack request_id 精确过滤（独立列）"),
+    openstack_global_request_id: Optional[str] = Query(None, description="OpenStack global_request_id 精确过滤（独立列）"),
+    openstack_trace_mode: Optional[str] = Query("or", description="OpenStack req-id 查询模式: and|or"),
     pod_name: Optional[str] = Query(None),
     container_name: Optional[str] = Query(None, description="容器名称过滤"),
     level: Optional[str] = Query(None),
@@ -1139,6 +1142,11 @@ async def query_logs(
         normalized_order_direction = str(order_direction or "").strip().lower()
         if normalized_order_direction not in ("asc", "desc"):
             normalized_order_direction = "desc"
+        normalized_openstack_request_id = _normalize_optional_str(openstack_request_id)
+        normalized_openstack_global_request_id = _normalize_optional_str(openstack_global_request_id)
+        normalized_openstack_trace_mode = _normalize_optional_str(openstack_trace_mode) or "or"
+        if normalized_openstack_trace_mode not in ("and", "or"):
+            normalized_openstack_trace_mode = "or"
         return await _run_blocking(
             logs_query_utils.query_logs,
             storage_adapter=_STORAGE_ADAPTER,
@@ -1150,6 +1158,9 @@ async def query_logs(
             trace_id=normalized_trace_id,
             correlation_mode=normalized_correlation_mode,
             request_id=normalized_request_id,
+            openstack_request_id=normalized_openstack_request_id,
+            openstack_global_request_id=normalized_openstack_global_request_id,
+            openstack_trace_mode=normalized_openstack_trace_mode,
             pod_name=normalized_pod_name,
             trace_ids=_normalize_optional_str_list(trace_ids),
             request_ids=_normalize_optional_str_list(request_ids),
