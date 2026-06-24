@@ -147,13 +147,119 @@ if (searchText.startsWith('req-') && /^req-[0-9a-f-]{36}$/.test(searchText)) {
 }
 ```
 
-### 6. 拓扑关联（可选，后续）
+### 6. 拓扑关联
 
-利用已提取的 `openstack_global_request_id`，在 `HybridTopologyBuilder` 中新增一个数据源：
+#### 6.1 概述
 
-- 查询指定时间窗口内 `openstack_global_request_id != ''` 的日志
-- 按 global_request_id 分组，按时间排序得到服务调用链
-- 生成拓扑 edge：source 为调用方，target 为被调用方
+利用已提取的 `openstack_global_request_id`，在 `HybridTopologyBuilder` 中新增第4个数据源 `openstack`。核心原理：当 OpenStack 服务 A 调用服务 B 时（如 Nova 调用 Cinder），HTTP header `X-OpenStack-Request-ID` 传递 `global_request_id`，两个服务的日志中出现相同的 ID。按 global_request_id 分组、时间戳排序即可重建真实的调用链。
+
+- 边的置信度：**0.6**（高于启发式 logs 的 0.3，低于 traces 的 1.0）
+- `evidence_type`: `"observed"`（基于真实日志，非推测）
+- `data_source`: `"openstack"`
+
+#### 6.2 HybridTopologyBuilder 新增数据源
+
+**改动文件：** `shared_src/graph/hybrid_topology.py`
+
+**新增方法 `_get_openstack_topology(time_window, namespace)`:**
+- 查询 `logs.logs` 中 `openstack_global_request_id != ''` 的记录
+- 按 `global_request_id, timestamp` 排序返回
+- 分组遍历：同一组内相邻不同 service → 生成一条边
+- 边形状：
+  ```python
+  {
+      "source": "nova-compute",
+      "target": "cinder-volume",
+      "type": "openstack_calls",
+      "label": "openstack-calls",
+      "metrics": {
+          "call_count": 5,
+          "confidence": 0.6,
+          "data_source": "openstack",
+          "evidence_type": "observed",
+          "reason": "openstack_global_request_id_chain"
+      }
+  }
+  ```
+
+**新常量：**
+```python
+self.WEIGHT_OPENSTACK = 0.6
+```
+
+**build_topology() 集成：**
+- 在第 3 个数据源（metrics）之后增加第 4 个调用
+- 自适应时间窗口（0 节点时也重试 OpenStack）
+- 调用 `_merge_nodes()` 走 logs 节点的合并路径（service_name 只是字符串）
+- 边合并优先级：`traces > openstack > logs > metrics`
+  - `_merge_edges()` 签名改为接收 4 个边列表
+  - openstack 边可以覆盖 logs 的启发式猜测（同一对服务时保留 openstack 的 0.6 置信度）
+  - metrics 边对所有非 traces 源做置信度提升（+0.1）
+- `_get_data_sources()` 增加 `"openstack"` 返回值
+- `metadata.source_breakdown` 增加 openstack 统计
+
+**SQL 查询：**
+```sql
+SELECT
+    service_name,
+    openstack_request_id,
+    openstack_global_request_id,
+    timestamp
+FROM logs.logs
+WHERE openstack_global_request_id != ''
+  AND timestamp > now() - INTERVAL {time_window}
+ORDER BY openstack_global_request_id, timestamp
+```
+
+#### 6.3 OpenStack 链路 API 端点
+
+**改动文件：** `topology-service/api/topology_routes.py`
+
+```
+GET /api/v1/topology/openstack-chain
+
+参数:
+  global_request_id: str  (可选，精确匹配)
+  time_start: str         (可选，ISO 时间)
+  time_end: str           (可选，ISO 时间)
+  limit: int              (默认 1000)
+```
+
+返回该 request_id 在哪些服务间穿行的完整链，格式：
+```json
+{
+  "chains": [
+    {
+      "global_request_id": "req-xxxx",
+      "hops": [
+        {"service": "nova-api", "timestamp": "...", "request_id": "req-aaa"},
+        {"service": "nova-compute", "timestamp": "...", "request_id": "req-bbb"}
+      ],
+      "hop_count": 2,
+      "time_span_ms": 3500
+    }
+  ],
+  "total": 1
+}
+```
+
+#### 6.4 前端 — 边展示增强
+
+**改动文件：**
+- `frontend/src/utils/logCorrelation.ts`
+- `frontend/src/pages/TopologyPage.tsx`
+
+1. **logCorrelation.ts**：`extractEventRequestIds()` 增加 `openstack_request_id` 和 `openstack_global_request_id` 候选键
+2. **边 Detail 面板**：`data_source === "openstack"` 时显示绿色/蓝色标签 "OpenStack" + global_request_id 示例 + "查看完整链路" 按钮
+3. **边视觉样式**：OpenStack 边使用**虚线**（与 traces 实线区分）+ `☁ openstack` 标签
+
+#### 6.5 前端 — 搜索联动
+
+**改动文件：** `frontend/src/pages/TopologyPage.tsx`
+
+- 拓扑图搜索框输入 `req-[0-9a-f-]{36}` 格式时，自动识别为 OpenStack 追踪模式
+- 切换为调用 `openstack-chain` API 并渲染时间线结果
+- 边详情 → "查看日志" 跳转到 LogsExplorer 并预填 `openstack_request_id` 过滤条件
 
 ## 迁移计划
 
@@ -181,8 +287,13 @@ if (searchText.startsWith('req-') && /^req-[0-9a-f-]{36}$/.test(searchText)) {
 | `query-service/query_service/api/logs.py` | 新增查询过滤参数 |
 | `frontend/src/pages/LogsExplorer.tsx` | `req-` 搜索词自动检测 |
 | `semantic-engine/tests/test_normalizer.py` | 新增测试用例 |
+| `shared_src/graph/hybrid_topology.py` | 新增 `_get_openstack_topology()` + `build_topology()` 集成 |
+| `topology-service/api/topology_routes.py` | 新增 `GET /api/v1/topology/openstack-chain` 端点 |
+| `frontend/src/utils/logCorrelation.ts` | `extractEventRequestIds()` 增加 openstack 字段 |
+| `frontend/src/pages/TopologyPage.tsx` | 边 Detail 面板 + 搜索联动 + 边样式增强 |
 
 ## 设计评审记录
 
 - 2026-06-24: 方案 3（独立列）确认
 - 2026-06-24: 排序键选择不加 `openstack_global_request_id`，使用 Bloom filter 跳数索引
+- 2026-06-24: 拓扑关联设计细化——完整方案（后端数据源 + API + 前端展示），置信度 0.6
