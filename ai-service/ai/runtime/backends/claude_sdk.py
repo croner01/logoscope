@@ -46,17 +46,40 @@ def _model_name() -> str:
 
 
 def _api_key() -> str:
-    key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
-    if not key:
-        key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
-    if not key:
+    """按优先级查找 API key。
+
+    优先级规则：
+    - 当使用 DeepSeek（模型名以 ``deepseek`` 开头或 LLM_PROVIDER=deepseek）
+      时：DEEPSEEK_API_KEY → ANTHROPIC_API_KEY → CLAUDE_SDK_API_KEY → LLM_API_KEY
+    - 其他情况：ANTHROPIC_API_KEY → CLAUDE_SDK_API_KEY → DEEPSEEK_API_KEY → LLM_API_KEY
+
+    Secret 中可能同时存在 ANTHROPIC_API_KEY（旧）和 DEEPSEEK_API_KEY（新），
+    如果不区分 provider 优先级，旧 ANTHROPIC_API_KEY 会一直劫持新 DeepSeek key。
+    """
+    provider = _as_str(os.getenv("LLM_PROVIDER"))
+    model = _model_name()
+    using_deepseek = model.startswith("deepseek") or provider == "deepseek"
+
+    if using_deepseek:
         key = _as_str(os.getenv("DEEPSEEK_API_KEY"))
-    if not key:
-        key = _as_str(os.getenv("LLM_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("LLM_API_KEY"))
+    else:
+        key = _as_str(os.getenv("ANTHROPIC_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("CLAUDE_SDK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("DEEPSEEK_API_KEY"))
+        if not key:
+            key = _as_str(os.getenv("LLM_API_KEY"))
     if not key:
         raise RuntimeError(
-            "Claude SDK backend needs ANTHROPIC_API_KEY, CLAUDE_SDK_API_KEY, "
-            "DEEPSEEK_API_KEY, or LLM_API_KEY environment variable"
+            "Claude SDK backend 需要设置 ANTHROPIC_API_KEY、CLAUDE_SDK_API_KEY、"
+            "DEEPSEEK_API_KEY 或 LLM_API_KEY 其中一个环境变量"
         )
     return key
 
@@ -67,8 +90,25 @@ def _api_base_url() -> str:
     SDK 内部会自动追加 ``/v1/messages`` 路径（anthropic>=0.100.0），
     所以返回的 base URL **不能**包含 ``/v1`` 后缀，否则会拼出
     ``/v1/v1/messages`` 双路径。
+
+    优先级：
+    1. ANTHROPIC_API_BASE（由 Settings 页面设置或手动配置）
+    2. ANTHROPIC_BASE_URL（兼容旧环境变量）
+    3. LLM_API_BASE（Settings 页面的通用 API Base 字段）
+    4. 模型名以 ``deepseek`` 开头时自动使用 DeepSeek 兼容端点
+    5. 默认 ``https://api.anthropic.com``
     """
-    url = _as_str(os.getenv("ANTHROPIC_API_BASE")) or _as_str(os.getenv("ANTHROPIC_BASE_URL")) or "https://api.anthropic.com"
+    url = _as_str(os.getenv("ANTHROPIC_API_BASE"))
+    if not url:
+        url = _as_str(os.getenv("ANTHROPIC_BASE_URL"))
+    if not url:
+        url = _as_str(os.getenv("LLM_API_BASE"))
+    if not url:
+        model = _model_name()
+        if model.startswith("deepseek"):
+            url = "https://api.deepseek.com/anthropic"
+        else:
+            url = "https://api.anthropic.com"
     if url:
         url = url.rstrip("/")
         if url.endswith("/v1"):
