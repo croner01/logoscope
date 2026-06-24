@@ -432,8 +432,9 @@ def merge_nodes(
     traces_nodes: List[Dict[str, Any]],
     logs_nodes: List[Dict[str, Any]],
     metrics_nodes: List[Dict[str, Any]],
+    openstack_nodes: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Merge nodes from traces/logs/metrics sources."""
+    """Merge nodes from traces/logs/openstack/metrics sources."""
     def _normalize_namespace(value: Any) -> str:
         return str(value or "").strip()
 
@@ -537,6 +538,25 @@ def merge_nodes(
             metrics = merged[service_name].setdefault("metrics", {})
             metrics.setdefault("data_source", "logs")
             metrics.setdefault("data_sources", ["logs"])
+
+    # 3.5 合并 openstack 节点（同 logs 路径）
+    for node in (openstack_nodes or []):
+        service_name = node["id"]
+        if service_name in merged:
+            existing = merged[service_name]
+            openstack_metrics = node.get("metrics", {})
+            for key, value in openstack_metrics.items():
+                if key not in existing["metrics"]:
+                    existing["metrics"][key] = value
+            _merge_namespace_if_better(existing, node)
+            data_sources = existing["metrics"].setdefault("data_sources", [])
+            if "openstack" not in data_sources:
+                data_sources.append("openstack")
+        else:
+            merged[service_name] = copy.deepcopy(node)
+            metrics = merged[service_name].setdefault("metrics", {})
+            metrics.setdefault("data_source", "openstack")
+            metrics.setdefault("data_sources", ["openstack"])
 
     for node in metrics_nodes:
         service_name = node["id"]

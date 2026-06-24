@@ -633,7 +633,8 @@ class HybridTopologyBuilder:
                 merged_nodes = self._merge_nodes(
                     traces_data.get("nodes", []),
                     logs_data.get("nodes", []),
-                    metrics_data.get("nodes", [])
+                    metrics_data.get("nodes", []),
+                    openstack_data.get("nodes", [])
                 )
             except Exception as e:
                 logger.error(f"Error in _merge_nodes: {e}")
@@ -2236,7 +2237,8 @@ class HybridTopologyBuilder:
         self,
         traces_nodes: List[Dict],
         logs_nodes: List[Dict],
-        metrics_nodes: List[Dict]
+        metrics_nodes: List[Dict],
+        openstack_nodes: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """
         合并来自不同数据源的节点
@@ -2244,12 +2246,14 @@ class HybridTopologyBuilder:
         策略：
         1. traces 数据优先（最准确）
         2. logs 数据补充（服务节点）
-        3. metrics 数据验证（服务活跃度）
+        3. openstack 数据补充（服务节点，同 logs 路径）
+        4. metrics 数据验证（服务活跃度）
         """
         return hybrid_utils.merge_nodes(
             traces_nodes=traces_nodes,
             logs_nodes=logs_nodes,
             metrics_nodes=metrics_nodes,
+            openstack_nodes=openstack_nodes,
         )
 
     def _merge_edges(
