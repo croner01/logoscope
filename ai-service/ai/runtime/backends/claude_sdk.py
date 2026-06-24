@@ -62,7 +62,18 @@ def _api_key() -> str:
 
 
 def _api_base_url() -> str:
-    return _as_str(os.getenv("ANTHROPIC_API_BASE")) or _as_str(os.getenv("ANTHROPIC_BASE_URL")) or "https://api.anthropic.com/v1"
+    """返回自定义 API base URL。
+
+    SDK 内部会自动追加 ``/v1/messages`` 路径（anthropic>=0.100.0），
+    所以返回的 base URL **不能**包含 ``/v1`` 后缀，否则会拼出
+    ``/v1/v1/messages`` 双路径。
+    """
+    url = _as_str(os.getenv("ANTHROPIC_API_BASE")) or _as_str(os.getenv("ANTHROPIC_BASE_URL")) or "https://api.anthropic.com"
+    if url:
+        url = url.rstrip("/")
+        if url.endswith("/v1"):
+            url = url[:-3]
+    return url
 
 
 # ── Skills → Tools ─────────────────────────────────────────────────────────
