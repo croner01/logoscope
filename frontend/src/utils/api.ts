@@ -1869,6 +1869,16 @@ export class APIClient {
   }
 
   /**
+   * OpenStack req- UUID 追踪调用链
+   */
+  async getOpenstackTraceChain(globalRequestId: string): Promise<Record<string, unknown>> {
+    const response = await this.client.get(
+      `${API_PREFIX}/topology/openstack-chain?global_request_id=${encodeURIComponent(globalRequestId)}`
+    );
+    return response.data;
+  }
+
+  /**
    * 获取告警规则
    */
   async getAlertRules(): Promise<{ total: number; rules: AlertRule[] }> {
@@ -3993,6 +4003,7 @@ export const api = {
   getLLMAvailableModels: (provider: string) => apiClient.getLLMAvailableModels(provider),
   createTopologySnapshot: (params: LooseAny) => apiClient.createTopologySnapshot(params),
   getTopologySnapshots: (params?: LooseAny) => apiClient.getTopologySnapshots(params),
+  getOpenstackTraceChain: (globalRequestId: string) => apiClient.getOpenstackTraceChain(globalRequestId),
   clearCache: (pattern?: string) => apiClient.clearCache(pattern),
   getCacheStats: () => apiClient.getCacheStats(),
   getDeduplicationStats: () => apiClient.getDeduplicationStats(),

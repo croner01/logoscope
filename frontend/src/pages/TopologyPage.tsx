@@ -1066,6 +1066,8 @@ const TopologyPage: React.FC = () => {
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('swimlane');
   const [focusNodeId, setFocusNodeId] = useState('');
   const [focusServiceFilter, setFocusServiceFilter] = useState('');
+  const [searchMode, setSearchMode] = useState<'service' | 'openstack_trace'>('service');
+  const [openstackTraceResult, setOpenstackTraceResult] = useState<Record<string, unknown>[]>([]);
   const [focusDepth, setFocusDepth] = useState(2);
   const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>('all');
   const [inferenceMode, setInferenceMode] = useState<InferenceMode>('rule');
@@ -3753,13 +3755,22 @@ const TopologyPage: React.FC = () => {
             <input
               type="text"
               value={focusServiceFilter}
-              onChange={(e) => {
+              onChange={async (e) => {
                 const value = e.target.value;
                 setFocusServiceFilter(value);
-                // Auto-detect OpenStack req- UUID format
+                // Auto-detect OpenStack req- UUID format → switch to trace mode
                 if (/^req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
-                  // Will integrate with openstack-chain API in future enhancement
-                  console.debug('OpenStack request_id detected:', value);
+                  setSearchMode('openstack_trace');
+                  try {
+                    const response = await api.getOpenstackTraceChain(value);
+                    setOpenstackTraceResult((response?.chains as Record<string, unknown>[]) || []);
+                  } catch (err) {
+                    console.error('Failed to fetch OpenStack trace chain:', err);
+                    setOpenstackTraceResult([]);
+                  }
+                } else {
+                  setSearchMode('service');
+                  setOpenstackTraceResult([]);
                 }
               }}
               placeholder="筛选服务名称... 或 req- 追踪 UUID"
@@ -3773,6 +3784,18 @@ const TopologyPage: React.FC = () => {
                 清空
               </button>
             ) : null}
+            {searchMode === 'openstack_trace' && openstackTraceResult.length > 0 && (
+              <div className="px-3 py-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded text-xs">
+                <div className="font-medium text-blue-700 dark:text-blue-300">
+                  ☁ OpenStack 追踪: {openstackTraceResult.length} 条调用链
+                </div>
+                {openstackTraceResult.slice(0, 3).map((chain, idx) => (
+                  <div key={idx} className="mt-1 text-gray-600 dark:text-gray-400">
+                    {chain.global_request_id as string} — {(chain as Record<string, unknown>).hop_count as number} 跳
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <select
