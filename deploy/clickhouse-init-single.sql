@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS logs.logs (
     severity_number UInt8,
     flags UInt8,
     message String,
+    openstack_request_id         String DEFAULT '',
+    openstack_global_request_id   String DEFAULT '',
     labels String,
     attributes_json String,
     trace_id_source LowCardinality(String) MATERIALIZED lowerUTF8(ifNull(JSONExtractString(attributes_json, 'trace_id_source'), '')),
@@ -65,6 +67,8 @@ CREATE TABLE IF NOT EXISTS logs.logs (
     INDEX idx_logs_trace_id_source trace_id_source TYPE set(128) GRANULARITY 1,
     INDEX idx_logs_message_token message TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
     INDEX idx_logs_message_ngram message TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1,
+    INDEX idx_os_req_id openstack_request_id TYPE bloom_filter(0.01) GRANULARITY 4,
+    INDEX idx_os_greq_id openstack_global_request_id TYPE bloom_filter(0.01) GRANULARITY 4,
     PROJECTION proj_logs_trace_lookup
     (
         SELECT
