@@ -977,6 +977,9 @@ class LogWorker:
             if not isinstance(raw_attributes, dict):
                 raw_attributes = {}
             raw_attributes = dict(raw_attributes)
+            # OpenStack request IDs from normalizer
+            openstack_request_id = str(event.get("openstack_request_id") or "")
+            openstack_global_request_id = str(event.get("openstack_global_request_id") or "")
             log_meta = raw_attributes.get("log_meta", {})
             if not isinstance(log_meta, dict):
                 log_meta = {}
@@ -1054,6 +1057,8 @@ class LogWorker:
                 event.get("event", {}).get("level", "info") or "info",
                 severity_number,
                 message_value,
+                openstack_request_id,
+                openstack_global_request_id,
                 event.get("context", {}).get("trace_id", "") or "",
                 event.get("context", {}).get("span_id", "") or "",
                 flags,

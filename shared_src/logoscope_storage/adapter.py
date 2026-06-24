@@ -836,6 +836,26 @@ class StorageAdapter:
             else:
                 self._execute_clickhouse_http_ddl(create_logs_table)
             logger.info("ClickHouse logs table created")
+
+            # 迁移：为存量 logs 表增加 OpenStack 列（幂等）
+            try:
+                if self.ch_client:
+                    self.ch_client.execute(
+                        "ALTER TABLE logs.logs ADD COLUMN IF NOT EXISTS openstack_request_id String DEFAULT ''"
+                    )
+                    self.ch_client.execute(
+                        "ALTER TABLE logs.logs ADD COLUMN IF NOT EXISTS openstack_global_request_id String DEFAULT ''"
+                    )
+                    self.ch_client.execute(
+                        "ALTER TABLE logs.logs ADD INDEX IF NOT EXISTS idx_openstack_request_id "
+                        "(openstack_request_id) TYPE bloom_filter(0.01) GRANULARITY 4"
+                    )
+                    self.ch_client.execute(
+                        "ALTER TABLE logs.logs ADD INDEX IF NOT EXISTS idx_openstack_global_request_id "
+                        "(openstack_global_request_id) TYPE bloom_filter(0.01) GRANULARITY 4"
+                    )
+            except Exception:
+                logger.warning("Failed to apply OpenStack request_id migration (may already exist)", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to create ClickHouse tables: {e}")
 
@@ -1201,6 +1221,8 @@ class StorageAdapter:
                 event.get('event', {}).get('level', 'info') or 'info',  # level
                 severity_number or 0,                               # ⭐ severity_number
                 str(event.get('event', {}).get('raw', '') or '')[:5000],  # message
+                event.get("openstack_request_id", "") or "",           # openstack_request_id
+                event.get("openstack_global_request_id", "") or "",    # openstack_global_request_id
                 event.get('context', {}).get('trace_id', '') or '',  # trace_id
                 event.get('context', {}).get('span_id', '') or '',   # span_id
                 flags or 0,                                         # ⭐ flags
@@ -1217,7 +1239,7 @@ class StorageAdapter:
             # 执行 INSERT（更新列名以匹配新表结构）
             try:
                 self.ch_client.execute(
-                    'INSERT INTO logs.logs (id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name, pod_id, container_name, container_id, container_image, level, severity_number, message, trace_id, span_id, flags, labels, attributes_json, host_ip, cpu_limit, cpu_request, memory_limit, memory_request, source_cluster) VALUES',
+                    'INSERT INTO logs.logs (id, timestamp, observed_timestamp, service_name, pod_name, namespace, node_name, pod_id, container_name, container_id, container_image, level, severity_number, message, openstack_request_id, openstack_global_request_id, trace_id, span_id, flags, labels, attributes_json, host_ip, cpu_limit, cpu_request, memory_limit, memory_request, source_cluster) VALUES',
                     data,
                     settings=_CH_ASYNC_INSERT_SETTINGS,
                 )
