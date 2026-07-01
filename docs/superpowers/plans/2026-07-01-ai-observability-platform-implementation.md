@@ -1,24 +1,44 @@
-# Logoscope v10 — AI Observability Operating System Implementation Plan
+# Logoscope v15 — AI Observability Operating System Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the v10 architecture: Event Sourcing + Envelope + Pipeline + Projection + Context API + Knowledge + Policy + Workflow + Feedback.
+**Goal:** Implement the v15 architecture: Event Sourcing + CQRS + WorldView Facade (TopologyQuery/StateQuery/HistoryQuery) + Canonical Context Hash (RFC 8785 + Merkle DAG) + Goal Tree (desired_state, no Workflow concepts) + Expression (structured preconditions) + Inference Pipeline + Knowledge Object Model + Planner (GoalInferrer → IntentGenerator → ExecutionPlanner) + Blast Radius Analyzer (ImpactModel + Dependency + State) + RiskEngine (3-tier + Constraint/Expression) + OPA Policy (effects-based, configurable Utility weights) + DecisionOrchestrator + DecisionStateMachine (separated) + Episode (DecisionStep: candidate_scores + reject_reasons) + ExperienceGraphProjection (failure_pattern dimension).
 
-**Architecture:** 7 sequential phases. Each phase produces independently testable software on top of existing Logoscope services. Phase 0-2 focus on data plane (events → projections). Phase 3-4 build correlation and query layers. Phase 5-6 add AI and automation layers.
+**Architecture:** 8 sequential phases. Each phase produces independently testable software on top of existing Logoscope services. Phase 0-3 build the data plane (events → projections → correlation). Phase 4 adds WorldView Facade + Context API. Phase 5 adds Goal Tree + Inference. Phase 6 adds Decision Orchestration + Blast Radius + Policy. Phase 7 adds Episode Learning + Experience Graph.
 
 **Tech Stack:** Python 3.11, aiokafka, Kafka (Go segmentio/kafka-go), ClickHouse, Neo4j, Redis, OPA (Open Policy Agent), ChromaDB/Weaviate (Knowledge Store)
 
-**Scope note:** The spec covers ~7 independent subsystems. This plan decomposes into separate Phase documents. Each Phase is independently implementable and testable.
+**Scope note:** The spec covers ~8 independent subsystems. This plan decomposes into separate Phase documents. Each Phase is independently implementable and testable.
 
 ## Global Constraints
 
 - All new Event types use EventEnvelope wrapping (envelope_version, schema_version, event_type, producer, event_id, parent_event_ids, payload)
 - All new code lives in `shared_src/` for cross-service shared logic, service-specific code in respective `{service}/` directories
 - Projection checkpoint uses partition+offset (not event_id)
-- All Inference output is Finding (unified structure)
+- **v12+:** StateProjectionRef — Context references Projection via `projection_epoch`, no data copy in ContextResult
+- **v12+:** Content-based hashing (context_hash = sha256 of canonical content, no timestamp component). Use `CanonicalContextHasher` (RFC 8785 deterministic JSON serialization + Merkle DAG)
+- **v12+:** Snapshot belongs to Projection Layer (not Context API), `use_snapshot=False` by default
+- **v12+:** PlanIntent — Generator outputs *what* (action + target), not *how* (steps). WorkflowComposer converts Intent → Workflow
+- **v12+:** Policy Engine sorts candidates (Planner outputs unsorted), RiskEngine is independent component
+- **v12+:** Feedback is eventized (EvaluationEvent → LearningEvent published to bus)
+- **v13+:** All Inference uses `InferencePipeline` — Preprocess → Prompt → Engine → PostProcess → Validate → Normalize
+- **v13+:** Knowledge Object Model: SOP / Runbook / FailurePattern / Incident / RCA as typed documents
+- **v14+:** Decision State Machine has 12 states: CREATED → PLANNING → PLANNED → PENDING_APPROVAL → APPROVED/REJECTED → EXECUTING → VERIFYING → SUCCEEDED/FAILED/ROLLED_BACK/CANCELLED
+- **v14+:** Episode is Event Sourcing fact (append-only, full trajectory). ExperienceGraph is Projection (statistical aggregation, read model)
+- **v15:** WorldView is Facade — combines TopologyQuery + StateQuery + HistoryQuery. New query capability = new Query class, not WorldView method
+- **v15:** Goal describes desired_state (target state). Workflow describes *how* to achieve it. GoalNode has no action/ordering/completion
+- **v15:** Capability preconditions/postconditions use `Expression(field, operator, value)` — not strings. Programmatically evaluable via WorldView
+- **v15:** All decision reasons recorded in Episode DecisionStep — including *why not* Candidate A
+- **v15:** Decision Orchestration (DecisionOrchestrator) and State Management (DecisionStateMachine) are separate components
+- **v15:** Utility weights configurable via `UtilityWeights` dataclass + OPA Rego `data.logoscope.utility_weights`
+- **v15:** ExperienceGraph key = `(failure_pattern, capability_id, env_fingerprint)` — keeps different fault scenarios separate
+- All Inference output is Finding (unified structure, no `recommended_action` in v15)
 - Policy Engine uses OPA (Rego), not custom DSL
 - OPA policies live in `deploy/policies/*.rego`, loaded at startup
-- Capability Registry requires effect + risk_score on all capabilities
+- Capability Registry requires effects (List[str] tag) + base_risk on all capabilities
+- Capability final_risk is computed dynamically: base_risk + env + time + blast_radius
+- OPA input uses effects tag + risk only, NOT capability names
+- DecisionRecord records Finding→Planner→Policy→Workflow audit chain
 - All tests use pytest with TDD (write failing test first)
 - Kafka topics follow `platform.{type}` naming convention
 - Module `__init__.py` exports: TDD — write failing test first, then implement
@@ -1323,11 +1343,17 @@ def test_lineage_trace():
 
 ---
 &nbsp;
-# Phase 4: Graph + Context API
+# Phase 4: Graph + WorldView Facade + ContextAPI
 
-**Goal:** GraphProjection (topology-only) + ContextAPI (4 ContextTypes) + Context Snapshot
+**Goal:** GraphProjection (topology-only, no state) + WorldView Facade (TopologyQuery / StateQuery / HistoryQuery) + ContextAPI (CanonicalContextHasher RFC 8785 + Merkle DAG) + Snapshot belongs to Projection Layer
 
 **Dependencies:** Phase 2-3 (entity, state, interaction events available)
+
+**v12-v15 changes applied:**
+- WorldView is **Facade** — combines TopologyQuery + StateQuery + HistoryQuery, no God Object
+- **StateProjectionRef** — Context references Projection via `projection_epoch`, no data copy in ContextResult
+- **CanonicalContextHasher** — RFC 8785 deterministic JSON + Merkle DAG for content-based hash
+- **Snapshot** belongs to Projection Layer, `use_snapshot=False` by default
 
 ---
 
@@ -1348,22 +1374,202 @@ def test_graph_no_state():
     assert not any("status" in n.attributes for n in subgraph.nodes)
 ```
 
-### Task 4.2: ContextAPI + ContextResult (with context_version)
+### Task 4.2: TopologyQuery — DAG-based Topology Reader
+
+**Files:**
+- Create: `shared_src/worldview/__init__.py`
+- Create: `shared_src/worldview/topology_query.py` — TopologyQuery
+- Create: `shared_src/tests/worldview/test_topology_query.py`
+
+**Interfaces:**
+- Produces: `TopologyQuery` — depends on GraphProjection
+- Consumes: `GraphProjection` from Task 4.1
+
+**Key tests:**
+```python
+def test_get_dependents():
+    tq = TopologyQuery(graph_projection)
+    deps = tq.get_dependents(ResourceIdentity(ResourceType.SERVICE, "rabbitmq"))
+    assert len(deps) >= 3
+
+def test_get_impact_set_bfs_layers():
+    tq = TopologyQuery(graph_projection)
+    layers = tq.get_impact_set(ResourceIdentity(ResourceType.SERVICE, "rabbitmq"), depth=3)
+    assert len(layers) <= 3  # BFS layers
+    assert all(isinstance(r, ResourceIdentity) for layer in layers for r in layer)
+
+def test_query_path():
+    tq = TopologyQuery(graph_projection)
+    path = tq.query_path(ResourceIdentity(ResourceType.INSTANCE, "vm-1"),
+                          ResourceIdentity(ResourceType.HOST, "compute-01"))
+    assert len(path) >= 1
+```
+
+### Task 4.3: StateQuery — State + Timeline Reader
+
+**Files:**
+- Create: `shared_src/worldview/state_query.py` — StateQuery
+- Create: `shared_src/tests/worldview/test_state_query.py`
+
+**Interfaces:**
+- Produces: `StateQuery` — depends on `StateProjection` + `TimelineProjection`
+- Consumes: `StateProjection` (Task 2.3), `TimelineProjection` (Task 2.4)
+
+**Key tests:**
+```python
+def test_get_state():
+    sq = StateQuery(state_projection, timeline_projection)
+    state = sq.get_state(ResourceIdentity(ResourceType.INSTANCE, "vm-1"))
+    assert state in ("ACTIVE", "ERROR", "SHUTOFF", "BUILD", None)
+
+def test_resolve_field():
+    """resolve_field 供 Expression.evaluate() 使用"""
+    sq = StateQuery(mock_state, mock_timeline)
+    value = sq.resolve_field("resource.status",
+                              ResourceIdentity(ResourceType.INSTANCE, "vm-1"))
+    assert value in ("ACTIVE", "ERROR", "SHUTOFF")
+
+def test_get_timeline():
+    sq = StateQuery(mock_state, mock_timeline)
+    timeline = sq.get_timeline(ResourceIdentity(ResourceType.INSTANCE, "vm-1"), "1 HOUR")
+    assert all(hasattr(t, "from_state") for t in timeline)
+```
+
+### Task 4.4: HistoryQuery — Recent Events Reader
+
+**Files:**
+- Create: `shared_src/worldview/history_query.py` — HistoryQuery
+- Create: `shared_src/tests/worldview/test_history_query.py`
+
+**Interfaces:**
+- Produces: `HistoryQuery` — depends on RawEventStore
+- Consumes: `RawEventStore` (Task 0.3)
+
+**Key tests:**
+```python
+def test_get_recent_events():
+    hq = HistoryQuery(event_store)
+    events = hq.get_recent_events(ResourceIdentity(ResourceType.SERVICE, "nova-api"), count=10)
+    assert len(events) <= 10
+
+def test_get_alarms():
+    hq = HistoryQuery(event_store)
+    alarms = hq.get_alarms(ResourceIdentity(ResourceType.SERVICE, "rabbitmq"))
+    assert isinstance(alarms, list)
+```
+
+### Task 4.5: WorldView Facade — Unified Entry Point
+
+**Files:**
+- Create: `shared_src/worldview/facade.py` — WorldView Facade
+- Modify: `shared_src/worldview/__init__.py`
+
+**Interfaces:**
+- Produces: `WorldView(topology, state, history)` — pure Facade, no query logic
+
+**Key tests:**
+```python
+def test_worldview_is_pure_facade():
+    """WorldView 是 Facade，不含查询实现"""
+    wv = WorldView(topology=mock_topology, state=mock_state, history=mock_history)
+    assert hasattr(wv, "topology") and hasattr(wv, "state") and hasattr(wv, "history")
+    # WorldView 自身没有方法（除 __init__ 外）
+
+def test_worldview_delegates():
+    """Facade 委派给具体 Query 类"""
+    wv = WorldView(topology=mock_topology, state=mock_state, history=mock_history)
+    wv.topology.get_dependents(rid)
+    wv.state.get_state(rid)
+    wv.history.get_recent_events(rid)
+```
+
+### Task 4.6: CanonicalContextHasher (RFC 8785 + Merkle DAG)
+
+**Files:**
+- Create: `shared_src/context/hasher.py` — CanonicalContextHasher
+- Create: `shared_src/tests/context/test_hasher.py`
+
+**Interfaces:**
+- Produces: `CanonicalContextHasher.hash(content) -> str` — deterministic sha256
+- Produces: `CanonicalContextHasher.merkle_hash(parts) -> str` — Merkle DAG of content parts
+- Consumes: Context content dicts, no timestamp component in hash input
+
+**Key tests:**
+```python
+def test_canonical_hash_deterministic():
+    """相同输入始终产出相同 hash"""
+    hasher = CanonicalContextHasher()
+    h1 = hasher.hash({"resource": "INSTANCE:abc-123", "state": "ACTIVE"})
+    h2 = hasher.hash({"resource": "INSTANCE:abc-123", "state": "ACTIVE"})
+    assert h1 == h2
+
+def test_canonical_hash_no_timestamp():
+    """hash 不含时间戳组件"""
+    hasher = CanonicalContextHasher()
+    h1 = hasher.hash({"resource": "INSTANCE:abc-123"})
+    h2 = hasher.hash({"resource": "INSTANCE:abc-123", "ts": "ignored"})
+    # 只使用明确声明的 content 字段
+
+def test_merkle_hash():
+    """Merkle DAG 模式——部分内容变更不全局失效"""
+    hasher = CanonicalContextHasher()
+    root = hasher.merkle_hash({
+        "topology": topo_hash,
+        "state": state_hash,
+        "knowledge": knowledge_hash,
+    })
+    assert root.startswith("ctx_")
+
+def test_rfc8785_sort_keys():
+    """RFC 8785 确定性的 JSON 序列化——字典 key 排序"""
+    hasher = CanonicalContextHasher()
+    h1 = hasher.hash({"z": 1, "a": 2})
+    h2 = hasher.hash({"a": 2, "z": 1})
+    assert h1 == h2  # 排序后相同
+```
+
+### Task 4.7: ContextAPI + ContextResult (with StateProjectionRef)
 
 **Files:**
 - Create: `shared_src/context/__init__.py`
 - Create: `shared_src/context/api.py` — ContextAPI, ContextResult, ContextType
 - Create: `shared_src/context/builders.py` — Incident/Topology/Workflow/Rule builders
-- Create: `shared_src/context/snapshot.py` — ContextSnapshot
+- Create: `shared_src/context/snapshot.py` — ContextSnapshot (在 Projection Layer)
 - Create: `shared_src/tests/context/test_context_api.py`
+
+**Interfaces:**
+- Produces: `ContextAPI`, `ContextResult(context_hash, projection_epoch, knowledge_refs)`
+- Consumes: `WorldView Facade` (Task 4.5), `CanonicalContextHasher` (Task 4.6)
 
 **Key tests:**
 ```python
-def test_context_version_reproducible():
-    api = ContextAPI(...)
+def test_context_hash_stable():
+    """相同输入始终产出相同 context_hash"""
+    api = ContextAPI(canonical_hasher)
     r1 = api.build(ResourceType.INSTANCE, "abc-123")
     r2 = api.build(ResourceType.INSTANCE, "abc-123")
-    assert r1.context_version == r2.context_version
+    assert r1.context_hash == r2.context_hash
+
+def test_context_result_has_projection_epoch():
+    """ContextResult 引用 Projection epoch，不包含 data copy"""
+    api = ContextAPI(...)
+    result = api.build(ResourceType.INSTANCE, "abc-123")
+    assert result.projection_epoch != ""
+    # 不包含 projection 数据本身
+    assert not hasattr(result, "projection_data")
+
+def test_context_result_knowledge_refs():
+    """knowledge_refs 记录 [(doc_id, version), ...]"""
+    api = ContextAPI(knowledge_store)
+    result = api.build(ResourceType.INSTANCE, "abc-123")
+    for ref in result.knowledge_refs:
+        assert len(ref) == 2  # (doc_id, version)
+
+def test_context_api_uses_worldview():
+    """ContextAPI 内部使用 WorldView 查询状态"""
+    api = ContextAPI(...)
+    result = api.build(ResourceType.INSTANCE, "abc-123")
+    mock_topology.get_dependents.assert_called()
 
 def test_context_api_multiple_types():
     api = ContextAPI(...)
@@ -1378,43 +1584,140 @@ def test_context_api_hides_storage():
     assert not hasattr(result.context, "neo4j_query")
     assert not hasattr(result.context, "clickhouse_sql")
 
-def test_context_snapshot_consistency():
+def test_context_snapshot_not_default():
+    """Snapshot 默认不生成（use_snapshot=False）"""
+    api = ContextAPI(...)
+    result = api.build(type=INSTANCE, id="abc-123")
+    assert result.snapshot_id == ""
+
+def test_context_snapshot_when_requested():
     api = ContextAPI(...)
     result = api.build(type=INSTANCE, id="abc-123", use_snapshot=True)
     assert result.snapshot_id != ""
-    snapshot = api.get_snapshot(result.snapshot_id)
-    assert snapshot is not None
+```
+
+### Task 4.8: WorldView + ContextAPI Endpoints
+
+**Files:**
+- Create: `query-service/api/worldview.py` — WorldView HTTP routes (Facade endpoints)
+- Create: `query-service/tests/api/test_worldview_api.py`
+
+**Key tests:**
+```python
+def test_topology_endpoint():
+    client.get("/api/v1/worldview/topology/dependents?type=SERVICE&id=rabbitmq")
+    assert response.status_code == 200
+
+def test_state_endpoint():
+    client.get("/api/v1/worldview/state/current?type=INSTANCE&id=vm-1")
+    assert response.status_code == 200
+
+def test_history_endpoint():
+    client.get("/api/v1/worldview/history/events?type=SERVICE&id=nova-api&count=50")
+    assert response.status_code == 200
+
+def test_expressions_evaluate():
+    """Expression 求值端点（v15 新增）"""
+    client.post("/api/v1/expressions/evaluate", json={
+        "field": "resource.status", "operator": "==", "value": "ACTIVE",
+        "target": {"type": "INSTANCE", "id": "vm-1"},
+    })
+    assert response.status_code == 200
 ```
 
 ---
 &nbsp;
-# Phase 5: Knowledge + Inference + Planner
+# Phase 5: Goal Tree + Expression + Knowledge + Inference
 
-**Goal:** Knowledge & Memory Store + Inference Engine (LLM + Rule) + Planner (multi-candidate)
+**Goal:** Goal Tree (desired_state, no Workflow concepts) + Expression type (structured precondition) + Knowledge Object Model (SOP/Runbook/FailurePattern/Incident/RCA) + InferenceRegistry + InferencePipeline (Preprocess→Prompt→Engine→PostProcess→Validate→Normalize) + Planner (GoalInferrer → IntentGenerator)
 
-**Dependencies:** Phase 4 (ContextAPI provides IncidentContext)
+**Dependencies:** Phase 4 (WorldView provides query for GoalInferrer + Expression evaluation)
+
+**v12-v15 changes applied:**
+- **Goal** describes desired_state (not Workflow) — no action/ordering/completion
+- **Expression** — structured `(field, operator, value)`, not strings
+- **IntentGenerator** — Generator outputs *what* (PlanIntent), WorkflowComposer converts Intent → Workflow
+- **GoalInferrer** — Finding → Goal Tree (target state tree)
+- **InferenceRegistry** — maps event_type → InferencePipeline
+- **InferencePipeline** — Preprocess → Prompt → Engine → PostProcess → Validate → Normalize
+- **Knowledge Object Model** — typed documents: SOP / Runbook / FailurePattern / Incident / RCA
+- **Planner** — uses Goal Tree, generates intents (not directly candidates)
 
 ---
 
-### Task 5.1: Knowledge & Memory Store
+### Task 5.1: Expression dataclass + evaluate()
+
+**Files:**
+- Create: `shared_src/expression/__init__.py`
+- Create: `shared_src/expression/models.py` — Expression dataclass
+- Create: `shared_src/tests/expression/test_expression.py`
+
+**Interfaces:**
+- Produces: `Expression(field, operator, value).evaluate(worldview, target) -> bool`
+- Consumes: `WorldView` (Task 4.5)
+
+**Key tests:**
+```python
+def test_expression_evaluate_eq():
+    """Expression == 操作符"""
+    worldview = WorldView(topology=..., state=StateQuery(mock_state, ...), ...)
+    expr = Expression("resource.status", "==", "ACTIVE")
+    mock_state.resolve_field.return_value = "ACTIVE"
+    assert expr.evaluate(worldview, target) == True
+    mock_state.resolve_field.return_value = "ERROR"
+    assert expr.evaluate(worldview, target) == False
+
+def test_expression_exists():
+    expr = Expression("ssh.accessible", "exists")
+    worldview.state.resolve_field.return_value = True
+    assert expr.evaluate(worldview, target) == True
+    worldview.state.resolve_field.return_value = None
+    assert expr.evaluate(worldview, target) == False
+
+def test_expression_contains():
+    expr = Expression("service.tags", "contains", "production")
+    worldview.state.resolve_field.return_value = ["production", "rabbitmq"]
+    assert expr.evaluate(worldview, target) == True
+
+def test_predefined_expressions():
+    """预定义 Expression 工厂函数"""
+    assert expr_status_eq("ACTIVE").field == "resource.status"
+    assert expr_host_alive().value == "alive"
+    assert expr_service_exists().operator == "=="
+```
+
+### Task 5.2: Knowledge Object Model + Knowledge & Memory Store
 
 **Files:**
 - Create: `shared_src/knowledge/__init__.py`
+- Create: `shared_src/knowledge/models.py` — KnowledgeDocument, SOP, Runbook, FailurePattern, Incident, RCA
 - Create: `shared_src/knowledge/store.py` — KnowledgeMemoryStore
-- Create: `shared_src/knowledge/document.py` — KnowledgeDocument, MemoryRecord
+- Create: `shared_src/knowledge/memory.py` — MemoryRecord
+- Create: `shared_src/tests/knowledge/test_models.py`
 - Create: `shared_src/tests/knowledge/test_store.py`
 
 **Key tests:**
 ```python
+def test_knowledge_object_types():
+    """不同类型知识对象有独立字段"""
+    sop = SOP(document_id="sop-001", title="Restart RabbitMQ",
+              steps=["Check status", "Restart service", "Verify"])
+    runbook = Runbook(document_id="rb-001", title="RabbitMQ Recovery",
+                       category="messaging", severity="P1")
+    fp = FailurePattern(document_id="fp-001", title="RabbitMQ heartbeat lost",
+                         symptoms=["heartbeat timeout"], root_cause="network partition")
+    assert sop.document_type == "sop"
+    assert runbook.document_type == "runbook"
+    assert fp.document_type == "failure_pattern"
+
 def test_knowledge_retrieval():
     store = KnowledgeMemoryStore()
-    store.add_document(KnowledgeDocument(
-        document_id="kb-001",
+    store.add_document(SOP(
+        document_id="sop-001",
         title="Nova OOM Troubleshooting",
-        content="When Nova scheduler runs out of memory...",
-        source_type="runbook",
+        steps=["Check memory usage", "Migrate VMs"],
     ))
-    results = store.retrieve("nova scheduler OOM")
+    results = store.retrieve("nova OOM")
     assert len(results) > 0
 
 def test_memory_write_and_retrieve():
@@ -1424,160 +1727,606 @@ def test_memory_write_and_retrieve():
         action_taken="restart neutron-dhcp-agent",
     ))
     results = store.retrieve("neutron agent failure")
-    assert "neutron" in results[0].content
+    assert results[0].action_taken == "restart neutron-dhcp-agent"
 
 def test_knowledge_provenance():
-    doc = KnowledgeDocument(
-        document_id="kb-001",
-        title="OpenStack Wallaby Admin Guide",
-        origin="openstack-official",
-        version="wallaby-2025-12",
-        trust_level=5,
-    )
+    doc = SOP(document_id="kb-001", title="OpenStack Wallaby Admin Guide",
+              origin="openstack-official", version="wallaby-2025-12", trust_level=5)
     assert doc.trust_level == 5
 ```
 
-### Task 5.2: Inference Engine (LLM + Rule)
+### Task 5.3: InferenceRegistry + InferencePipeline
 
 **Files:**
 - Create: `semantic-engine/inference/__init__.py`
-- Create: `semantic-engine/inference/engine.py` — InferenceEngine ABC, InferenceInput
-- Create: `semantic-engine/inference/llm_engine.py` — LLMInferenceEngine (with RAG)
-- Create: `semantic-engine/inference/rule_engine.py` — RuleInferenceEngine
-- Create: `semantic-engine/inference/finding.py` — Finding
-- Create: `semantic-engine/tests/inference/test_inference.py`
+- Create: `semantic-engine/inference/registry.py` — InferenceRegistry (maps event_type → Pipeline)
+- Create: `semantic-engine/inference/pipeline.py` — InferencePipeline (5-stage chain)
+- Create: `semantic-engine/inference/models.py` — InferenceInput, InferenceOutput, InferenceContext
+- Create: `semantic-engine/inference/finding.py` — Finding (no recommended_action in v15)
+- Create: `semantic-engine/tests/inference/test_registry.py`
+- Create: `semantic-engine/tests/inference/test_pipeline.py`
+
+**Interfaces:**
+- Produces: `InferenceRegistry.register(event_type, pipeline)`, `pipeline.run(input) -> Finding[]`
+- Consumes: `WorldView` (Task 4.5), `KnowledgeMemoryStore` (Task 5.2)
 
 **Key tests:**
 ```python
-def test_finding_unified_output():
-    rule_engine = RuleInferenceEngine()
-    llm_engine = LLMInferenceEngine(knowledge_store, llm_client)
-    findings = rule_engine.infer(InferenceInput(context=ctx))
-    for f in findings:
-        assert hasattr(f, "severity")
-        assert hasattr(f, "confidence")
-        assert hasattr(f, "context_version")
+def test_inference_registry():
+    """Registry 按 event_type 分配 Pipeline"""
+    registry = InferenceRegistry()
+    pipeline = InferencePipeline(preprocessor, engine, validator)
+    registry.register("normalized.event", pipeline)
+    assert registry.get("normalized.event") == pipeline
 
-def test_llm_uses_knowledge():
-    engine = LLMInferenceEngine(knowledge_store, mock_llm)
-    findings = engine.infer(InferenceInput(
-        context=ctx,
-        knowledge=[KnowledgeDocument(document_id="kb-001", title="Test", content="test")],
-    ))
-    assert "kb-001" in findings[0].knowledge_sources
+def test_inference_pipeline_stages():
+    """Pipeline 5 阶段完整执行"""
+    pipeline = InferencePipeline(
+        preprocessor=MockPreprocessor(),
+        llm_engine=MockLLMEngine(),
+        postprocessor=MockPostprocessor(),
+        validator=MockValidator(),
+        normalizer=MockNormalizer(),
+    )
+    result = pipeline.run(InferenceInput(context=ctx, knowledge=knowledge))
+    assert len(result.findings) > 0
+
+def test_finding_no_recommended_action():
+    """v15: Finding 不含 recommended_action（由 Planner 从 Goal 推导）"""
+    finding = Finding(category="RabbitMQHeartbeatLost", confidence=0.91)
+    assert not hasattr(finding, "recommended_action")
+
+def test_finding_has_knowledge_refs():
+    """Finding 记录知识引用"""
+    finding = Finding(category="RabbitMQHeartbeatLost",
+                       knowledge_refs=[("kb-001", "v3"), ("kb-007", "v5")])
+    assert len(finding.knowledge_refs) == 2
+
+def test_finding_has_context_hash():
+    """Finding 引用 context_hash"""
+    finding = Finding(category="RabbitMQHeartbeatLost", context_hash="ctx_abc123")
+    assert finding.context_hash == "ctx_abc123"
 ```
 
-### Task 5.3: Planner (Multi-Candidate)
+### Task 5.4: GoalNode + Goal (desired_state only)
+
+**Files:**
+- Create: `shared_src/goal/__init__.py`
+- Create: `shared_src/goal/models.py` — GoalNode, Goal
+- Create: `shared_src/tests/goal/test_goal_models.py`
+
+**Interfaces:**
+- Produces: `GoalNode(goal_id, desired_state, target, children)` — no action/ordering/completion
+- Produces: `Goal(primary, tree, priority, reason)`
+
+**Key tests:**
+```python
+def test_goal_desired_state():
+    """GoalNode 只描述目标状态"""
+    node = GoalNode(goal_id="g1", desired_state="RabbitMQ.healthy",
+                     target=ResourceIdentity(ResourceType.SERVICE, "rabbitmq"))
+    assert not hasattr(node, "action")       # 不含 Workflow 概念
+    assert not hasattr(node, "ordering")
+    assert not hasattr(node, "completion_criteria")
+    assert not hasattr(node, "status")
+    assert node.desired_state == "RabbitMQ.healthy"
+
+def test_goal_nested_tree():
+    """Goal 支持目标状态树"""
+    goal = Goal(
+        primary="restore_messaging",
+        tree=GoalNode(goal_id="root", desired_state="Cluster.healthy", target=cluster,
+                       children=[
+                           GoalNode(goal_id="mq", desired_state="RabbitMQ.healthy", target=svc),
+                       ]),
+        priority=90,
+    )
+    assert len(goal.tree.children) == 1
+    assert goal.tree.children[0].desired_state == "RabbitMQ.healthy"
+
+def test_goal_no_workflow_fields():
+    """Goal 不含 Workflow 字段"""
+    goal = Goal(primary="restore_messaging",
+                 tree=GoalNode(goal_id="root", desired_state="healthy", target=t))
+    assert not hasattr(goal, "steps")
+    assert not hasattr(goal, "ordering")
+```
+
+### Task 5.5: Constraint Knowledge (Expression-based)
+
+**Files:**
+- Create: `semantic-engine/knowledge/constraint.py` — Constraint
+- Create: `semantic-engine/tests/knowledge/test_constraint.py`
+
+**Key tests:**
+```python
+def test_constraint_uses_expression():
+    """Constraint 使用 Expression 表达条件"""
+    constraint = Constraint(
+        constraint_id="c-001",
+        applies_to="restart_service",
+        condition=Expression("time.hour", "in", [9, 10, 11, 12, 13, 14, 15, 16, 17]),
+        restriction="No restart during business hours",
+        severity="warning",
+    )
+    assert isinstance(constraint.condition, Expression)
+    assert constraint.severity == "warning"
+```
+
+### Task 5.6: GoalInferrer + IntentGenerator
 
 **Files:**
 - Create: `semantic-engine/planner/__init__.py`
-- Create: `semantic-engine/planner/planner.py` — Planner
-- Create: `semantic-engine/planner/candidate.py` — WorkflowCandidate
+- Create: `semantic-engine/planner/goal_inferrer.py` — GoalInferrer (Finding → Goal Tree)
+- Create: `semantic-engine/planner/intent_generator.py` — IntentGenerator ABC + subclasses
+- Create: `semantic-engine/planner/models.py` — PlanIntent
+- Create: `semantic-engine/tests/planner/test_goal_inferrer.py`
+- Create: `semantic-engine/tests/planner/test_intent_generator.py`
+
+**Interfaces:**
+- Consumes: `WorldView` (Task 4.5), `Finding` (Task 5.3), `Goal` models (Task 5.4)
+- Produces: `GoalInferrer.infer(finding, context, worldview) -> Goal`
+- Produces: `IntentGenerator.can_handle(finding, goal_node, worldview) -> bool`
+- Produces: `IntentGenerator.generate(finding, goal_node, worldview) -> Optional[PlanIntent]`
+
+**Key tests:**
+```python
+def test_goal_inferrer_produces_state_tree():
+    """GoalInferrer 产出目标状态树"""
+    goal = GoalInferrer().infer(finding, context, worldview)
+    assert goal.tree.desired_state is not None
+    for child in goal.tree.children:
+        assert "healthy" in child.desired_state or "responding" in child.desired_state
+
+def test_intent_generator_matches_desired_state():
+    """IntentGenerator 按目标状态匹配"""
+    gen = RestartIntentGenerator(...)
+    node = GoalNode(goal_id="g1", desired_state="RabbitMQ.healthy", target=...)
+    assert gen.can_handle(mock_finding, node, worldview)
+    node2 = GoalNode(goal_id="g2", desired_state="evidence_collected", target=...)
+    assert not gen.can_handle(mock_finding, node2, worldview)
+
+def test_intent_generator_outputs_plan_intent():
+    """Generator 输出 PlanIntent（what, not how）"""
+    gen = RestartIntentGenerator(...)
+    intent = gen.generate(mock_finding, goal_node, worldview)
+    assert intent is not None
+    assert intent.action == "restart_service"  # what
+    assert intent.target is not None            # on what
+    assert not hasattr(intent, "steps")         # not how (WorkflowComposer 负责)
+
+def test_diagnostic_generator_low_confidence():
+    """低置信度 Finding 触发诊断 Intent"""
+    gen = DiagnosticIntentGenerator(...)
+    finding = Finding(category="unknown", confidence=0.3)
+    assert gen.can_handle(finding, diagnosis_node, worldview)
+```
+
+### Task 5.7: Planner (GoalInferrer + IntentGenerator)
+
+**Files:**
+- Create: `semantic-engine/planner/planner.py` — Planner (orchestrates GoalInferrer + IntentGenerators)
+- Create: `semantic-engine/planner/result.py` — PlannerResult
 - Create: `semantic-engine/tests/planner/test_planner.py`
 
 **Key tests:**
 ```python
-def test_planner_multiple_candidates():
-    planner = Planner(knowledge_store, capability_registry)
+def test_planner_generates_intents():
+    """Planner 从 Finding 生成 Intents（通过 Goal 树）"""
+    planner = Planner(goal_inferrer, generators, worldview)
     result = planner.plan(mock_finding, mock_context)
-    assert len(result.candidates) >= 2  # primary + diagnostic
-    assert result.primary is not None
-    for c in result.candidates:
-        assert 1 <= c.risk_score <= 100
-        assert 0 <= c.confidence <= 1.0
+    assert len(result.intents) >= 1
+    assert result.goal is not None
+
+def test_planner_traverses_goal_tree():
+    """Planner 递归遍历 Goal Tree 的每个节点"""
+    planner = Planner(goal_inferrer, generators, worldview)
+    result = planner.plan(mock_finding, mock_context)
+    # 每个 GoalNode 都应该有对应的 Intent（如果匹配 Generator）
+    for intent in result.intents:
+        assert intent.action in ("restart_service", "collect_diagnostic", "failover")
 ```
 
 ---
 &nbsp;
-# Phase 6: Policy + Workflow + Feedback
+# Phase 6: Capability + Blast Radius + Risk + Policy + Decision Orchestration
 
-**Goal:** OPA-based PolicyEngine + CapabilityRegistry + WorkflowEngine + FeedbackLoop
+**Goal:** Capability (Expression Pre/Post + ImpactModel) + ExecutionPlanner + Blast Radius Analyzer (ImpactModel + Dependency + State) + RiskEngine (3-tier + Constraint/Expression) + PolicyEngine (configurable Utility weights) + DecisionStateMachine + DecisionOrchestrator (separated) + WorkflowEngine
 
-**Dependencies:** Phase 5 (Planner produces WorkflowCandidates)
+**Dependencies:** Phase 5 (Planner produces intents, Goal Tree, Expression)
+
+**v12-v15 changes applied:**
+- **Capability** — Expression preconditions/postconditions + ImpactModel (not strings)
+- **ExecutionPlanner** — Intent → WorkflowCandidate (Composer moved out of Planner in v13)
+- **Blast Radius Analyzer** — inputs: Capability ImpactModel + Dependency Graph + Current State (v15)
+- **RiskEngine** — independent component (v12), uses Expression-based Constraint check (v15)
+- **PolicyEngine** — sorts candidates (v12), configurable Utility weights (v15)
+- **UtilityWeights** — dataclass with OPA Rego `data.logoscope.utility_weights` injection
+- **DecisionStateMachine** — pure lifecycle (12 states), separated from orchestration (v15)
+- **DecisionOrchestrator** — pure orchestration (v15: PLAN → EVALUATE → POLICY → EXECUTE → LEARN)
 
 ---
 
-### Task 6.1: PolicyEngine (OPA)
-
-**Files:**
-- Create: `shared_src/policy/__init__.py`
-- Create: `shared_src/policy/engine.py` — PolicyEngine (OPA client)
-- Create: `shared_src/policy/models.py` — PolicyDecision, PolicyEvaluationRequest, PolicyAction
-- Create: `deploy/policies/` — Rego policy files
-- Create: `shared_src/tests/policy/test_opa_engine.py`
-
-**Key test:**
-```python
-def test_opa_deny():
-    engine = PolicyEngine(opa_endpoint="http://localhost:8181")
-    request = PolicyEvaluationRequest(
-        candidates=[WorkflowCandidate(
-            workflow=Workflow(name="restart_service"),
-            risk_score=70,
-        )],
-    )
-    result = engine.evaluate_candidates(request, ctx, finding)
-    assert result.decision in (
-        PolicyDecision.CANDIDATE_SELECTED,
-        PolicyDecision.DENY,
-        PolicyDecision.PENDING_APPROVAL,
-    )
-```
-
-**Rego policy:**
-```rego
-# deploy/policies/logoscope_policy.rego
-package logoscope.policy
-
-decision = "deny" {
-    input.candidate.risk_score >= 80
-}
-
-decision = "pending_approval" {
-    input.candidate.risk_score >= 40
-    input.candidate.risk_score < 80
-}
-
-decision = "allow" {
-    input.candidate.risk_score < 40
-}
-```
-
-### Task 6.2: CapabilityRegistry + Effect Model
+### Task 6.1: Capability (v15: Expression Pre/Post + ImpactModel)
 
 **Files:**
 - Create: `shared_src/capability/__init__.py`
+- Create: `shared_src/capability/models.py` — Capability (Expression pre/post, ImpactModel, effects tag)
 - Create: `shared_src/capability/registry.py` — CapabilityRegistry
-- Create: `shared_src/capability/models.py` — Capability, EffectType
+- Create: `shared_src/expression/impact_model.py` — ImpactModel
 - Create: `exec-service/capability/executors/__init__.py`
 - Create: `exec-service/capability/executors/ssh_executor.py`
 - Create: `exec-service/capability/executors/k8s_executor.py`
 - Create: `shared_src/tests/capability/test_registry.py`
+- Create: `shared_src/tests/expression/test_impact_model.py`
 
 **Key tests:**
 ```python
-def test_capability_effect():
+def test_capability_expression_preconditions():
+    """Capability 使用 Expression，不是字符串"""
     cap = Capability(
         capability_id="ssh.restart_service",
-        effect=EffectType.RESTART,
-        risk_score=70,
+        provider="ssh-executor",
+        effects=["service.restart", "process.modify"],
+        base_risk=50,
+        preconditions=[
+            Expression("host.host_status", "==", "alive"),
+            Expression("service.exists", "==", True),
+        ],
+        postconditions=[
+            Expression("resource.status", "==", "running"),
+        ],
+        impact_model=ImpactModel("temporary", "30s", "service"),
+        rollback_capability="ssh.restart_service",
     )
-    assert cap.effect == EffectType.RESTART
-    assert cap.risk_score == 70
+    assert all(isinstance(p, Expression) for p in cap.preconditions)
+    assert cap.impact_model.severity == "temporary"
+    assert cap.preconditions[0].field == "host.host_status"
+
+def test_capability_effect_tags():
+    """Capability effects 是 List[str]"""
+    cap = Capability(capability_id="openstack.delete_volume",
+                      effects=["storage.delete", "data.loss"], base_risk=80)
+    assert "storage.delete" in cap.effects
 
 def test_registry_execute():
     registry = CapabilityRegistry()
     registry.register(Capability(
-        capability_id="echo.test",
-        provider="mock",
-        effect=EffectType.READ,
-        risk_score=5,
+        capability_id="echo.test", provider="mock",
+        effects=["read.process"], base_risk=5,
     ))
     result = registry.execute("echo.test", {"msg": "hello"})
     assert result is not None
 ```
 
-### Task 6.3: WorkflowEngine + Command/Event separation
+### Task 6.2: ExecutionPlanner (Intent → WorkflowCandidate)
+
+**Files:**
+- Create: `semantic-engine/execution/__init__.py`
+- Create: `semantic-engine/execution/planner.py` — ExecutionPlanner (Intent → WorkflowCandidate)
+- Create: `semantic-engine/execution/workflow_composer.py` — WorkflowComposer (PlanIntent → Workflow)
+- Create: `semantic-engine/execution/models.py` — WorkflowCandidate
+- Create: `semantic-engine/tests/execution/test_execution_planner.py`
+- Create: `semantic-engine/tests/execution/test_workflow_composer.py`
+
+**Interfaces:**
+- Produces: `ExecutionPlanner.plan(plan_result, context) -> List[WorkflowCandidate]`
+- Consumes: `CapabilityRegistry` (Task 6.1), `WorldView` (Phase 4)
+
+**Key tests:**
+```python
+def test_execution_planner_converts_intent():
+    """ExecutionPlanner 将 PlanIntent 转为 WorkflowCandidate"""
+    ep = ExecutionPlanner(capability_registry, world_view, knowledge_store)
+    intent = PlanIntent(action="restart_service", target=...)
+    candidates = ep.plan(intent, mock_context)
+    assert len(candidates) >= 1
+    assert all(isinstance(c, WorkflowCandidate) for c in candidates)
+
+def test_workflow_composer_preconditions():
+    """WorkflowComposer 使用 Expression 检查前置条件"""
+    composer = WorkflowComposer(capability_registry)
+    cap = Capability(capability_id="ssh.restart_service",
+                      preconditions=[
+                          Expression("host.host_status", "==", "alive"),
+                          Expression("service.exists", "==", True),
+                      ])
+    mock_worldview.state.resolve.return_value = "alive"
+    assert composer._check_preconditions(cap, target, mock_worldview) == True
+    mock_worldview.state.resolve.return_value = "dead"
+    assert composer._check_preconditions(cap, target, mock_worldview) == False
+
+def test_candidate_estimated_success_rate():
+    """Candidate 使用 estimated_success_rate（不同于 Finding.confidence）"""
+    candidate = WorkflowCandidate(workflow=wf, estimated_success_rate=0.9, base_risk=50)
+    assert 0.0 <= candidate.estimated_success_rate <= 1.0
+    assert candidate.base_risk == 50
+    assert candidate.final_risk >= candidate.base_risk  # dynamic adjustment
+```
+
+### Task 6.3: Blast Radius Analyzer (impact + dependency + state)
+
+**Files:**
+- Create: `shared_src/blast_radius/__init__.py`
+- Create: `shared_src/blast_radius/analyzer.py` — BlastRadiusAnalyzer
+- Create: `shared_src/blast_radius/models.py` — BlastRadiusReport
+- Create: `shared_src/tests/blast_radius/test_analyzer.py`
+
+**Key tests:**
+```python
+def test_blast_radius_uses_impact_model():
+    """Blast Radius 使用 Capability.impact_model"""
+    cap = Capability(capability_id="ssh.restart_service",
+                      impact_model=ImpactModel("temporary", "30s", "service"))
+    analyzer = BlastRadiusAnalyzer(topology_query, state_query)
+    report = analyzer.analyze(intent, target, cap, worldview)
+    assert report.risk_level in ("low", "medium", "high", "critical")
+    # temporary 30s 的风险 < permanent data loss
+
+def test_blast_radius_dependency_graph():
+    """Blast Radius 使用 Dependency Graph"""
+    analyzer = BlastRadiusAnalyzer(topology_query, state_query)
+    report = analyzer.analyze(intent, target, cap, worldview)
+    assert len(report.directly_affected) >= 0
+    assert report.estimated_vm_count >= 0
+    assert report.estimated_service_count >= 0
+
+def test_blast_radius_current_state_adjustment():
+    """Current State 调整影响范围"""
+    analyzer = BlastRadiusAnalyzer(topology_query, state_query)
+    worldview.state.get_state.return_value = "ERROR"
+    report = analyzer.analyze(intent, target, cap, worldview)
+    # ERROR 状态下调高风险
+    assert report.risk_level in ("high", "critical")
+
+def test_blast_radius_permanent_risk():
+    """permanent 操作评为 critial"""
+    cap = Capability(capability_id="openstack.delete_volume",
+                      impact_model=ImpactModel("permanent", "permanent", "data"))
+    analyzer = BlastRadiusAnalyzer(...)
+    report = analyzer.analyze(intent, target, cap, worldview)
+    assert report.risk_level == "critical"
+```
+
+### Task 6.4: RiskEngine (3-tier + Constraint Expression check)
+
+**Files:**
+- Create: `shared_src/risk/__init__.py`
+- Create: `shared_src/risk/engine.py` — RiskEngine
+- Create: `shared_src/risk/models.py` — RiskProfile
+- Create: `shared_src/tests/risk/test_engine.py`
+
+**Interfaces:**
+- Produces: `RiskEngine.compute(intent, candidate, context, worldview) -> RiskProfile`
+- Consumes: `BlastRadiusAnalyzer` (Task 6.3), `KnowledgeMemoryStore` (Task 5.2), `WorldView` (Phase 4)
+
+**Key tests:**
+```python
+def test_risk_engine_three_tiers():
+    """RiskEngine 计算三层风险"""
+    engine = RiskEngine(blast_analyzer, knowledge_store)
+    profile = engine.compute(intent, candidate, context, worldview)
+    assert hasattr(profile, "business_risk")
+    assert hasattr(profile, "execution_risk")
+    assert hasattr(profile, "operational_risk")
+    assert profile.final_risk >= 0
+
+def test_risk_engine_expression_constraint():
+    """Constraint 检查使用 Expression"""
+    engine = RiskEngine(blast_analyzer, knowledge_store)
+    constraint = Constraint(
+        applies_to="restart_service",
+        condition=Expression("resource.status", "==", "running"),
+        restriction="Cannot restart a running service without approval",
+        severity="error",
+    )
+    knowledge_store.get_constraints.return_value = [constraint]
+    worldview.state.resolve_field.return_value = "running"
+    profile = engine.compute(intent, candidate, context, worldview)
+    assert profile.final_risk >= 50  # error severity 加分
+
+def test_risk_engine_blast_radius_integration():
+    """Blast Radius 影响 Operational Risk"""
+    engine = RiskEngine(blast_analyzer, knowledge_store)
+    blast_analyzer.analyze.return_value = BlastRadiusReport(risk_level="critical")
+    profile = engine.compute(intent, candidate, context, worldview)
+    assert profile.operational_risk >= 30
+```
+
+### Task 6.5: PolicyEngine + UtilityWeights (OPA configurable)
+
+**Files:**
+- Create: `shared_src/policy/__init__.py`
+- Create: `shared_src/policy/engine.py` — PolicyEngine (OPA, effects-based, sorts candidates)
+- Create: `shared_src/policy/models.py` — PolicyEvaluationResult, PolicyDecision, UtilityWeights
+- Create: `shared_src/policy/decision_record.py` — DecisionRecord, DecisionRecordStore
+- Create: `deploy/policies/high_risk.rego` — effects-based rules
+- Create: `deploy/policies/utility.rego` — configurable Utility weights
+- Create: `shared_src/tests/policy/test_policy_engine.py`
+- Create: `shared_src/tests/policy/test_decision_record.py`
+- Create: `shared_src/tests/policy/test_utility_weights.py`
+
+**Key tests:**
+```python
+def test_utility_configurable_weights():
+    """Utility 权重可通过配置调整"""
+    engine = PolicyEngine(..., weights=UtilityWeights(success=0.4, risk=0.4))
+    assert engine.weights.success == 0.4
+
+def test_utility_different_weights_different_ranking():
+    """不同权重产生不同候选排序"""
+    engine_a = PolicyEngine(..., weights=UtilityWeights(success=0.6, risk=0.1))
+    engine_b = PolicyEngine(..., weights=UtilityWeights(success=0.1, risk=0.6))
+    candidates = [
+        WorkflowCandidate(workflow=wf1, estimated_success_rate=0.95, final_risk=70),
+        WorkflowCandidate(workflow=wf2, estimated_success_rate=0.85, final_risk=20),
+    ]
+    ranked_a = engine_a._rank(candidates, intent, worldview)
+    ranked_b = engine_b._rank(candidates, intent, worldview)
+    # 高风险偏好时，低风险候选应排名更高
+    assert ranked_b[0].final_risk <= ranked_a[0].final_risk
+
+def test_opa_uses_effects_not_names():
+    """OPA 输入包含 effects tag，不包含 capability name"""
+    engine = PolicyEngine(...)
+    request = PolicyEvaluationRequest(
+        candidates=[WorkflowCandidate(
+            workflow=Workflow(steps=[WorkflowStep(capability="openstack.delete_volume")]),
+            estimated_success_rate=0.9, final_risk=90,
+        )],
+    )
+    opa_input = engine._build_opa_input(request, request.candidates[0])
+    assert "capability" not in str(opa_input)
+    assert "effects" in str(opa_input)
+
+def test_opa_utility_rego():
+    """OPA 使用可配置权重（data.logoscope.utility_weights）"""
+    engine = PolicyEngine(opa_endpoint="http://localhost:8181",
+                           weights=UtilityWeights(success=0.4, risk=0.4))
+    # weights 传递给 OPA Rego
+    assert engine.weights.risk == 0.4
+
+def test_policy_selects_best_candidate():
+    """PolicyEngine 从多个候选中选择最佳"""
+    engine = PolicyEngine(...)
+    candidates = [
+        WorkflowCandidate(workflow=wf1, estimated_success_rate=0.95, final_risk=85),
+        WorkflowCandidate(workflow=wf2, estimated_success_rate=0.60, final_risk=20),
+    ]
+    decision = engine.evaluate_candidates(plan_result, candidates, context, finding)
+    assert decision.decision in (PolicyDecision.CANDIDATE_SELECTED, PolicyDecision.DENY)
+
+def test_decision_record():
+    """DecisionRecord 记录完整决策路径"""
+    record = DecisionRecord(
+        decision_id="dec-001", finding_id="f-001", context_hash="ctx_abc123",
+        planner_candidates=[candidate_a, candidate_b],
+        selected_candidate=candidate_a,
+        policy_rules_matched=["no_restart_biz_hours"],
+        rejected_candidates=["restart_service: denied"],
+        execution_id="exec-001", approver="auto",
+    )
+    assert record.finding_id == "f-001"
+```
+
+**Rego policy (effects-based + utility weights):**
+```rego
+# deploy/policies/utility.rego
+package logoscope.policy
+
+default utility = 0
+
+utility = score {
+    w := data.logoscope.utility_weights
+    score := (input.candidate.estimated_success_rate * 100 * w.success)
+           - (input.candidate.risk.final_risk * w.risk)
+           - (input.candidate.estimated_duration_minutes * w.cost)
+           - (input.candidate.blast.vm_count * w.blast)
+}
+
+decision = "deny" { input.candidate.risk.final_risk >= 80 }
+decision = "pending_approval" {
+    input.candidate.risk.final_risk >= 40
+    input.candidate.risk.final_risk < 80
+}
+decision = "allow" { input.candidate.risk.final_risk < 40 }
+
+deny_delete {
+    contains(input.candidate.steps[_].effects[_], "delete")
+}
+```
+
+### Task 6.6: DecisionStateMachine (pure lifecycle, 12 states)
+
+**Files:**
+- Create: `shared_src/decision/__init__.py`
+- Create: `shared_src/decision/state_machine.py` — DecisionStateMachine, DecisionStatus
+- Create: `shared_src/tests/decision/test_state_machine.py`
+
+**Interfaces:**
+- Produces: `DecisionStateMachine.transition(decision, to) -> DecisionRecord`
+- Consumes: EventBus (for state transition events)
+
+**Key tests:**
+```python
+def test_state_machine_transition():
+    sm = DecisionStateMachine(bus)
+    d = DecisionRecord(decision_id="d1")
+    d.status = DecisionStatus.CREATED
+    sm.transition(d, DecisionStatus.PLANNING)
+    assert d.status == DecisionStatus.PLANNING
+    assert len(d.status_history) == 1
+
+def test_state_machine_invalid_transition():
+    sm = DecisionStateMachine(bus)
+    d = DecisionRecord(decision_id="d1")
+    d.status = DecisionStatus.CREATED
+    with pytest.raises(InvalidTransitionError):
+        sm.transition(d, DecisionStatus.SUCCEEDED)  # CREATED → SUCCEEDED 非法
+
+def test_state_machine_terminal_states():
+    """终止状态设置 completed_at"""
+    sm = DecisionStateMachine(bus)
+    d = DecisionRecord(decision_id="d1")
+    d.status = DecisionStatus.EXECUTING
+    sm.transition(d, DecisionStatus.SUCCEEDED)
+    assert d.completed_at is not None
+
+def test_state_machine_publishes_event():
+    sm = DecisionStateMachine(bus)
+    d = DecisionRecord(decision_id="d1")
+    d.status = DecisionStatus.CREATED
+    sm.transition(d, DecisionStatus.PLANNING)
+    assert any("platform.decision.state" in str(e) for e in bus._history)
+
+def test_state_machine_pure_lifecycle():
+    """DecisionStateMachine 只做状态管理，不做编排"""
+    sm = DecisionStateMachine(bus)
+    assert hasattr(sm, "transition")
+    assert not hasattr(sm, "execute")  # 编排由 Orchestrator 负责
+```
+
+### Task 6.7: DecisionOrchestrator (PLAN → EVALUATE → POLICY → EXECUTE → LEARN)
+
+**Files:**
+- Create: `shared_src/decision/orchestrator.py` — DecisionOrchestrator
+- Create: `shared_src/tests/decision/test_orchestrator.py`
+
+**Interfaces:**
+- Produces: `DecisionOrchestrator.execute(finding, context, goal) -> DecisionResult`
+- Consumes: Planner (Task 5.7), ExecutionPlanner (Task 6.2), RiskEngine (Task 6.4), BlastRadiusAnalyzer (Task 6.3), PolicyEngine (Task 6.5), DecisionStateMachine (Task 6.6), WorkflowEngine (Task 6.8), EpisodeStore (Phase 7)
+
+**Key tests:**
+```python
+def test_orchestrator_complete_flow():
+    """Orchestrator 执行完整 5 阶段流程"""
+    orchestrator = DecisionOrchestrator(
+        planner, exec_planner, risk_engine, blast_analyzer,
+        policy_engine, state_machine, workflow_engine, episode_store,
+    )
+    result = orchestrator.execute(mock_finding, mock_context)
+    assert result.decision.status in (
+        DecisionStatus.SUCCEEDED, DecisionStatus.FAILED,
+        DecisionStatus.REJECTED, DecisionStatus.PENDING_APPROVAL,
+    )
+
+def test_orchestrator_records_episode():
+    """Orchestrator 在 FINAL 阶段记录 Episode"""
+    orchestrator = DecisionOrchestrator(...)
+    result = orchestrator.execute(mock_finding, mock_context)
+    episode = episode_store.get_by_decision(result.decision.decision_id)
+    assert episode is not None
+
+def test_orchestrator_integration():
+    """端到端集成：Finding → Decision → Episode"""
+    orchestrator = DecisionOrchestrator(...)
+    result = orchestrator.execute(finding, context)
+    assert result.decision.finding_id == finding.id
+    episode = episode_store.get_by_decision(result.decision.decision_id)
+    assert episode.finding_id == finding.id
+```
+
+### Task 6.8: WorkflowEngine + Command/Event separation
 
 **Files:**
 - Create: `shared_src/workflow/__init__.py`
@@ -1592,42 +2341,257 @@ def test_workflow_command_event():
     wf = Workflow(steps=[WorkflowStep(capability="echo.test", params={"msg": "hello"})])
     event = engine.execute(wf, WorkflowContext(...))
     assert event.outcome in ("success", "failure")
-    assert event.command_id != ""
-    # Command 和 Event 在不同 topic
     assert any(env in bus._history.get("platform.workflow.command", []))
     assert any(env in bus._history.get("platform.workflow.event", []))
 ```
 
-### Task 6.4: FeedbackLoop
+---
+&nbsp;
+# Phase 7: Episode + Feedback + Experience Graph
+
+**Goal:** Episode (with DecisionStep: candidate_scores + reject_reasons) + Feedback (eventized: EvaluationEvent → LearningEvent) + ExperienceGraphProjection (key with failure_pattern dimension) + CapabilityStatsProjector
+
+**Dependencies:** Phase 6 (DecisionOrchestrator produces execution results for Episodes)
+
+**v12-v15 changes applied:**
+- **Episode** — Event Sourcing fact (append-only + full trajectory). Includes DecisionStep
+- **DecisionStep** — records candidate_scores, reject_reasons, selected_reason
+- **Feedback** eventized — EvaluationEvent → LearningEvent published to bus (v12)
+- **ExperienceGraphProjection** — key = (failure_pattern, capability_id, env_fingerprint) (v15)
+- **CapabilityStatsProjector** — per-capability execution statistics
+
+---
+
+### Task 7.1: Episode models + EpisodeStore
+
+**Files:**
+- Create: `shared_src/episode/__init__.py`
+- Create: `shared_src/episode/models.py` — Episode, EpisodeStep, DecisionStep
+- Create: `shared_src/episode/store.py` — EpisodeStore
+- Create: `shared_src/tests/episode/test_episode_models.py`
+- Create: `shared_src/tests/episode/test_episode_store.py`
+
+**Key tests:**
+```python
+def test_episode_creation():
+    """Episode 创建时自动设置时间戳"""
+    episode = Episode(episode_id="ep-001", finding_id="f-001",
+                       decision_id="d-001", context_hash="ctx_abc123")
+    assert episode.finding_id == "f-001"
+    assert episode.decision_id == "d-001"
+
+def test_episode_append_only():
+    """Episode 是 append-only——step 不可修改"""
+    episode = Episode(episode_id="ep-1", finding_id="f-1")
+    episode.add_step("observation", {"event": "rabbitmq heartbeat lost"})
+    assert len(episode.steps) == 1
+    with pytest.raises(Exception):
+        episode.steps[0] = EpisodeStep(order=0, step_type="observation", data={})
+
+def test_decision_step_records_reason():
+    """DecisionStep 记录候选方案评分和拒绝理由（v15 新增）"""
+    step = DecisionStep(
+        candidates_scores={"restart": 85.0, "diagnose": 72.3},
+        selected_candidate_id="restart",
+        reject_reasons=["diagnose: Lower utility"],
+        selected_reason="Highest utility: 85.0 (success=0.95, risk=30)",
+    )
+    assert step.candidates_scores["restart"] == 85.0
+    assert len(step.reject_reasons) == 1
+    assert step.selected_candidate_id == "restart"
+
+def test_episode_contains_decision_step():
+    """Episode 包含 DecisionStep"""
+    episode = Episode(episode_id="ep-1", finding_id="f-1")
+    episode.add_step("decision", {
+        "candidates_scores": {"restart": 85.0},
+        "selected_candidate_id": "restart",
+        "reject_reasons": [],
+    })
+    assert episode.steps[-1].step_type == "decision"
+    assert "candidates_scores" in episode.steps[-1].data
+
+def test_episode_store_persist_and_retrieve():
+    store = EpisodeStore()
+    episode = Episode(episode_id="ep-1", finding_id="f-1")
+    store.save(episode)
+    retrieved = store.get("ep-1")
+    assert retrieved is not None
+    assert retrieved.episode_id == "ep-1"
+
+def test_episode_store_by_decision():
+    store = EpisodeStore()
+    episode = Episode(episode_id="ep-1", finding_id="f-1", decision_id="d-1")
+    store.save(episode)
+    result = store.get_by_decision("d-1")
+    assert result.episode_id == "ep-1"
+```
+
+### Task 7.2: EvaluationEvent + LearningEvent (eventized feedback)
 
 **Files:**
 - Create: `shared_src/feedback/__init__.py`
+- Create: `shared_src/feedback/events.py` — EvaluationEvent, LearningEvent
+- Create: `shared_src/tests/feedback/test_events.py`
+
+**Key tests:**
+```python
+def test_evaluation_event():
+    """EvaluationEvent 记录执行结果"""
+    event = EvaluationEvent(
+        event_id="ev-001", episode_id="ep-001",
+        capability_id="ssh.restart_service",
+        outcome="success", duration_ms=5000,
+        error_message="",
+    )
+    assert event.outcome == "success"
+    assert event.capability_id == "ssh.restart_service"
+
+def test_learning_event():
+    """LearningEvent 用于 ExperienceGraph 投影"""
+    event = LearningEvent(
+        event_id="le-001", episode_id="ep-001",
+        failure_pattern="RabbitMQHeartbeatLost",
+        capability_id="ssh.restart_service",
+        env_fingerprint="prod:rabbitmq",
+        outcome="success",
+    )
+    assert event.failure_pattern == "RabbitMQHeartbeatLost"
+```
+
+### Task 7.3: FeedbackLoop (episode → evaluation → learning events)
+
+**Files:**
 - Create: `shared_src/feedback/loop.py` — FeedbackLoop
 - Create: `shared_src/tests/feedback/test_loop.py`
 
-**Key test:**
+**Key tests:**
 ```python
+def test_feedback_loop_eventized():
+    """FeedbackLoop 发布 EvaluationEvent 和 LearningEvent"""
+    loop = FeedbackLoop(knowledge_store, bus)
+    loop.record_execution(episode, execution_result)
+    assert any(e.event_type == "feedback.evaluation"
+               for e in bus._history.get("platform.system", []))
+
 def test_feedback_writes_memory():
     store = KnowledgeMemoryStore()
-    loop = FeedbackLoop(store)
-    loop.evaluate(
-        workflow=Workflow(name="restart_service"),
-        results=[MockCapabilityResult(success=True)],
-    )
-    memories = store.retrieve("restart_service")
-    assert len(memories) >= 1
-    assert memories[0].outcome == "success"
+    loop = FeedbackLoop(store, bus)
+    loop.record_execution(episode, execution_result)
+    memories = store.retrieve("restart")
+    assert any(m.outcome == "success" for m in memories)
 
-def test_feedback_learning():
-    store = KnowledgeMemoryStore()
-    loop = FeedbackLoop(store)
-    # 第一次失败
-    loop.evaluate(workflow=wf, results=[MockCapabilityResult(success=False)])
-    # 第二次检索到失败记录
-    results = store.retrieve("restart")
-    failed = [r for r in results
-              if r.record_type == "repair" and r.outcome == "failure"]
-    assert len(failed) >= 1
+def test_feedback_updates_stats():
+    """Feedback 更新 CapabilityStatistics"""
+    loop = FeedbackLoop(knowledge_store, bus, capability_stats_store)
+    result = ExecutionResult(steps=[ExecutionStep(capability_id="ssh.restart_service",
+                                                    success=True, duration_ms=5000)])
+    loop.record_execution(episode, result)
+    stats = capability_stats_store.get("ssh.restart_service")
+    assert stats.total_executions >= 1
+```
+
+### Task 7.4: ExperienceGraphProjection (with failure_pattern dimension)
+
+**Files:**
+- Create: `semantic-engine/projections/experience_graph.py` — ExperienceGraphProjection
+- Create: `shared_src/projection/experience_stats.py` — ExperienceStats
+- Create: `semantic-engine/tests/projections/test_experience_graph.py`
+
+**Key tests:**
+```python
+def test_experience_stats_failure_pattern_key():
+    """ExperienceStats 按 (failure_pattern, capability, env) 索引"""
+    stats = ExperienceStats(
+        failure_pattern="RabbitMQHeartbeatLost",
+        capability_id="ssh.restart_service",
+        env_fingerprint="prod:rabbitmq",
+    )
+    assert stats.key == "RabbitMQHeartbeatLost|ssh.restart_service|prod:rabbitmq"
+
+def test_different_failure_pattern_separate_stats():
+    """不同 failure_pattern 的统计不混合"""
+    p1 = ExperienceStats(failure_pattern="RabbitMQHeartbeatLost", ...)
+    p2 = ExperienceStats(failure_pattern="NovaOOM", ...)
+    assert p1.key != p2.key
+
+def test_experience_graph_projector():
+    """ExperienceGraphProjection 从 LearningEvent 构建统计"""
+    projector = ExperienceGraphProjection(epoch="20260701")
+    event = LearningEvent(event_id="le-1", failure_pattern="RabbitMQHeartbeatLost",
+                           capability_id="ssh.restart_service",
+                           env_fingerprint="prod", outcome="success")
+    envelope = EventEnvelope(event_type="feedback.learning", payload=json.dumps(event.__dict__).encode())
+    projector.apply(envelope)
+    stats = projector.get_stats("RabbitMQHeartbeatLost", "ssh.restart_service", "prod")
+    assert stats is not None
+    assert stats.total_executions == 1
+    assert stats.success_count == 1
+
+def test_experience_success_rate():
+    """ExperienceStats.success_rate 动态计算"""
+    stats = ExperienceStats(total_executions=10, success_count=8)
+    assert stats.success_rate == 0.8
+```
+
+### Task 7.5: CapabilityStatsProjector
+
+**Files:**
+- Create: `semantic-engine/projections/capability_stats.py` — CapabilityStatsProjector
+- Create: `shared_src/capability/stats.py` — CapabilityStatistics
+- Create: `semantic-engine/tests/projections/test_capability_stats.py`
+
+**Key tests:**
+```python
+def test_capability_statistics():
+    """CapabilityStatistics 记录历史执行统计"""
+    stats = CapabilityStatistics(
+        capability_id="ssh.restart_service",
+        total_executions=10, success_count=8, failure_count=2,
+        avg_recovery_time_ms=120000,
+    )
+    assert stats.success_rate == 0.8
+
+def test_capability_stats_projector():
+    """CapabilityStatsProjector 从 EvaluationEvent 构建"""
+    projector = CapabilityStatsProjector()
+    event = EvaluationEvent(capability_id="ssh.restart_service",
+                             outcome="success", duration_ms=5000)
+    envelope = EventEnvelope(event_type="feedback.evaluation", ...)
+    projector.apply(envelope)
+    stats = projector.get_stats("ssh.restart_service")
+    assert stats.total_executions >= 1
+
+def test_execution_planner_uses_experience_stats():
+    """ExecutionPlanner 利用 ExperienceStatus 调整 estimated_success_rate"""
+    planner = ExecutionPlanner(capability_registry, world_view, knowledge_store)
+    planner.experience_graph.get_stats.return_value = ExperienceStats(
+        failure_pattern="RabbitMQHeartbeatLost", capability_id="ssh.restart_service",
+        env_fingerprint="prod", total_executions=100, success_count=70,
+    )
+    candidate = planner.plan(mock_intent, mock_context)
+    assert candidate.estimated_success_rate < 0.85  # 历史 70% 降低估值
+```
+
+### Task 7.6: Phase 7 API Endpoints
+
+**Files:**
+- Create: `query-service/api/episodes.py` — Episode API routes
+- Create: `query-service/api/experience.py` — Experience API routes
+- Create: `query-service/tests/api/test_episodes_api.py`
+- Create: `query-service/tests/api/test_experience_api.py`
+
+**Key tests:**
+```python
+def test_episode_by_decision():
+    client.get("/api/v1/episodes/by-decision/d-001")
+    assert response.status_code == 200
+    assert "decision" in [s["step_type"] for s in response.json()["steps"]]
+
+def test_experience_success_rate():
+    client.get("/api/v1/experience/success-rate?pattern=RabbitMQHeartbeatLost&capability=ssh.restart_service&env=prod")
+    assert response.status_code == 200
+    assert "success_rate" in response.json()
 ```
 
 ---
@@ -1650,23 +2614,62 @@ def test_feedback_learning():
 - [x] InteractionProjector (Task 3.1)
 - [x] CorrelationEngine + DynamicRel (Task 3.2)
 - [x] Lineage API (Task 3.3)
-- [x] GraphProjection (Task 4.1)
-- [x] ContextAPI + context_version (Task 4.2)
-- [x] Context Snapshot (Task 4.2)
-- [x] Knowledge & Memory Store (Task 5.1)
-- [x] Inference Engine (Task 5.2)
-- [x] Finding unified output (Task 5.2)
-- [x] Planner multi-candidate (Task 5.3)
-- [x] OPA PolicyEngine (Task 6.1)
-- [x] Capability + Effect Model (Task 6.2)
-- [x] Workflow Command/Event (Task 6.3)
-- [x] FeedbackLoop (Task 6.4)
+- [x] GraphProjection (Task 4.1 — topology-only, no state)
+- [x] TopologyQuery (Task 4.2)
+- [x] StateQuery (Task 4.3)
+- [x] HistoryQuery (Task 4.4)
+- [x] WorldView Facade (Task 4.5 — pure Facade, no God Object)
+- [x] CanonicalContextHasher RFC 8785 + Merkle DAG (Task 4.6)
+- [x] ContextAPI + StateProjectionRef + knowledge_refs (Task 4.7)
+- [x] Context Snapshot (belongs to Projection Layer, use_snapshot=False) (Task 4.7)
+- [x] Expression dataclass + evaluate() (Task 5.1)
+- [x] Knowledge Object Model (SOP/Runbook/FailurePattern/Incident/RCA) (Task 5.2)
+- [x] Knowledge & Memory Store (Task 5.2)
+- [x] InferenceRegistry + InferencePipeline (Task 5.3)
+- [x] Finding — no recommended_action, has context_hash + knowledge_refs (Task 5.3)
+- [x] Goal = desired_state, no action/ordering/completion (Task 5.4)
+- [x] Constraint Knowledge (Expression-based) (Task 5.5)
+- [x] GoalInferrer (Finding → Goal Tree) (Task 5.6)
+- [x] IntentGenerator (outputs PlanIntent: what, not how) (Task 5.6)
+- [x] Planner (GoalInferrer + IntentGenerator) (Task 5.7)
+- [x] Capability Expression Pre/Post + ImpactModel (Task 6.1)
+- [x] ExecutionPlanner (Intent → WorkflowCandidate) (Task 6.2)
+- [x] WorkflowComposer (PlanIntent → Workflow + Expression precondition check) (Task 6.2)
+- [x] Blast Radius Analyzer (ImpactModel + Dependency + State) (Task 6.3)
+- [x] RiskEngine (3-tier + Constraint Expression check) (Task 6.4)
+- [x] PolicyEngine (effects-based OPA, sorts candidates) (Task 6.5)
+- [x] UtilityWeights (configurable weights + OPA Rego utility_rego) (Task 6.5)
+- [x] DecisionRecord (Task 6.5)
+- [x] DecisionStateMachine (12 states, pure lifecycle) (Task 6.6)
+- [x] DecisionOrchestrator (PLAN→EVALUATE→POLICY→EXECUTE→LEARN) (Task 6.7)
+- [x] WorkflowEngine + Command/Event (Task 6.8)
+- [x] Episode with DecisionStep (candidate_scores + reject_reasons) (Task 7.1)
+- [x] EvaluationEvent + LearningEvent (eventized feedback) (Task 7.2)
+- [x] FeedbackLoop (Task 7.3)
+- [x] ExperienceGraphProjection (+ failure_pattern dimension) (Task 7.4)
+- [x] CapabilityStatsProjector (Task 7.5)
+- [x] Phase 7 API endpoints (Task 7.6)
 
 **2. Placeholder scan:** No TBD/TODO found. All tasks have actual code in test steps.
 
-**3. Type consistency:**
+**3. Type consistency (v15):**
 - `EventEnvelope.parent_event_ids` (Task 0.1) matches lineage usage in Task 3.3
 - `ProjectionCheckpoint.update(topic, partition, offset)` (Task 0.5) matches EventBus offset structure
-- `ContextResult.context_version` (Task 4.2) matches `Finding.context_version` (Task 5.2)
-- `WorkflowCandidate.risk_score` (Task 5.3) matches `PolicyEngine.evaluate_candidates` (Task 6.1)
-- `Capability.effect + risk_score` (Task 6.2) matches Policy OPA input (Task 6.1)
+- `CanonicalContextHasher.hash(content)` (Task 4.6) — RFC 8785 + Merkle DAG, no timestamp component
+- `ContextResult.projection_epoch` (Task 4.7) — references Projection epoch, no data copy (StateProjectionRef)
+- `ContextResult.knowledge_refs: List[Tuple[str,str]]` (Task 4.7) matches `Finding.knowledge_refs` (Task 5.3)
+- `Expression(field, operator, value)` (Task 5.1) — matches `Capability.preconditions` (Task 6.1) and `Constraint.condition` (Task 5.5)
+- `GoalNode.desired_state` (Task 5.4) — no action/ordering/completion (v15 changed from v14)
+- `IntentGenerator.generate()` returns `PlanIntent(action, target)` — what, not how (Task 5.6)
+- `ExecutionPlanner.plan(intent)` → `WorkflowCandidate` — how (Task 6.2)
+- `Capability.effects: List[str]` (Task 6.1) — OPA input uses effects tag, not capability name
+- `Capability.preconditions: List[Expression]` (Task 6.1) — structured expressions, not strings
+- `Capability.impact_model: ImpactModel` (Task 6.1) — used by Blast Radius Analyzer (Task 6.3)
+- `ImpactModel(severity, duration, scope)` (Task 6.1/6.3) — v15 new: temporary/permanent/degradation
+- `UtilityWeights(success, risk, cost, blast)` (Task 6.5) — configurable, different from v14 hardcoded
+- `DecisionRecord.context_hash` (Task 6.5) matches `Finding.context_hash` (Task 5.3)
+- `DecisionStateMachine.transition()` (Task 6.6) — pure lifecycle, no execute()
+- `DecisionOrchestrator.execute()` (Task 6.7) — pure orchestration, no transition() logic
+- `DecisionStep.candidates_scores + reject_reasons` (Task 7.1) — v15 new step type
+- `ExperienceStats.key = failure_pattern|capability_id|env_fingerprint` (Task 7.4) — v15 change from v14
+- `EvaluationEvent → LearningEvent` eventized feedback (Task 7.2/7.4)
