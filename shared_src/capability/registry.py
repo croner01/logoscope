@@ -1,33 +1,35 @@
-"""CapabilityRegistry — 能力注册表。"""
-from typing import Dict, List, Optional, Any
+"""
+CapabilityRegistry — Capability 注册和执行中心。
+"""
+from typing import Dict, Optional, Any, List
 from .models import Capability
 
 
 class CapabilityRegistry:
     """
-    能力注册表——管理所有可用的 Capability。
+    Capability 注册中心。
 
-    - register(cap): 注册
-    - get(id): 查询
-    - execute(id, params): 执行
-    - list_capabilities(): 列出全部
+    - register(cap): 注册 Capability
+    - execute(cap_id, params): 执行 Capability（返回结果或 None）
+    - get(cap_id): 获取 Capability 定义
+    - list_capabilities(): 列出所有已注册 Capability
     """
 
     def __init__(self):
-        self._capabilities: Dict[str, Capability] = {}
+        self._caps: Dict[str, Capability] = {}
 
     def register(self, cap: Capability):
-        self._capabilities[cap.capability_id] = cap
+        self._caps[cap.capability_id] = cap
+
+    def execute(self, capability_id: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        cap = self._caps.get(capability_id)
+        if cap is None:
+            return None
+        # 默认实现 — 返回执行结果占位
+        return {"status": "ok", "capability": capability_id, "params": params}
 
     def get(self, capability_id: str) -> Optional[Capability]:
-        return self._capabilities.get(capability_id)
+        return self._caps.get(capability_id)
 
     def list_capabilities(self) -> List[Capability]:
-        return list(self._capabilities.values())
-
-    def execute(self, capability_id: str, params: dict) -> Optional[Any]:
-        cap = self._capabilities.get(capability_id)
-        if not cap:
-            return None
-        # 生产环境：通过 provider 委派到具体执行器
-        return {"capability_id": capability_id, "status": "executed", "params": params}
+        return list(self._caps.values())

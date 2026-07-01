@@ -1,45 +1,39 @@
-"""Capability 数据模型。"""
+"""
+Capability 数据模型。
+
+v15: 与 Expression 集成，替代字符串 precondition/postcondition。
+"""
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-from shared_src.expression.models import Expression
-from shared_src.expression.impact_model import ImpactModel
+from typing import Dict, List, Optional, Any
 
 
 @dataclass
 class ParameterDef:
     """Capability 参数定义。"""
-    name: str
-    type: str = "string"
+    name: str = ""
+    type: str = "string"  # string, integer, boolean, select
     required: bool = False
-    default: object = None
+    default: Any = None
     description: str = ""
+    choices: List[str] = field(default_factory=list)
 
 
 @dataclass
 class Capability:
     """
-    能力——描述一个可执行操作。
+    Capability — 可执行的操作能力。
 
-    v15:
-    - preconditions/postconditions: List[Expression]（结构化，不是字符串）
-    - impact_model: ImpactModel（Blast Radius 用）
-    - effects: List[str]（tags，不是 Enum）
-    - base_risk: int（环境无关的基准风险）
+    通过 Expression 表达前置/后置条件，ImpactModel 表达影响评估。
     """
-    capability_id: str
-    provider: str
+    capability_id: str = ""
+    provider: str = ""
     effects: List[str] = field(default_factory=list)
-    base_risk: int = 50
-    risk_reason: str = ""
-
-    preconditions: List[Expression] = field(default_factory=list)
-    postconditions: List[Expression] = field(default_factory=list)
-    side_effects: List[str] = field(default_factory=list)
-    impact_model: Optional[ImpactModel] = None
+    base_risk: int = 0
+    preconditions: List[Any] = field(default_factory=list)
+    postconditions: List[Any] = field(default_factory=list)
+    impact_model: Any = None
     rollback_capability: str = ""
-
-    estimated_duration_ms: int = 30000
-    estimated_cost: float = 1.0
-    parameters: Dict[str, ParameterDef] = field(default_factory=dict)
-    timeout_seconds: int = 30
-    retry_count: int = 0
+    estimated_duration_ms: int = 0
+    estimated_cost: float = 0.0
+    parameters: List[ParameterDef] = field(default_factory=list)
+    description: str = ""
