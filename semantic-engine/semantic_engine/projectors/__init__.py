@@ -1,2 +1,3 @@
 from .entity_projector import EntityProjector
-__all__ = ["EntityProjector"]
+from .state_projector import StateProjector
+__all__ = ["EntityProjector", "StateProjector"]
