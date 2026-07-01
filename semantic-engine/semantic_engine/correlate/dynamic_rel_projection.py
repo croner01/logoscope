@@ -1,29 +1,143 @@
-"""DynamicRelProjection — 动态关联投影，按时间窗口统计交互频率。"""
+"""DynamicRelProjection — 动态关联投影，按时间窗口统计交互频率。
+
+v2: 支持 ClickHouse 持久化。当 storage.ch_client 可用时写入 ClickHouse，
+     否则回退到内存模式（向后兼容）。
+"""
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
+
+
+_INTERACTIONS_TABLE = "logs.interactions"
+
+_CREATE_TABLE_SQL = f"""
+CREATE TABLE IF NOT EXISTS {_INTERACTIONS_TABLE} (
+    source String,
+    target String,
+    timestamp DateTime64(3, 'UTC'),
+    interaction_id String DEFAULT generateUUIDv4()
+) ENGINE = MergeTree()
+PARTITION BY toDate(timestamp)
+ORDER BY (source, target, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
+SETTINGS index_granularity = 8192
+"""
+
+_INSERT_SQL = f"""
+INSERT INTO {_INTERACTIONS_TABLE} (source, target, timestamp) VALUES
+"""
+
+_COUNT_IN_WINDOW_SQL = f"""
+SELECT count() AS cnt
+FROM {_INTERACTIONS_TABLE}
+WHERE source = %(source)s
+  AND target = %(target)s
+  AND timestamp > now() - INTERVAL %(seconds)s SECOND
+"""
+
+_AGGREGATE_HOURLY_SQL = f"""
+SELECT
+    toStartOfHour(timestamp) AS hour,
+    count() AS count
+FROM {_INTERACTIONS_TABLE}
+WHERE source = %(source)s
+  AND target = %(target)s
+  AND timestamp > now() - INTERVAL %(hours)s HOUR
+GROUP BY hour
+ORDER BY hour
+"""
 
 
 class DynamicRelProjection:
     """
     动态关联投影——按时间窗口统计服务间交互频率。
 
+    支持 ClickHouse 持久化（storage.ch_client）和内存回退两种模式。
+    自动创建 logs.interactions 表。
+
     - record_interaction(source, target): 记录一次交互
     - query_trend(source, target, windows): 查询时间窗口内的交互趋势
     - aggregate_by_hour(source, target): 按小时聚合
     """
 
-    def __init__(self):
+    def __init__(self, storage: Optional[Any] = None):
         self._interactions: List[Tuple[str, str, datetime]] = []
+        self._storage = storage
+        self._ch_client = None
+        self._clickhouse_available = False
+
+        if storage and hasattr(storage, "ch_client") and storage.ch_client is not None:
+            self._ch_client = storage.ch_client
+            self._clickhouse_available = True
+            self._ensure_table()
+
+    # ── public API ──
 
     def record_interaction(self, source: str, target: str,
                            timestamp: Optional[datetime] = None) -> None:
+        """记录一次交互。"""
         ts = timestamp or datetime.utcnow()
-        self._interactions.append((source, target, ts))
+        if self._clickhouse_available:
+            self._ch_client.execute(
+                _INSERT_SQL,
+                [(source, target, ts)],
+            )
+        else:
+            self._interactions.append((source, target, ts))
 
     def query_trend(self, source: str, target: str,
                      windows: List[str]) -> List[int]:
         """查询多个时间窗口内的交互计数。"""
+        if self._clickhouse_available:
+            return self._query_trend_ch(source, target, windows)
+        return self._query_trend_memory(source, target, windows)
+
+    def aggregate_by_hour(self, source: str, target: str,
+                           hours: int = 24) -> List[Dict]:
+        """按小时聚合交互次数。"""
+        if self._clickhouse_available:
+            return self._aggregate_hourly_ch(source, target, hours)
+        return self._aggregate_hourly_memory(source, target, hours)
+
+    # ── ClickHouse 实现 ──
+
+    def _ensure_table(self) -> None:
+        """创建 logs.interactions 表（如不存在）。"""
+        try:
+            self._ch_client.execute(_CREATE_TABLE_SQL)
+        except Exception:
+            # 表创建失败时静默降级到内存模式
+            self._clickhouse_available = False
+
+    def _query_trend_ch(self, source: str, target: str,
+                        windows: List[str]) -> List[int]:
+        results = []
+        for window_str in windows:
+            seconds = self._parse_window(window_str)
+            rows = self._ch_client.execute(
+                _COUNT_IN_WINDOW_SQL,
+                {"source": source, "target": target, "seconds": seconds},
+            )
+            count = rows[0][0] if rows else 0
+            results.append(count)
+        return results
+
+    def _aggregate_hourly_ch(self, source: str, target: str,
+                              hours: int) -> List[Dict]:
+        rows = self._ch_client.execute(
+            _AGGREGATE_HOURLY_SQL,
+            {"source": source, "target": target, "hours": hours},
+        )
+        return [
+            {"hour": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]),
+             "count": row[1]}
+            for row in rows
+        ]
+
+    # ── 内存回退实现 ──
+
+    def _query_trend_memory(self, source: str, target: str,
+                            windows: List[str]) -> List[int]:
         now = datetime.utcnow()
         results = []
         for window_str in windows:
@@ -36,9 +150,8 @@ class DynamicRelProjection:
             results.append(count)
         return results
 
-    def aggregate_by_hour(self, source: str, target: str,
-                           hours: int = 24) -> List[Dict]:
-        """按小时聚合交互次数。"""
+    def _aggregate_hourly_memory(self, source: str, target: str,
+                                  hours: int) -> List[Dict]:
         now = datetime.utcnow()
         cutoff = now - timedelta(hours=hours)
         hourly = defaultdict(int)
@@ -53,7 +166,10 @@ class DynamicRelProjection:
             for hour, count in sorted(hourly.items())
         ]
 
-    def _parse_window(self, window: str) -> int:
+    # ── 工具方法 ──
+
+    @staticmethod
+    def _parse_window(window: str) -> int:
         window = window.upper().strip()
         parts = window.split()
         if len(parts) != 2:

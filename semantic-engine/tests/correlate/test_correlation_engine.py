@@ -2,10 +2,52 @@
 import pytest
 import json
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock
 from shared_src.event.envelope import EventEnvelope
 from shared_src.event.bus import InMemoryEventBus
 from semantic_engine.correlate.correlator import CorrelationEngine
 from semantic_engine.correlate.dynamic_rel_projection import DynamicRelProjection
+
+
+class MockClickHouseClient:
+    """模拟 ClickHouse 原生客户端，用于测试持久化模式。"""
+
+    def __init__(self):
+        self.executed_queries: list = []
+        self.rows: dict = {}  # SQL pattern → return rows
+
+    def execute(self, query, params=None, settings=None):
+        condensed = " ".join(query.split()) if isinstance(query, str) else str(query)
+        self.executed_queries.append((condensed[:120], params))
+
+        # CREATE TABLE → 返回空
+        if "CREATE TABLE" in condensed:
+            return []
+
+        # 聚合查询（按小时聚合）— 优先于 count() 检查
+        if "toStartOfHour" in condensed:
+            return []
+
+        # COUNT 查询
+        if "count()" in condensed and "%(source)s" in condensed:
+            source = params.get("source", "") if params else ""
+            target = params.get("target", "") if params else ""
+            key = f"{source}|{target}"
+            if key in self.rows:
+                return self.rows[key]
+            return [(0,)]
+
+        # INSERT → 记录插入数据
+        if "INSERT INTO" in condensed:
+            return len(params) if isinstance(params, list) else 1
+
+        return []
+
+
+class MockStorageWithCH:
+    """模拟包含 ch_client 的 StorageAdapter。"""
+    def __init__(self, ch_client=None):
+        self.ch_client = ch_client
 
 
 class TestDynamicRelProjection:
@@ -44,6 +86,122 @@ class TestDynamicRelProjection:
         aggregated = rel_proj.aggregate_by_hour("A", "B")
         assert len(aggregated) > 0
         assert all(hour["count"] >= 0 for hour in aggregated)
+
+    # ── ClickHouse 持久化模式 ──
+
+    def test_ch_record_and_query_trend(self):
+        """ClickHouse 模式记录并查询交互趋势"""
+        ch = MockClickHouseClient()
+        ch.rows["svc-A|svc-B"] = [(5,)]
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        rel.record_interaction("svc-A", "svc-B")
+        trend = rel.query_trend("svc-A", "svc-B", windows=["1 HOUR", "6 HOUR"])
+        assert len(trend) == 2
+        assert trend[0] == 5
+        assert trend[1] == 5
+
+    def test_ch_create_table_on_init(self):
+        """初始化时自动创建 logs.interactions 表"""
+        ch = MockClickHouseClient()
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        create_found = any(
+            "CREATE TABLE" in q and "logs.interactions" in q
+            for q, _ in ch.executed_queries
+        )
+        assert create_found, "DynamicRelProjection 初始化时应创建 logs.interactions 表"
+
+    def test_ch_record_interaction_executes_insert(self):
+        """record_interaction 在 ClickHouse 模式下执行 INSERT"""
+        ch = MockClickHouseClient()
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        rel.record_interaction("svc-X", "svc-Y")
+
+        insert_found = any(
+            "INSERT INTO" in q and "logs.interactions" in q
+            for q, _ in ch.executed_queries
+        )
+        assert insert_found
+
+    def test_ch_trend_uses_parameterized_query(self):
+        """query_trend 使用参数化查询（避免 SQL 注入）"""
+        ch = MockClickHouseClient()
+        ch.rows["svc-A|svc-B"] = [(3,)]
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        trend = rel.query_trend("svc-A", "svc-B", windows=["1 HOUR"])
+
+        param_query_found = any(
+            "count()" in q and params is not None
+            for q, params in ch.executed_queries
+        )
+        assert param_query_found
+        assert trend == [3]
+
+    def test_ch_query_trend_multiple_windows(self):
+        """多个时间窗口独立查询"""
+        ch = MockClickHouseClient()
+        ch.rows["A|B"] = [(10,)]
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        trend = rel.query_trend("A", "B",
+                                 windows=["1 HOUR", "6 HOUR", "24 HOUR"])
+        assert len(trend) == 3
+        assert all(t == 10 for t in trend)
+
+    def test_ch_aggregate_by_hour(self):
+        """aggregate_by_hour 返回正确形状的数据"""
+        ch = MockClickHouseClient()
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        aggregated = rel.aggregate_by_hour("A", "B", hours=24)
+        assert isinstance(aggregated, list)
+
+    def test_in_memory_fallback_no_storage(self):
+        """不传 storage 时自动使用内存模式"""
+        rel = DynamicRelProjection()
+        assert rel._clickhouse_available is False
+        assert rel._ch_client is None
+
+    def test_in_memory_fallback_no_ch_client(self):
+        """storage 没有 ch_client 时使用内存模式"""
+        storage = MockStorageWithCH(ch_client=None)
+        rel = DynamicRelProjection(storage=storage)
+        assert rel._clickhouse_available is False
+
+    def test_in_memory_and_ch_independent_counts(self):
+        """内存模式和 ClickHouse 模式计数互相独立"""
+        ch = MockClickHouseClient()
+        ch.rows["svc-A|svc-B"] = [(100,)]
+        storage = MockStorageWithCH(ch)
+        rel_ch = DynamicRelProjection(storage=storage)
+        rel_mem = DynamicRelProjection()  # 无 storage
+
+        rel_ch.record_interaction("svc-A", "svc-B")
+        rel_mem.record_interaction("svc-A", "svc-B")
+
+        trend_ch = rel_ch.query_trend("svc-A", "svc-B", ["1 HOUR"])
+        trend_mem = rel_mem.query_trend("svc-A", "svc-B", ["1 HOUR"])
+        # ClickHouse 返回 mock 的 100，内存返回 1
+        assert trend_ch[0] == 100
+        assert trend_mem[0] == 1
+
+    def test_ch_zero_interaction_returns_zero(self):
+        """无交互时 query_trend 返回 0"""
+        ch = MockClickHouseClient()
+        ch.rows["A|B"] = [(0,)]
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+        trend = rel.query_trend("A", "B", ["1 HOUR"])
+        assert trend == [0]
 
 
 class TestCorrelationEngine:
