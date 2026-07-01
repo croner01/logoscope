@@ -11,7 +11,37 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+
+	"github.com/google/uuid"
 )
+
+// EventEnvelope 统一消息信封格式，用于封装所有原始事件。
+type EventEnvelope struct {
+	EnvelopeVersion string            `json:"envelope_version"`
+	SchemaVersion   int               `json:"schema_version"`
+	EventType       string            `json:"event_type"`
+	Producer        string            `json:"producer"`
+	EventID         string            `json:"event_id"`
+	ParentEventIDs  []string          `json:"parent_event_ids"`
+	Timestamp       string            `json:"timestamp"`
+	Payload         json.RawMessage   `json:"payload"`
+	Metadata        map[string]string `json:"metadata"`
+}
+
+func newEventEnvelope(eventType, producer string, payload json.RawMessage) ([]byte, error) {
+	env := EventEnvelope{
+		EnvelopeVersion: "v1",
+		SchemaVersion:   1,
+		EventType:       eventType,
+		Producer:        producer,
+		EventID:         uuid.New().String(),
+		ParentEventIDs:  []string{},
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:         payload,
+		Metadata:        map[string]string{},
+	}
+	return json.Marshal(env)
+}
 
 // QueueBackpressureError 表示降级内存队列已满。
 type QueueBackpressureError struct {
@@ -589,11 +619,17 @@ func (w *QueueWriter) kafkaWriterForTopicLocked(topic string) *kafka.Writer {
 
 func (w *QueueWriter) writeToKafka(ctx context.Context, stream string, dataType string, payload string) (map[string]any, error) {
 	w.mu.Lock()
-	writer := w.kafkaWriterForTopicLocked(stream)
+	writer := w.kafkaWriterForTopicLocked(w.cfg.KafkaTopicPlatformRaw)
 	w.mu.Unlock()
 
 	if writer == nil {
 		return nil, errors.New("kafka writer not initialized")
+	}
+
+	eventType := strings.TrimSuffix(dataType, "s") + ".raw"
+	envelopeBytes, err := newEventEnvelope(eventType, "ingest-service", json.RawMessage(payload))
+	if err != nil {
+		return nil, err
 	}
 
 	writeCtx, cancel := context.WithTimeout(ctx, time.Duration(w.cfg.KafkaWriteTimeout)*time.Second)
@@ -601,11 +637,11 @@ func (w *QueueWriter) writeToKafka(ctx context.Context, stream string, dataType 
 
 	now := time.Now().UTC()
 	messageID := fmt.Sprintf("kafka-%d", now.UnixNano())
-	err := writer.WriteMessages(
+	err = writer.WriteMessages(
 		writeCtx,
 		kafka.Message{
 			Key:   []byte(messageID),
-			Value: []byte(payload),
+			Value: envelopeBytes,
 			Time:  now,
 			Headers: []kafka.Header{
 				{Key: "data_type", Value: []byte(dataType)},
@@ -634,7 +670,7 @@ func (w *QueueWriter) writeToKafka(ctx context.Context, stream string, dataType 
 
 func (w *QueueWriter) writeBatchToKafka(ctx context.Context, stream string, dataType string, payloads []string) ([]string, error) {
 	w.mu.Lock()
-	writer := w.kafkaWriterForTopicLocked(stream)
+	writer := w.kafkaWriterForTopicLocked(w.cfg.KafkaTopicPlatformRaw)
 	w.mu.Unlock()
 	if writer == nil {
 		return nil, errors.New("kafka writer not initialized")
@@ -643,15 +679,20 @@ func (w *QueueWriter) writeBatchToKafka(ctx context.Context, stream string, data
 	writeCtx, cancel := context.WithTimeout(ctx, time.Duration(w.cfg.KafkaWriteTimeout)*time.Second)
 	defer cancel()
 
+	eventType := strings.TrimSuffix(dataType, "s") + ".raw"
 	now := time.Now().UTC()
 	messages := make([]kafka.Message, 0, len(payloads))
 	messageIDs := make([]string, 0, len(payloads))
 	for _, payload := range payloads {
+		envelopeBytes, err := newEventEnvelope(eventType, "ingest-service", json.RawMessage(payload))
+		if err != nil {
+			return nil, err
+		}
 		messageID := fmt.Sprintf("kafka-%d", now.UnixNano()+int64(len(messageIDs)))
 		messageIDs = append(messageIDs, messageID)
 		messages = append(messages, kafka.Message{
 			Key:   []byte(messageID),
-			Value: []byte(payload),
+			Value: envelopeBytes,
 			Time:  now,
 			Headers: []kafka.Header{
 				{Key: "data_type", Value: []byte(dataType)},

@@ -24,10 +24,11 @@ type Config struct {
 	QueueReconnectSec    int
 	QueueFlushIntervalMs int
 
-	KafkaTopicDefault string
-	KafkaTopicLogs    string
-	KafkaTopicMetrics string
-	KafkaTopicTraces  string
+	KafkaTopicDefault     string
+	KafkaTopicLogs        string
+	KafkaTopicMetrics     string
+	KafkaTopicTraces      string
+	KafkaTopicPlatformRaw string // Topic for EventEnvelope-wrapped raw events
 
 	KafkaBrokers              []string
 	KafkaDialTimeout          int
@@ -76,6 +77,7 @@ func LoadConfig() Config {
 		KafkaTopicLogs:    getEnv("KAFKA_TOPIC_LOGS", kafkaTopicDefault),
 		KafkaTopicMetrics: getEnv("KAFKA_TOPIC_METRICS", "metrics.raw"),
 		KafkaTopicTraces:  getEnv("KAFKA_TOPIC_TRACES", "traces.raw"),
+		KafkaTopicPlatformRaw: getEnv("KAFKA_TOPIC_PLATFORM_RAW", "platform.raw"),
 
 		KafkaBrokers:              parseCSV(getEnv("KAFKA_BROKERS", "kafka:9092")),
 		KafkaDialTimeout:          maxInt(1, getEnvInt("KAFKA_DIAL_TIMEOUT_SEC", 3)),
