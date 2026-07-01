@@ -32,7 +32,12 @@ class MockClickHouseClient:
         if "count()" in condensed and "%(source)s" in condensed:
             source = params.get("source", "") if params else ""
             target = params.get("target", "") if params else ""
-            key = f"{source}|{target}"
+            # 支持 failure_pattern 维度——key 为 source|target|failure_pattern
+            if params and "failure_pattern" in params:
+                fp = params["failure_pattern"]
+                key = f"{source}|{target}|{fp}"
+            else:
+                key = f"{source}|{target}"
             if key in self.rows:
                 return self.rows[key]
             return [(0,)]
@@ -203,6 +208,94 @@ class TestDynamicRelProjection:
         trend = rel.query_trend("A", "B", ["1 HOUR"])
         assert trend == [0]
 
+    # ── failure_pattern 维度 ──
+
+    def test_record_with_failure_pattern_memory(self):
+        """内存模式下用 failure_pattern 记录和过滤交互"""
+        rel = DynamicRelProjection()
+        rel.record_interaction("A", "B", failure_pattern="RabbitMQHeartbeatLost")
+        rel.record_interaction("A", "B", failure_pattern="RabbitMQHeartbeatLost")
+        rel.record_interaction("A", "B", failure_pattern="NovaOOM")
+
+        # 按指定 failure_pattern 过滤
+        trend_rb = rel.query_trend("A", "B", ["1 HOUR"],
+                                    failure_pattern="RabbitMQHeartbeatLost")
+        assert trend_rb[0] == 2
+
+        trend_no = rel.query_trend("A", "B", ["1 HOUR"],
+                                    failure_pattern="NovaOOM")
+        assert trend_no[0] == 1
+
+        # 不传 failure_pattern（None）→ 返回全部
+        trend_all = rel.query_trend("A", "B", ["1 HOUR"])
+        assert trend_all[0] == 3
+
+    def test_aggregate_by_hour_with_failure_pattern(self):
+        """aggregate_by_hour 支持 failure_pattern 过滤"""
+        rel = DynamicRelProjection()
+        now = datetime.utcnow()
+        for _ in range(5):
+            rel.record_interaction("A", "B", timestamp=now,
+                                    failure_pattern="pat-1")
+        for _ in range(3):
+            rel.record_interaction("A", "B", timestamp=now,
+                                    failure_pattern="pat-2")
+
+        agg_p1 = rel.aggregate_by_hour("A", "B", hours=24,
+                                        failure_pattern="pat-1")
+        assert agg_p1[0]["count"] == 5
+
+        agg_all = rel.aggregate_by_hour("A", "B", hours=24)
+        assert agg_all[0]["count"] == 8
+
+    def test_ch_record_and_query_with_failure_pattern(self):
+        """ClickHouse 模式支持 failure_pattern 维度"""
+        ch = MockClickHouseClient()
+        ch.rows["A|B|RabbitMQHeartbeatLost"] = [(3,)]
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        trend = rel.query_trend("A", "B", ["1 HOUR"],
+                                 failure_pattern="RabbitMQHeartbeatLost")
+        assert trend[0] == 3
+
+        # 验证使用了带 failure_pattern 的 SQL（截断到 120 字符，检查前缀）
+        fp_sql_found = any(
+            "failure_patte" in q
+            for q, _ in ch.executed_queries
+        )
+        assert fp_sql_found, "应使用包含 failure_pattern 过滤条件的 SQL"
+
+    def test_ch_failure_pattern_backward_compat(self):
+        """不传 failure_pattern 时使用旧的 SQL（不过滤 failure_pattern）"""
+        ch = MockClickHouseClient()
+        ch.rows["A|B"] = [(5,)]
+        storage = MockStorageWithCH(ch)
+        rel = DynamicRelProjection(storage=storage)
+
+        # 不传 failure_pattern → 使用旧 SQL（不包含 failure_pattern 过滤）
+        trend = rel.query_trend("A", "B", ["1 HOUR"])
+        assert trend[0] == 5
+
+        # 验证旧 SQL 被使用（不包含 failure_pattern 条件）
+        no_fp_sql = any(
+            "count()" in q and "failure_pattern" not in q
+            for q, _ in ch.executed_queries
+        )
+        assert no_fp_sql
+
+
+def _make_interaction(source_name: str, target_name: str) -> EventEnvelope:
+    """创建 interaction.observed 事件的快捷方法。"""
+    return EventEnvelope(
+        event_id="e-" + source_name,
+        event_type="interaction.observed",
+        payload=json.dumps({
+            "source": {"type": "SERVICE", "name": source_name},
+            "target": {"type": "SERVICE", "name": target_name},
+        }).encode(),
+    )
+
 
 class TestCorrelationEngine:
     def test_correlate_finding(self):
@@ -347,3 +440,78 @@ class TestCorrelationEngine:
             findings = engine.process(env)
 
         assert findings[0]["confidence"] > confidence_3
+
+    # ── failure_pattern 维度 ──
+
+    def test_finding_includes_failure_pattern(self):
+        """correlation.found finding 包含 failure_pattern 字段"""
+        bus = InMemoryEventBus()
+        engine = CorrelationEngine(rel_projection=DynamicRelProjection(), bus=bus,
+                                    frequency_threshold=2)
+
+        for _ in range(2):
+            engine.process(_make_interaction("svc-A", "svc-B"))
+
+        findings = engine.process(_make_interaction("svc-A", "svc-B"))
+        assert len(findings) == 1
+        f = findings[0]
+        assert "failure_pattern" in f
+        assert f["failure_pattern"] == "high_frequency_interaction"
+
+    def test_finding_evidence_contains_failure_pattern(self):
+        """evidence 列表中包含 failure_pattern"""
+        bus = InMemoryEventBus()
+        engine = CorrelationEngine(rel_projection=DynamicRelProjection(), bus=bus,
+                                    frequency_threshold=2)
+
+        for _ in range(3):
+            engine.process(_make_interaction("X", "Y"))
+
+        findings = engine.process(_make_interaction("X", "Y"))
+        assert len(findings) == 1
+        evidence = findings[0]["evidence"]
+        assert any("failure_pattern=" in e for e in evidence)
+
+    def test_different_failure_pattern_separate_counts(self):
+        """不同 failure_pattern 的交互计数互不干扰"""
+        bus = InMemoryEventBus()
+        engine_rabbit = CorrelationEngine(
+            rel_projection=DynamicRelProjection(), bus=bus,
+            frequency_threshold=3,
+            failure_pattern="RabbitMQHeartbeatLost",
+        )
+        engine_nova = CorrelationEngine(
+            rel_projection=DynamicRelProjection(), bus=bus,
+            frequency_threshold=3,
+            failure_pattern="NovaOOM",
+        )
+
+        # RabbitMQ 场景 3 次交互 → 达到阈值 → 第 3 次触发 Finding
+        last_r = None
+        for i in range(3):
+            last_r = engine_rabbit.process(_make_interaction("svc-A", "svc-B"))
+        # 第 3 次应触发
+        assert len(last_r) == 1
+        assert last_r[0]["failure_pattern"] == "RabbitMQHeartbeatLost"
+
+        # Nova 场景只 2 次交互（低于阈值 3）→ 不应触发
+        last_n = None
+        for i in range(2):
+            last_n = engine_nova.process(_make_interaction("svc-A", "svc-B"))
+        # 第 2 次仍不应触发
+        assert len(last_n) == 0
+
+    def test_custom_failure_pattern_init(self):
+        """可自定义 failure_pattern 参数"""
+        bus = InMemoryEventBus()
+        engine = CorrelationEngine(
+            rel_projection=DynamicRelProjection(), bus=bus,
+            frequency_threshold=2,
+            failure_pattern="custom.pattern.v1",
+        )
+
+        for _ in range(3):
+            engine.process(_make_interaction("svc-A", "svc-B"))
+
+        findings = engine.process(_make_interaction("svc-A", "svc-B"))
+        assert findings[0]["failure_pattern"] == "custom.pattern.v1"

@@ -35,11 +35,15 @@ class DecisionOrchestrator:
                  policy_engine,
                  state_machine: DecisionStateMachine,
                  workflow_engine, episode_store,
-                 blast_analyzer=None):
+                 blast_analyzer=None,
+                 feedback_loop=None):
         """
         Args:
             blast_analyzer: 已废弃——保留仅用于向后兼容，不再使用。
                             风险分析的 blast radius 部分由 RiskEngine 内部处理。
+            feedback_loop: 可选 FeedbackLoop 实例。设置后将自动在 LEARN 阶段
+                           调用 record_execution，将 failure_pattern 传递到
+                           ExperienceGraphProjection。
         """
         self.planner = planner
         self.exec_planner = exec_planner
@@ -48,6 +52,7 @@ class DecisionOrchestrator:
         self.state_machine = state_machine
         self.workflow_engine = workflow_engine
         self.episode_store = episode_store
+        self.feedback_loop = feedback_loop
         if blast_analyzer is not None:
             logger.warning(
                 "blast_analyzer parameter is deprecated and unused "
@@ -126,7 +131,7 @@ class DecisionOrchestrator:
                 self.state_machine.transition(decision, DecisionStatus.FAILED)
 
             # === Phase 5: LEARN ===
-            self._record_episode(decision, plan_result, result)
+            self._record_episode(decision, plan_result, result, finding, outcome)
 
             return DecisionResult(decision=decision, status=outcome)
 
@@ -147,8 +152,9 @@ class DecisionOrchestrator:
                     pass  # 状态机拒绝转换时不做任何事——记录即可
             return DecisionResult(decision=decision, status="failed")
 
-    def _record_episode(self, decision, plan_result, policy_result):
-        """记录 Episode。"""
+    def _record_episode(self, decision, plan_result, policy_result,
+                         finding=None, outcome="unknown"):
+        """记录 Episode 并通知 FeedbackLoop（传递 failure_pattern）。"""
         from ..episode.models import Episode, EpisodeStep
 
         episode = Episode(
@@ -169,3 +175,19 @@ class DecisionOrchestrator:
             "reject_reasons": getattr(decision, "rejected_candidates", []),
         })
         self.episode_store.save(episode)
+
+        # 通过 FeedbackLoop 将 failure_pattern 传递到 ExperienceGraphProjection
+        if self.feedback_loop is not None:
+            failure_pattern = getattr(finding, "category", "") if finding else ""
+            capability_id = ""
+            if policy_result and hasattr(policy_result, "selected_candidate"):
+                sc = policy_result.selected_candidate
+                if sc and hasattr(sc, "workflow") and sc.workflow:
+                    capability_id = sc.workflow.name
+            self.feedback_loop.record_execution(
+                episode_id=episode.episode_id,
+                capability_id=capability_id,
+                outcome=outcome,
+                duration_ms=0,
+                failure_pattern=failure_pattern,
+            )

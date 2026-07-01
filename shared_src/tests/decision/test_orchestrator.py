@@ -13,6 +13,21 @@ INSTANCE = "INSTANCE"
 SERVICE = "SERVICE"
 
 
+class MockFeedbackLoop:
+    """Mock FeedbackLoop——追踪 record_execution 调用。"""
+    def __init__(self):
+        self.calls = []
+
+    def record_execution(self, episode_id, capability_id, outcome,
+                         duration_ms, failure_pattern):
+        self.calls.append({
+            "episode_id": episode_id,
+            "capability_id": capability_id,
+            "outcome": outcome,
+            "failure_pattern": failure_pattern,
+        })
+
+
 class MockPlanner:
     def plan(self, finding, context, goal=None):
         from shared_src.planner.result import PlannerResult
@@ -179,3 +194,58 @@ class TestDecisionOrchestrator:
         finding = MockFinding()
         result = orchestrator.execute(finding, None, goal=goal)
         assert result is not None
+
+    # ── FeedbackLoop 集成 ──
+
+    @pytest.fixture
+    def orchestrator_with_feedback(self):
+        """带 MockFeedbackLoop 的 Orchestrator。"""
+        bus = InMemoryEventBus()
+        feedback_loop = MockFeedbackLoop()
+        orch = DecisionOrchestrator(
+            planner=MockPlanner(),
+            exec_planner=MockExecutionPlanner(),
+            risk_engine=MockRiskEngine(),
+            blast_analyzer=MockBlastAnalyzer(),
+            policy_engine=MockPolicyEngine(),
+            state_machine=DecisionStateMachine(bus=bus),
+            workflow_engine=MockWorkflowEngine(),
+            episode_store=MockEpisodeStore(),
+            feedback_loop=feedback_loop,
+        )
+        return orch, feedback_loop
+
+    def test_orchestrator_calls_feedback_loop(self, orchestrator_with_feedback):
+        """Orchestrator 在 LEARN 阶段调用 FeedbackLoop.record_execution"""
+        orch, fb = orchestrator_with_feedback
+        finding = MockFinding(id="f-fb-01", category="NovaOOM")
+        result = orch.execute(finding, None)
+        assert result.status == "success"
+        # FeedbackLoop 应被调用
+        assert len(fb.calls) >= 1
+        call = fb.calls[0]
+        # failure_pattern 应等于 finding.category
+        assert call["failure_pattern"] == "NovaOOM"
+        assert call["capability_id"] == "restart"
+
+    def test_feedback_loop_failure_pattern_matches_finding_category(
+            self, orchestrator_with_feedback):
+        """FeedbackLoop 的 failure_pattern 来自 finding.category"""
+        orch, fb = orchestrator_with_feedback
+        finding = MockFinding(id="f-fb-02", category="RabbitMQHeartbeatLost")
+        orch.execute(finding, None)
+        assert fb.calls[0]["failure_pattern"] == "RabbitMQHeartbeatLost"
+
+    def test_feedback_loop_not_called_without_feedback(
+            self, orchestrator):
+        """不配置 feedback_loop 时不影响原有行为"""
+        finding = MockFinding()
+        result = orchestrator.execute(finding, None)
+        assert result.status == "success"
+
+    def test_feedback_loop_outcome_tracking(self, orchestrator_with_feedback):
+        """FeedbackLoop 记录 execution 的 outcome"""
+        orch, fb = orchestrator_with_feedback
+        finding = MockFinding()
+        result = orch.execute(finding, None)
+        assert fb.calls[0]["outcome"] == "success"

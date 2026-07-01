@@ -22,12 +22,14 @@ class CorrelationEngine:
         frequency_threshold: int = 5,
         time_window: str = "1 HOUR",
         min_confidence: float = 0.55,
+        failure_pattern: str = "high_frequency_interaction",
     ):
         self.rel_projection = rel_projection
         self.bus = bus
         self.frequency_threshold = frequency_threshold
         self.time_window = time_window
         self.min_confidence = min_confidence
+        self.failure_pattern = failure_pattern
 
     def process(self, envelope: EventEnvelope) -> List[dict]:
         """处理一个 Event，返回相关性 Finding 列表。"""
@@ -44,12 +46,15 @@ class CorrelationEngine:
         if not source_name or not target_name:
             return []
 
-        # 记录交互
-        self.rel_projection.record_interaction(source_name, target_name)
+        # 记录交互（带 failure_pattern 标记）
+        self.rel_projection.record_interaction(
+            source_name, target_name, failure_pattern=self.failure_pattern
+        )
 
-        # 检查交互频率是否超过阈值
+        # 检查交互频率是否超过阈值（按当前 failure_pattern 过滤）
         trend = self.rel_projection.query_trend(
-            source_name, target_name, [self.time_window]
+            source_name, target_name, [self.time_window],
+            failure_pattern=self.failure_pattern,
         )
         freq = trend[0] if trend else 0
 
@@ -61,6 +66,7 @@ class CorrelationEngine:
             return [
                 {
                     "category": "correlation.found",
+                    "failure_pattern": self.failure_pattern,
                     "hypothesis": (
                         f"{source_name} 与 {target_name} "
                         f"在 {self.time_window} 内交互 {freq} 次"
@@ -72,6 +78,7 @@ class CorrelationEngine:
                         f"time_window={self.time_window}",
                         f"source={source_name}",
                         f"target={target_name}",
+                        f"failure_pattern={self.failure_pattern}",
                     ],
                     "affected_entities": [source_name, target_name],
                 }
