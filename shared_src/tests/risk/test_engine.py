@@ -109,3 +109,98 @@ class TestRiskEngine:
         assert profile.execution_risk == 0
         assert profile.operational_risk == 0
         assert profile.final_risk == 0
+
+    # ── correlation.found 集成测试 ──
+
+    def test_correlation_finding_high_confidence_adds_risk(self):
+        """高置信度 correlation.found 增加 operational_risk"""
+        engine = RiskEngine(blast_analyzer=MockBlastAnalyzer(),
+                             knowledge_store=MockKnowledgeStore())
+        findings = [{
+            "category": "correlation.found",
+            "confidence": 0.85,
+            "affected_entities": ["svc-1", "svc-2"],
+            "evidence": ["interaction_frequency=12", "time_window=1 HOUR"],
+        }]
+        # entity_name="svc-1" 在 affected_entities 中 → 触发风险加成
+        profile = engine.compute("restart_service", "SERVICE", "svc-1",
+                                 base_risk=50, findings=findings)
+        # 基础 operational=10 + 高置信度加成 15 = 25
+        assert profile.operational_risk >= 25
+
+    def test_correlation_finding_unrelated_entity_no_effect(self):
+        """不相关的实体不受 correlation.found 影响"""
+        engine = RiskEngine(blast_analyzer=MockBlastAnalyzer(),
+                             knowledge_store=MockKnowledgeStore())
+        findings = [{
+            "category": "correlation.found",
+            "confidence": 0.9,
+            "affected_entities": ["svc-A", "svc-B"],
+            "evidence": ["interaction_frequency=20"],
+        }]
+        # entity_name="rabbitmq" 不在 affected_entities 中 → 无加成
+        profile = engine.compute("restart_service", "SERVICE", "rabbitmq",
+                                 base_risk=50, findings=findings)
+        # 基础 operational=10, 无加成
+        assert profile.operational_risk == 10
+
+    def test_correlation_finding_confidence_scales_risk(self):
+        """不同置信度等级产生不同的风险加成"""
+        engine = RiskEngine(blast_analyzer=MockBlastAnalyzer(),
+                             knowledge_store=MockKnowledgeStore())
+
+        # 高置信度 (0.85)
+        high = engine.compute("restart_service", "SERVICE", "svc", base_risk=50,
+                               findings=[{
+                                   "category": "correlation.found",
+                                   "confidence": 0.85,
+                                   "affected_entities": ["svc"],
+                                   "evidence": ["interaction_frequency=10"],
+                               }])
+
+        # 中置信度 (0.65)
+        med = engine.compute("restart_service", "SERVICE", "svc", base_risk=50,
+                              findings=[{
+                                  "category": "correlation.found",
+                                  "confidence": 0.65,
+                                  "affected_entities": ["svc"],
+                                  "evidence": ["interaction_frequency=6"],
+                              }])
+
+        # 低置信度 (0.55)
+        low = engine.compute("restart_service", "SERVICE", "svc", base_risk=50,
+                              findings=[{
+                                  "category": "correlation.found",
+                                  "confidence": 0.55,
+                                  "affected_entities": ["svc"],
+                                  "evidence": ["interaction_frequency=5"],
+                              }])
+
+        assert high.operational_risk > med.operational_risk > low.operational_risk
+        assert high.operational_risk >= 25  # 10 + 15
+        assert med.operational_risk >= 18  # 10 + 8
+        assert low.operational_risk >= 15  # 10 + 5
+
+    def test_correlation_finding_no_findings_no_effect(self):
+        """不传入 findings 时不影响风险分"""
+        engine = RiskEngine(blast_analyzer=MockBlastAnalyzer(),
+                             knowledge_store=MockKnowledgeStore())
+        profile_without = engine.compute("restart_service", "SERVICE", "svc",
+                                          base_risk=50)
+        profile_with = engine.compute("restart_service", "SERVICE", "svc",
+                                       base_risk=50, findings=None)
+        assert profile_without.operational_risk == profile_with.operational_risk
+
+    def test_correlation_finding_non_correlation_ignored(self):
+        """非 correlation.found 类型的 finding 被忽略"""
+        engine = RiskEngine(blast_analyzer=MockBlastAnalyzer(),
+                             knowledge_store=MockKnowledgeStore())
+        findings = [{
+            "category": "anomaly.detected",
+            "confidence": 0.95,
+            "affected_entities": ["svc"],
+        }]
+        profile = engine.compute("restart_service", "SERVICE", "svc",
+                                 base_risk=50, findings=findings)
+        # 不应受非 correlation 类型影响
+        assert profile.operational_risk == 10

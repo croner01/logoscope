@@ -2,7 +2,7 @@
 import uuid
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 from datetime import datetime, timezone
 from .state_machine import DecisionStateMachine, DecisionStatus
 from ..policy.decision_record import DecisionRecord
@@ -54,8 +54,17 @@ class DecisionOrchestrator:
                 "in DecisionOrchestrator. RiskEngine handles blast radius analysis."
             )
 
-    def execute(self, finding, context, goal=None) -> DecisionResult:
-        """完整决策执行流程。"""
+    def execute(self, finding, context, goal=None,
+                correlation_findings: Optional[List[Dict]] = None) -> DecisionResult:
+        """完整决策执行流程。
+
+        Args:
+            finding: 来自推理管道的 Finding 对象
+            context: 上下文对象
+            goal: 可选的外部目标
+            correlation_findings: 可选的相关性 Finding 列表，
+                                  将传递给 RiskEngine 用于风险加成。
+        """
         decision_id = uuid.uuid4().hex
         decision = DecisionRecord(
             decision_id=decision_id,
@@ -78,6 +87,7 @@ class DecisionOrchestrator:
                     intent.entity_type,
                     intent.entity_name,
                     candidate.base_risk,
+                    findings=correlation_findings,
                 )
 
             # === Phase 3: POLICY ===

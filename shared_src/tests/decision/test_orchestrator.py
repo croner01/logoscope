@@ -36,10 +36,28 @@ class MockExecutionPlanner:
 
 
 class MockRiskEngine:
-    def compute(self, action, entity_type, entity_name, base_risk=50):
+    def compute(self, action, entity_type, entity_name, base_risk=50,
+                findings=None):
         from shared_src.risk.models import RiskProfile
+
+        operational_risk = 15
+        # 如果存在 correlation.found 且目标实体在 affected_entities 中，模拟加成
+        if findings:
+            for f in findings:
+                if (isinstance(f, dict)
+                        and f.get("category") == "correlation.found"
+                        and entity_name in f.get("affected_entities", [])):
+                    confidence = float(f.get("confidence", 0.5))
+                    if confidence >= 0.8:
+                        operational_risk += 15
+                    elif confidence >= 0.6:
+                        operational_risk += 8
+                    else:
+                        operational_risk += 5
+
         return RiskProfile(business_risk=20, execution_risk=50,
-                           operational_risk=15, final_risk=55)
+                           operational_risk=operational_risk,
+                           final_risk=55)
 
 
 class MockBlastAnalyzer:
@@ -117,6 +135,41 @@ class TestDecisionOrchestrator:
         result = orchestrator.execute(finding, None)
         assert result.decision is not None
         assert result.status in ("success", "failed", "rejected", "pending_approval")
+
+    def test_orchestrator_passes_correlation_findings(self, orchestrator):
+        """Orchestrator 将 correlation_findings 传递给 RiskEngine"""
+        finding = MockFinding(id="f-002", category="NovaOOM",
+                              affected_entities=["SERVICE:rabbitmq"])
+        correlation_findings = [{
+            "category": "correlation.found",
+            "confidence": 0.85,
+            "affected_entities": ["rabbitmq", "nova-api"],
+            "evidence": ["interaction_frequency=15"],
+        }]
+        result = orchestrator.execute(
+            finding, None, correlation_findings=correlation_findings)
+        assert result.status == "success"
+
+    def test_orchestrator_correlation_findings_increase_risk(self, orchestrator):
+        """correlation_findings 导致风险评分上升"""
+        finding = MockFinding(id="f-003", category="NovaOOM",
+                              affected_entities=["SERVICE:rabbitmq"])
+        correlation_findings = [{
+            "category": "correlation.found",
+            "confidence": 0.9,
+            "affected_entities": ["rabbitmq", "neutron-server"],
+            "evidence": ["interaction_frequency=25"],
+        }]
+        result = orchestrator.execute(
+            finding, None, correlation_findings=correlation_findings)
+        # MockRiskEngine 对高置信度 +15 → operational_risk 从 15 升到 30
+        assert result.decision is not None
+
+    def test_orchestrator_empty_correlation_findings(self, orchestrator):
+        """空列表的 correlation_findings 不改变行为"""
+        finding = MockFinding()
+        result = orchestrator.execute(finding, None, correlation_findings=[])
+        assert result.status == "success"
 
     def test_orchestrator_with_explicit_goal(self, orchestrator):
         """可以传入外部 Goal"""
