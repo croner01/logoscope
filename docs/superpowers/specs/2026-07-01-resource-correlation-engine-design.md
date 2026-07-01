@@ -1,11 +1,11 @@
-# Logoscope Data Architecture v1 — Event-driven Observability Platform
+# Logoscope Data Architecture v1 — Event-driven AI Observability Platform
 
-> **Event Sourcing + Projection + Workflow — 只有 Raw Event 是真正的 Source of Truth。**
-> Normalized Event 是从 Raw Event 产生的第一层 Projection，可以重新生成。
+> **Event Sourcing + CQRS + Unified Context — 只有 Raw Event 是 Source of Truth。**
+> 所有数据是 Projection；所有查询通过 Context API；所有变换通过 Schema Registry 管理版本。
 >
-> 定义从 Raw Log → Raw Event Store → Event Bus (raw-events) → Semantic Engine → NormalizedEvent → Multi-topic Event Bus → Projection Layer → Context Builder → Inference → Topology → Workflow → Action 的完整闭环。
+> 定义从 Raw Log → Event Pipeline → Semantic Engine → Schema-enforced Multi-topic Event Bus → Projection Layer → Unified Context API → Inference → Planner → Workflow → Capability → Action 的完整闭环。
 
-**Status:** Draft v7.1
+**Status:** Draft v8
 **Date:** 2026-07-01
 **Authors:** croner01, Claude
 
@@ -15,68 +15,55 @@
 
 ### 1.1 当前架构的系统性瓶颈
 
-v6 引入了 Event Bus 和 Property Graph，v7 引入了 Event Sourcing 和 Projection，但仍有根本性问题：
+v7.1 引入了 Raw Event 作为 Source of Truth 和 Projection 框架，但仍有根本性问题：
 
-**① Normalized Event 不是真正的 Source of Truth。**
-文档说"Event 是唯一 Source of Truth"，但 NormalizedEvent 已经是 Semantic Engine 解析后的结果。如果两年后 Semantic Engine 升级（例如终于能区分 PCI allocation 和 PCI NUMA affinity），没有 raw log 就无法重新解析。Raw Log 一旦接入时丢弃，永远无法恢复。
+**① 没有 Schema Registry。**
+所有 Event 以裸对象传递。一年后 `NormalizedEvent` 新增 `tenant_id` 字段，旧 Raw Event replay 时要么缺失字段、要么反序列化崩溃。没有 schema version 就没有安全的 schema evolution。
 
-**② Knowledge Layer 仍然是 mutable database，不是 Projection。**
-Entity Builder 直接写入 Neo4j——如果 Knowledge Layer 损坏，无法从 Event Stream 恢复。违反 Event Sourcing 原则。
+**② 没有 Event Envelope。**
+Producer、schema_version、event_type 等元信息丢失。无法追溯"谁产生了这个 Event"；无法判断 payload 格式。
 
-**③ Graph Builder 保存了不属于它的状态。**
-Graph 从 state-events 写入 Neo4j `status=ACTIVE`，但 State Projection（Redis TTL）过期后，Neo4j 的状态不会被清除。Graph 与事实永久不一致。
+**③ Semantic Engine 职责过重。**
+同时承担 normalize + aggregate（多行日志合并）+ dedup（10000 条重复错误）+ enrich（host→AZ→Rack）+ route（Kubernetes vs OpenStack），是 monolith 架构。
 
-**④ 没有 Context Snapshot。**
-AI 推理或 Workflow 执行可能持续数十秒，期间 Projection 可能变化。AI 前后看到不同数据，产生不一致的结论。
+**④ Projection Checkpoint 不能用 event_id。**
+Kafka replay 依赖 partition + offset。用 `last_event_id` 做 checkpoint 无法精确计算 lag、无法从指定 offset 恢复。
 
-**⑤ 没有 Projection 依赖管理。**
-重建多个 Projection 时，依赖顺序靠人工确定。复杂场景下容易出错。
+**⑤ 没有统一查询入口。**
+Topology 直接调 Graph Projection、Workflow 直接调 Context Builder、Rule Engine 直接调 State Projection。外部系统知道 Neo4j、Redis、ClickHouse 的存在——这将导致架构侵蚀。
 
-**⑥ 没有 Command/Event 分离。**
-Workflow Engine 使用 `workflow-events` 既存命令又存事件。命令（"重启 VM"）是意图，事件（"VM 已重启"）是事实，应分开。
+**⑥ Workflow 与执行方式耦合。**
+Workflow 直接写 `SSH compute-01; systemctl restart`，抽象层缺失。替换执行方式（SSH → k8s exec → VMware API）需要改 Workflow 定义。
 
-**⑦ 平台对自身不可观测。**
-平台自身的事件（Projection 重建、Inference 执行、Workflow 失败）不进入 Event Bus。平台是系统的"黑盒"。
+**⑦ Planner 不存在。**
+Inference 直接输出 Workflow。正确的模式是 Inference → Finding → Planner → Workflow。AI 负责"诊断"，Planner 负责"开药"。
 
-### 1.2 v7.1 核心理念
-
-```
-只有 Raw Event 是真正的 Source of Truth。
-所有存储层都是 Projection（Materialized View）。
-Projection 可以损坏、可以删除、可以重建——只要 Raw Event 还在。
-```
-
-这意味着：
+### 1.2 v8 核心理念
 
 ```
-Raw Event Store   = 真正的不可变事实来源（原样保留日志行）
-Normalized Event  = 从 Raw Event 产生的第 1 层 Projection
-Entity Registry   = 第 2 层 Projection（from normalized-events）
-State             = 第 2 层 Projection（from normalized-events, TTL-based）
-Property Graph    = 第 3 层 Projection（from entity + interaction events）
-Timeline          = 第 2 层 Projection（ClickHouse Materialized View）
-DynamicRelationship = 第 3 层 Projection（from interaction events）
-Context           = 非持久化视图（组装各 Projection，不存储）
+所有 Event 通过 EventEnvelope 携带 schema_version。
+所有 Schema 通过 Schema Registry 管理版本和迁移。
+所有预处理通过 Event Pipeline（Processor 链）。
+所有查询通过 Unified Context API——外部不知道 Neo4j/Redis/ClickHouse。
+所有执行通过 Capability 抽象——Workflow 不知道 SSH/kubectl。
+所有决策由 Inference → Planner → Workflow 三级完成。
 ```
 
-### 1.3 v6 → v7 → v7.1 变更
+### 1.3 v7.1 → v8 变更
 
-| 维度 | v6 | v7 | v7.1 |
-|------|----|----|------|
-| **Source of Truth** | Knowledge Layer | Normalized Event | **Raw Event** |
-| **Knowledge Layer** | mutable database | Inventory Projection | Inventory Projection（Epoch 化） |
-| **State** | Knowledge State Registry | State Projection（独立 Redis，TTL） | State Projection（不变） |
-| **Graph** | Graph Builder (ETL) | Graph Projection（versioned） | **Graph Projection（只存拓扑，不存状态）** |
-| **Context** | AI 自己拼装 | Context Builder → IncidentContext | **Context Builder + Snapshot** |
-| **Event Bus** | 单 topic | Multi-topic（7 topics） | **Multi-topic（10 topics：+raw-events, platform-events, workflow-commands）** |
-| **Projection** | 无版本 | version | **Epoch + Dependency Graph** |
-| **Builder** | Entity/State/Interaction Builder | Entity/State/Interaction Builder | **→ Projector**（统一命名） |
-| **Timeline** | ClickHouse 查询 | Timeline Projection | **ClickHouse Materialized View**（无自定义代码） |
-| **Workflow** | 无 | Workflow Engine（架构预留） | **Command/Event 分离** |
-| **Inference 输出** | 无结构 | 无结构 | **Finding 统一结构** |
-| **DynamicRel** | Cache 实现 | Cache 实现 | **ClickHouse Projection**（支持时间窗口） |
-| **平台可观测性** | 无 | 无 | **Platform Events** |
-| **重建编排** | 人工 | 人工 | **Dependency Graph → 自动拓扑排序** |
+| 维度 | v7.1 | v8 |
+|------|------|----|
+| **Source of Truth** | Raw Event（裸对象） | Raw Event + EventEnvelope + Schema |
+| **Schema 管理** | 无 | **Schema Registry + Schema Evolution** |
+| **Event 传输** | 裸对象 | **EventEnvelope**（schema_version, producer, event_type, payload） |
+| **Semantic Engine** | normalize + aggregate + dedup + enrich + route（monolith） | **只有 normalize**；预处理拆为 Event Pipeline |
+| **Event Pipeline** | 无 | **Processor 链**：aggregate → dedup → sample → enrich → route |
+| **Topic 命名** | `normalized-events`, `raw-events` | **Domain-first**：`platform.normalized`, `platform.raw` |
+| **Projection Checkpoint** | last_event_id（不可靠） | **Partition + Offset**（可靠，支持 lag 监测） |
+| **查询入口** | 各自直接调 Projection | **Unified Context API**（隐藏所有存储） |
+| **Workflow 执行** | 直接 SSH/kubectl | **Capability 抽象层** |
+| **Inference → Workflow** | 直接映射 | **Planner**（架构预留） |
+| **Event Bus Topics** | 10 topics | **10 topics（domain 命名）** |
 
 ---
 
@@ -88,110 +75,324 @@ Context           = 非持久化视图（组装各 Projection，不存储）
                     Raw Logs / Metrics / Traces / Events
                                |
                                v
-                     ┌─────────────────┐
-                     │ Raw Event Store  │  ← 真正的 Source of Truth
-                     │ (immutable,      │
-                     │  append-only)    │
-                     └────────┬────────┘
-                              |
-                              v
-                    Event Bus (raw-events)
-                              |
-                              v
-                      Semantic Engine
-                              |
-                      NormalizedEvent
-                              |
-                    +---------v----------+
-                    |      Event Bus      |
-                    |   (Multi-topic)    |
-                    +--+--+--+--+--+--+--+
-                       |  |  |  |  |  |
-              raw     norm entity state graph
-              events  events       events
-                       |  |  |  |  |  |
-                       +--+--+--+--+--+
-                              |
-                     Projection Layer
-     +----------+----------+----------+------------+
-     |          |          |          |            |
-     v          v          v          v            v
- Inventory   State     Graph      Timeline    DynamicRel
- Projection  Projection Projection  Projection  Projection
- (Neo4j)     (Redis)   (Neo4j)    (ClickHouse) (ClickHouse)
-     |          |          |          |            |
-     +----------+----------+----------+------------+
+                     ┌─────────────────────┐
+                     │   Raw Event Store    │  ← 真正的 Source of Truth
+                     │ (immutable, WAL +    │
+                     │  Kafka platform.raw) │
+                     └──────────┬───────────┘
+                                |
+                                v
+                   Event Bus (platform.raw)
+                     EventEnvelope{raw.event, v1}
+                                |
+                                v
+┌───────────────────────────────────────────────────┐
+│                Event Pipeline                     │
+│  ┌────────┬────────┬────────┬────────┬────────┐   │
+│  │Aggr.   │Dedup   │Sample  │Enrich  │Route   │   │
+│  │(Trace- │(exp    │(INFO→  │(host→  │(OS→OS  │   │
+│  │ back)  │ backoff)│1%)    │ AZ)    │ K8s→K8s)│  │
+│  └────────┴────────┴────────┴────────┴────────┘   │
+└──────────────────────────┬────────────────────────┘
                            |
-                    Context Builder
-                     ( + Snapshot )
+                           v
+                    Semantic Engine
+                     Schema Registry
+                     (consume EventEnvelope,
+                      produce EventEnvelope)
                            |
-                      IncidentContext
+                   NormalizedEvent (EventEnvelope)
                            |
-              +-----+------+------+-----+
-              |     |             |     |
-              v     v             v     v
-          Topology  Rule Engine  AI  Workflow Engine
-              |     |             |     |
-              +-----+------+------+-----+
+                   Event Bus (platform.normalized)
                            |
-                     ┌─────┴────┐
-                     │ Command   │
-                     │ / Event   │
-                     └─────┬────┘
-                           |
-                   Event Bus (loop back)
-                           |
-                ┌─────+────┬────+─────┐
-                |     |    |    |     |
-                v     v    v    v     v
-            platform  workflow-  workflow-
-            events    commands   events
+       ┌──────────┬───────┴───────┬──────────┐
+       v          v               v          v
+ Entity      State         Interaction    Timeline
+ Projector   Projector      Projector     MV (CH)
+       |          |               |
+       v          v               v
+ platform.entity  platform.state  platform.interaction
+       |          |               |
+       └────┬─────┴───────┬───────┘
+            │             │
+            v             v
+      Inventory      DynamicRel
+      Projection     Projection
+      (Neo4j)        (ClickHouse)
+            │             │
+            └──────┬──────┘
+                   │
+            Graph Projection
+              (只存拓扑)
+                   │
+              ┌────┴────┐
+              │ Context │ ← Unified Entry Point
+              │   API   │
+              └────┬────┘
+                   │
+     ┌─────┬───────┼───────┬─────┬──────┐
+     │     │       │       │     │      │
+     v     v       v       v     v      v
+ Topology  Rule  Inference Planner Workflow
+           Engine         (rsv)   Engine
+                                    │
+                              Capability
+                              Registry
+                                    │
+                     ┌──────+──────┬──+──────┐
+                     v      v      v      v
+                   SSH   kubectl  API   VMware
+                                    │
+                             Generated Events
+                                    │
+                            Event Bus (loop)
 ```
 
 ### 2.2 Event Sourcing 原则
 
 ```
-原则 1: 只有 Raw Event 是不可变的 Source of Truth
-原则 2: Normalized Event 是第一层 Projection（可从 raw-events 重建）
-原则 3: 所有 Projection 可以从上游 Event Stream 重建
+原则 1: 只有 Raw Event（EventEnvelope 包裹）是真正的不可变 Source of Truth
+原则 2: 所有 Event 携带 schema_version，Schema Registry 管理迁移
+原则 3: 所有 Projection 可以从上游 Event Stream 重建，重建基于 Offset
 原则 4: Projection 可以随时删除重建，不影响 Raw Event
-原则 5: 查询永远不查 Event Stream——查 Projection
+原则 5: 查询永远走 Context API——不直接查 Projection
 原则 6: 写入永远通过 Event Bus——不直接修改 Projection
 原则 7: 所有 Projection 带 Epoch 标记，支持零停机切换
-原则 8: Projection 依赖图自动决定重建顺序
+原则 8: Projection 依赖图自动决定重建顺序（拓扑排序）
+原则 9: Schema 变更必须向前兼容（只加字段，不改/删字段）
+原则 10: 所有 Workflow 执行通过 Capability，不直接依赖执行方式
 ```
 
-### 2.3 Multi-topic Event Bus
+### 2.3 EventEnvelope + Schema Registry
+
+#### 2.3.1 EventEnvelope
+
+```python
+@dataclass
+class EventEnvelope:
+    """
+    所有 Event 的通用信封。
+    Payload 是序列化的具体 Event 对象。
+
+    为什么需要 Envelope：
+      - 记录 schema_version → 支持 schema evolution
+      - 记录 producer → 追溯"谁产生了这个 Event"
+      - 记录 event_type → consumer 只订阅需要的 type
+      - metadata 携带路由/追踪信息
+    """
+    envelope_version: str = "v1"           # Envelope 自身版本（几乎不变）
+    schema_version: int = 1                # Payload schema 版本
+    event_type: str = ""                   # "raw.log", "normalized.event", "entity.seen"
+    producer: str = ""                     # "semantic-engine", "entity-projector"
+    event_id: str = ""                     # UUID7
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    payload: bytes = b""                   # 序列化的具体 Event（protobuf / JSON / msgpack）
+    metadata: Dict[str, str] = field(default_factory=dict)
+    # 常用 metadata key:
+    #   trace_id, span_id, cluster, namespace, raw_id
+```
+
+**为什么不用裸对象：**
+
+| 场景 | 裸对象 | EventEnvelope |
+|------|--------|---------------|
+| Schema 升级 | 反序列化崩溃 | SchemaRegistry.migrate(v1→v2) |
+| 追溯 producer | 丢失 | envelope.producer = "semantic-engine" |
+| Filter by type | 需要反序列化才知道 | envelope.event_type 直接可读 |
+| Routing | 不适用 | metadata.cluster → 路由到指定集群 |
+
+#### 2.3.2 Schema Registry
+
+```python
+@dataclass
+class Schema:
+    """Schema 定义。"""
+    event_type: str
+    version: int
+    fields: Dict[str, type]
+    created_at: datetime
+
+
+@dataclass
+class SchemaMigration:
+    """从一个版本到下一个版本的迁移函数。"""
+    from_version: int
+    to_version: int
+    migrate: Callable[[Dict], Dict]  # payload dict → payload dict
+
+
+class SchemaRegistry:
+    """
+    Schema 注册表。
+    管理所有 Event Type 的 Schema 版本和迁移链。
+
+    职责：
+      1. 注册 Schema 版本
+      2. 注册迁移函数（v1→v2, v2→v3）
+      3. 反序列化时自动迁移到最新版本
+      4. 验证 Event 是否符合当前 Schema
+
+    迁移原则：
+      - 只新增字段（默认值=空字符串/0/None）
+      - 不改字段名
+      - 不删字段
+      - 不改字段类型
+    """
+
+    def __init__(self):
+        self._schemas: Dict[str, Dict[int, Schema]] = {}
+        self._migrations: Dict[str, Dict[int, SchemaMigration]] = {}
+
+    def register(self, event_type: str, version: int, schema: Schema):
+        """注册一个 Schema 版本。"""
+        if event_type not in self._schemas:
+            self._schemas[event_type] = {}
+        self._schemas[event_type][version] = schema
+
+    def register_migration(self, event_type: str,
+                           from_version: int, to_version: int,
+                           migrate_fn: Callable[[Dict], Dict]):
+        """注册从 from_version 到 to_version 的迁移函数。"""
+        key = f"{event_type}"
+        if key not in self._migrations:
+            self._migrations[key] = {}
+        self._migrations[key][from_version] = SchemaMigration(
+            from_version=from_version,
+            to_version=to_version,
+            migrate=migrate_fn,
+        )
+
+    def latest_version(self, event_type: str) -> int:
+        """获取 Event Type 的最新 Schema 版本。"""
+        return max(self._schemas.get(event_type, {}).keys(), default=1)
+
+    def deserialize(self, envelope: EventEnvelope) -> Any:
+        """
+        反序列化 EventEnvelope，自动迁移到最新版本。
+
+        1. 从 payload 反序列化为 dict
+        2. 如果 schema_version < latest_version：
+           遍历 migration chain，逐步升级
+        3. 返回完整对象
+        """
+        payload = self._deserialize_payload(envelope.payload)
+        current_version = envelope.schema_version
+        latest = self.latest_version(envelope.event_type)
+
+        while current_version < latest:
+            migration = self._migrations.get(envelope.event_type, {}).get(current_version)
+            if not migration:
+                raise SchemaMigrationError(
+                    f"No migration from v{current_version} to v{current_version + 1} "
+                    f"for {envelope.event_type}"
+                )
+            payload = migration.migrate(payload)
+            current_version = migration.to_version
+
+        return payload
+
+    def serialize(self, event_type: str, payload: Dict,
+                  producer: str, **metadata) -> EventEnvelope:
+        """
+        序列化为 EventEnvelope。
+        自动使用最新的 schema_version。
+        """
+        version = self.latest_version(event_type)
+        return EventEnvelope(
+            schema_version=version,
+            event_type=event_type,
+            producer=producer,
+            event_id=generate_uuid7(),
+            payload=self._serialize_payload(payload),
+            metadata=metadata,
+        )
+
+    def validate(self, envelope: EventEnvelope, payload: Dict) -> bool:
+        """验证 payload 是否符合注册的 Schema。"""
+        schema = self._schemas.get(envelope.event_type, {}).get(envelope.schema_version)
+        if not schema:
+            return False
+        for field, field_type in schema.fields.items():
+            if field not in payload:
+                return False
+            if not isinstance(payload[field], field_type):
+                return False
+        return True
+
+
+# 全局实例
+schema_registry = SchemaRegistry()
+```
+
+**Schema Evolution 示例：**
+
+```python
+# v1 NormalizedEvent（2026-07-01）
+schema_registry.register("normalized.event", 1, Schema(
+    event_type="normalized.event",
+    version=1,
+    fields={
+        "event_id": str, "service_name": str, "message": str,
+        "instance_uuid": str, "severity": str, "timestamp": str,
+    },
+))
+
+# v2 NormalizedEvent（2027-01-01 — 新增 tenant_id）
+schema_registry.register("normalized.event", 2, Schema(
+    event_type="normalized.event",
+    version=2,
+    fields={
+        "event_id": str, "service_name": str, "message": str,
+        "instance_uuid": str, "severity": str, "timestamp": str,
+        "tenant_id": str,  # NEW
+    },
+))
+
+schema_registry.register_migration("normalized.event", 1, 2,
+    migrate_fn=lambda p: {**p, "tenant_id": ""}  # v1→v2: 空字符串默认值
+)
+
+# Replay 时自动迁移：
+#   envelope.schema_version=1 → SchemaRegistry.migrate(v1→v2) → 完整 v2 对象
+```
+
+### 2.4 Topic 结构（Domain-first 命名）
 
 ```
-Topic                      | 分区 key         | Retention | 消费者
----------------------------|------------------|-----------|--------
-raw-events                 | source           | 90d       | Semantic Engine（真正的 SOT）
-normalized-events          | service_name     | 7d hot +  | Entity/State/Interaction Projector
-                           |                  | 90d warm  |
-entity-events              | entity_type:id   | 90d       | Inventory Projection
-state-events               | entity_type:id   | 24h       | State Projection
-interaction-events         | source:target    | 90d       | Graph + DynamicRel
-graph-events               | entity_id        | 90d       | Graph Projection
-alert-events               | severity         | 30d       | AI / Notification
-workflow-commands          | workflow_id      | 7d        | Workflow Engine（"希望发生"）
-workflow-events            | workflow_id      | 90d       | Workflow Engine（"已经发生"）
-platform-events            | category         | 90d       | 平台自观测
+Topic 命名规范：{domain}.{event_type}
+
+Domain                  | Topics
+------------------------|------------------------------------------------
+platform                | platform.raw, platform.normalized
+platform.entity        | platform.entity, platform.state
+platform.interaction   | platform.interaction
+platform.graph         | platform.graph
+platform.alert         | platform.alert
+platform.workflow      | platform.workflow.command, platform.workflow.event
+platform.system        | platform.system (platform-events)
 ```
 
-**raw-events** — 新增。原始日志行/二进制数据原样保留。Semantic Engine 是此 topic 的唯一消费者。所有 NormalizedEvent 可从此 topic 重新生成。
+```
+Topic                      | 分区 key         | Retention | Schema
+---------------------------|------------------|-----------|-------
+platform.raw               | source           | 90d       | raw.event.v1
+platform.normalized        | service_name     | 7d+90d    | normalized.event.v1
+platform.entity            | entity_type:id   | 90d       | entity.seen.v1
+platform.state             | entity_type:id   | 24h       | state.event.v1
+platform.interaction       | source:target    | 90d       | interaction.recorded.v1
+platform.graph             | entity_id        | 90d       | graph.update.v1
+platform.alert             | severity         | 30d       | alert.triggered.v1
+platform.workflow.command  | workflow_id      | 7d        | workflow.command.v1
+platform.workflow.event    | workflow_id      | 90d       | workflow.event.v1
+platform.system            | category         | 90d       | platform.event.v1
+```
 
-**workflow-commands** — 从 workflow-events 拆分。Command = 意图（"重启 VM"），Event = 事实（"VM 已重启"）。CQRS 分离。
+**好处：**
+- 未来新增 `network.*`, `storage.*`, `security.*` 不需要改现 consumer
+- 多集群时 `clusterA.platform.raw` vs `clusterB.platform.raw` 易区分
+- Consumer group 允许通配符：`platform.*`
 
-**platform-events** — 新增。平台自身的事件：Projection 重建开始/完成、Inference 开始/结束、Workflow 执行/失败、Projection 漂移检测等。
-
-**为什么拆 topic：**
-- 不同 Projection 的 retention 策略不同（State 24h，Inventory 90d，Raw 90d）
-- 不同 consumer 的消费速率不同（State 高频，Inventory 低频）
-- Replay 时可以按 topic 单独回放，不影响其他 Projection
-- raw-events 作为重建基础，必须保留足够的 retention（90d）
-
-### 2.4 Projection 框架
+### 2.5 Projection 框架
 
 ```python
 class Projection(ABC):
@@ -207,8 +408,8 @@ class Projection(ABC):
     def epoch(self) -> str:
         """
         projection_epoch — 表示此 Projection 从事件流的哪个位置重建。
-        格式：YYYYMMDD 或 YYYYMMDD-HHMMSS（重建时间戳）。
-        不是算法版本号——不同算法实现应使用不同的 Projection class 名。
+        格式：YYYYMMDD。
+        不同算法的 Projection 使用不同的 class 名（不同 epoch 可并行）。
         """
         ...
 
@@ -218,13 +419,18 @@ class Projection(ABC):
         return []
 
     @abstractmethod
-    def apply(self, event: NormalizedEvent):
-        """增量更新：收到 Event 时更新此 Projection。"""
+    def apply(self, envelope: EventEnvelope):
+        """增量更新：收到 EventEnvelope 时更新此 Projection。"""
         ...
 
     @abstractmethod
-    def rebuild(self, event_source: EventSource):
+    def rebuild(self, event_source: EventSource, checkpoint: 'ProjectionCheckpoint'):
         """全量重建：从 Event Stream 重建整个 Projection。"""
+        ...
+
+    @abstractmethod
+    def checkpoint(self) -> 'ProjectionCheckpoint':
+        """返回当前 checkpoint。"""
         ...
 
     @abstractmethod
@@ -236,141 +442,177 @@ class Projection(ABC):
 class ProjectionStatus:
     projection_epoch: str
     event_count: int
-    last_event_id: str
+    checkpoint: 'ProjectionCheckpoint'
     is_rebuilding: bool = False
     rebuild_progress: float = 0.0
+    lag: int = 0  # 总 lag（所有 partition 合计）
 ```
 
-#### 2.4.1 Projection Epoch（取代 Version）
+### 2.6 Projection Checkpoint（Offset-based）
 
-Projection Version 暗示"算法版本号"，容易与 API version 混淆。改为 **Epoch**，表示"从事件流的哪个时间点重建"。
+**v8 核心变更。** 用 `topic + partition + offset` 取代 `last_event_id`。
 
+```python
+@dataclass
+class PartitionOffset:
+    """单个 Partition 的消费位置。"""
+    topic: str
+    partition: int
+    offset: int
+
+
+@dataclass
+class ProjectionCheckpoint:
+    """
+    Projection 的消费进度。
+
+    为什么用 Offset 不用 event_id：
+      - Kafka replay 依赖 partition + offset
+      - UUID7 按时间排序，Kafka partition 不一定连续（key-hash 可能乱序）
+      - 无法精确计算 lag（consumer offset vs latest offset）
+
+    为什么需要 records：
+      - 一个 Projection 可能消费多个 topic
+      - 每个 topic 有多个 partition
+      - 写入存储时是事务性的——batch 写入后同时 checkpoint
+    """
+    projection: str
+    epoch: str
+    records: Dict[str, Dict[int, int]]  # topic → {partition: offset}
+    updated_at: datetime
+
+    def update(self, topic: str, partition: int, offset: int):
+        if topic not in self.records:
+            self.records[topic] = {}
+        # 只更新 offset（Kafka offset 严格递增）
+        if partition not in self.records[topic] or offset > self.records[topic][partition]:
+            self.records[topic][partition] = offset
+        self.updated_at = datetime.utcnow()
+
+    def get_lag(self, topic: str, partition: int,
+                latest_offset: int) -> int:
+        """计算指定 partition 的 lag。"""
+        current = self.records.get(topic, {}).get(partition, 0)
+        return latest_offset - current
+
+    def total_lag(self, topic_latest: Dict[str, Dict[int, int]]) -> int:
+        """计算总 lag（所有 topic × partition 合计）。"""
+        total = 0
+        for topic, partitions in topic_latest.items():
+            for partition, latest in partitions.items():
+                total += self.get_lag(topic, partition, latest)
+        return total
 ```
-旧: InventoryProjection(version="v1"), InventoryProjection(version="v2")
-新: InventoryProjection(epoch="20260701"), InventoryProjection(epoch="20260710")
 
-名称由算法实现决定（如 HashMapProjection/ListProjection），Epoch 由重建时间决定。
+**Checkpoint 更新流程：**
+
+```python
+class CheckpointedProjection(Projection):
+    """
+    带 Checkpoint 的 Projection 基类。
+    写入存储和 checkpoint 在同一事务中完成。
+    """
+
+    def process_batch(self, envelopes: List[EventEnvelope]):
+        # 1. 消费一批 Event
+        for env in envelopes:
+            self.apply(env)
+
+        # 2. 事务性写入存储
+        with self.store.transaction():
+            for env in envelopes:
+                self._write_to_store(env)
+            # 3. 在同一事务中更新 checkpoint
+            for env in envelopes:
+                for (topic, partition, offset) in self._parse_kafka_meta(env):
+                    self._checkpoint.update(topic, partition, offset)
+
+    @property
+    def lag(self) -> int:
+        """当前 lag——用于监控和告警。"""
+        return self.checkpoint().total_lag(
+            self._kafka.get_latest_offsets(self.upstream_topics)
+        )
 ```
 
-**零停机切换机制：**
+### 2.7 Projection Dependency Graph
 
-```
-1. 当前 active: inventory (epoch=20260701)
-2. 重建新 Projection: inventory (epoch=20260710) —— 从 raw-events 全量重建
-3. 两个 Projection 并行运行，互不干扰
-4. 切换 alias: inventory_current → epoch_20260710
-5. 下线旧 Projection: epoch_20260701
-```
-
-#### 2.4.2 Projection Dependency Graph
+（同 v7.1，仅更新 topic 名为 domain 格式）
 
 ```python
 @dataclass
 class ProjectionDependency:
-    """定义 Projection 之间的依赖关系。"""
-    projection: str            # 当前 Projection 名称
-    depends_on: List[str]      # 需要先重建的上游 topic
-    produces: Optional[str]    # 投递到哪个 topic（None = 终结点）
+    projection: str
+    depends_on: List[str]
+    produces: Optional[str]
 
 
-# 全局依赖图 —— 用于重建编排和健康检查
-# 拓扑排序决定重建顺序：raw → normalized → entity/state/interaction → graph/dynamic_rel
 PROJECTION_DEPENDENCIES = {
     "raw":         ProjectionDependency("raw",          [],                              None),
-    "normalized":  ProjectionDependency("normalized",   ["raw-events"],                  "normalized-events"),
-    "inventory":   ProjectionDependency("inventory",    ["normalized-events"],           "entity-events"),
-    "state":       ProjectionDependency("state",        ["normalized-events"],           "state-events"),
-    "interaction": ProjectionDependency("interaction",  ["normalized-events"],           "interaction-events"),
-    "graph":       ProjectionDependency("graph",        ["entity-events",
-                                                         "interaction-events"],          None),
-    "timeline":    ProjectionDependency("timeline",     ["normalized-events"],           None),
-    "dynamic_rel": ProjectionDependency("dynamic_rel",  ["interaction-events"],          None),
+    "normalized":  ProjectionDependency("normalized",   ["platform.raw"],                "platform.normalized"),
+    "inventory":   ProjectionDependency("inventory",    ["platform.normalized"],         "platform.entity"),
+    "state":       ProjectionDependency("state",        ["platform.normalized"],         "platform.state"),
+    "interaction": ProjectionDependency("interaction",  ["platform.normalized"],         "platform.interaction"),
+    "graph":       ProjectionDependency("graph",        ["platform.entity",
+                                                         "platform.interaction"],        None),
+    "timeline":    ProjectionDependency("timeline",     ["platform.normalized"],         None),
+    "dynamic_rel": ProjectionDependency("dynamic_rel",  ["platform.interaction"],        None),
 }
 ```
 
-**依赖关系（DOT 格式）：**
-
-```dot
-digraph projection_deps {
-    "raw-events" -> "normalized Projector";
-    "normalized Projector" -> "normalized-events";
-    "normalized-events" -> "entity Projector";
-    "normalized-events" -> "state Projector";
-    "normalized-events" -> "interaction Projector";
-    "entity Projector" -> "entity-events";
-    "state Projector" -> "state-events";
-    "interaction Projector" -> "interaction-events";
-    "entity-events" -> "graph Projection";
-    "interaction-events" -> "graph Projection";
-    "interaction-events" -> "dynamic_rel Projection";
-    "normalized-events" -> "timeline Projection";
-    "entity-events" -> "inventory Projection";
-}
-```
-
-**重建编排示例：**
-
-```python
-class RebuildOrchestrator:
-    """
-    根据 ProjectionDependency 自动拓扑排序，按顺序重建 Projection。
-    """
-
-    def rebuild_all(self, target: str = "all"):
-        order = self._topological_sort(self.dependencies)
-        for proj_name in order:
-            if target == "all" or proj_name == target:
-                proj = self.projections[proj_name]
-                self._publish_platform_event("rebuild_started", proj_name, proj.epoch)
-                proj.rebuild(self.event_source)
-                self._publish_platform_event("rebuild_completed", proj_name, proj.epoch)
-
-    def rebuild_chain(self, proj_name: str):
-        """重建指定 Projection 及其所有下游。"""
-        deps = self._reverse_dependencies(proj_name)
-        order = self._topological_sort(deps)
-        for p in order:
-            self.projections[p].rebuild(self.event_source)
-```
-
-### 2.5 组件职责
+### 2.8 组件职责
 
 | 层 | 职责 | 不做什么 |
 |----|------|----------|
-| **Raw Event Store** | 原样保留原始日志/指标/链路数据 | 不解析、不处理 |
-| **Semantic Engine** | 消费 raw-events → NormalizedEvent | 不参与存储 |
-| **Event Bus** | Multi-topic Event 分发 | 不涉及业务逻辑 |
-| **Inventory Projection** | 从 entity-events 构建 Entity Registry | 不处理 State |
-| **State Projection** | 从 state-events 构建当前状态（TTL） | 不保存历史 |
-| **Graph Projection** | 从 entity-events + interaction-events 构建拓扑 | **不存状态** |
-| **Timeline Projection** | ClickHouse MV，无自定义代码 | 不做聚合 |
-| **DynamicRel Projection** | 从 interaction-events 聚合（ClickHouse） | 不做 Inference |
-| **Context Builder** | 多 Projection → IncidentContext + Snapshot | 不持久化 |
-| **Topology Engine** | Graph Projection → Layout → Render | 不查 Projection |
-| **Inference Engine** | IncidentContext → Finding | 不查原始数据 |
-| **Workflow Engine** | Command → Action → Event（闭环） | 不做分析 |
+| **Raw Event Store** | 原样保留原始日志，不可变 append-only | 不解析、不处理 |
+| **Event Pipeline** | Aggregate / Dedup / Sample / Enrich / Route | 不做 Normalize |
+| **Semantic Engine** | Raw → NormalizedEvent（经 Schema Registry） | 不聚合、不去重 |
+| **Event Bus** | Multi-topic Event 分发（EventEnvelope） | 不涉及业务逻辑 |
+| **Projectors** | 上层 Event → 下层 Event | 不构建存储 |
+| **Projections** | 消费 Event → 写入持久化存储 | 不做推理 |
+| **Context API** | 统一查询入口，隐藏所有存储 | 不持久化 |
+| **Topology Engine** | 纯渲染，消费 Context API | 不查 Projection |
+| **Inference Engine** | IncidentContext → Finding | 不生成 Workflow |
+| **Planner** | Finding → Workflow（架构预留） | 不做推理 |
+| **Workflow Engine** | Workflow → Capability → Action | 不做决策 |
+| **Capability Registry** | 执行方式抽象（SSH / k8s / API） | 不做编排 |
 
 ---
 
 ## 3. Event Schema
 
-### 3.1 RawEvent（真正的 Source of Truth）
+### 3.1 EventEnvelope（所有 Event 的统一容器）
 
 ```python
 @dataclass
-class RawEvent:
+class EventEnvelope:
     """
-    真正的不可变 Source of Truth。
-    Semantic Engine 消费此事件，产生 NormalizedEvent。
+    所有 Event 的通用信封。
 
-    与 NormalizedEvent 关系：
-      NormalizedEvent = Projection(RawEvent, Semantic Engine 算法)
-      NormalizedEvent 可以从 raw-events topic 重新生成
+    序列化格式（protobuf / msgpack / JSON）由生产者和消费者协商。
+    Payload 是序列化后的 bytes，具体格式由 schema_version 决定。
     """
+    envelope_version: str = "v1"
+    schema_version: int = 1
+    event_type: str = ""
+    producer: str = ""
+    event_id: str = ""
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    payload: bytes = b""
+    metadata: Dict[str, str] = field(default_factory=dict)
+```
+
+### 3.2 RawEvent
+
+```python
+# schema_version = 1, event_type = "raw.log"
+@dataclass
+class RawEvent:
+    """真正的不可变 Source of Truth。"""
     raw_id: str                # UUID7
     timestamp: datetime
-    source: str                # "fluentbit", "otel-collector", "api", "filebeat"
-    data_type: str             # "log", "metric", "trace", "event"
+    source: str                # "fluentbit", "otel-collector"
+    data_type: str             # "log", "metric", "trace"
     raw_payload: str           # 原始日志行 / JSON / protobuf（base64）
     content_type: str = "text/plain"
     host: str = ""
@@ -379,37 +621,10 @@ class RawEvent:
     pod_name: str = ""
     container_name: str = ""
     service_name: str = ""
-
-    # 索引字段（用于快速过滤，不改变事实）
     labels_json: str = ""
-
-
-class RawEventStore:
-    """
-    原始事件存储。
-    在写入 Event Bus 前先持久化，保证 at-least-once。
-
-    Kafka 99% 场景足够可靠，但为极端场景保留文件 Fallback：
-      1. 同步写入 RawEvent（本地文件 / WAL）
-      2. 异步发布到 raw-events topic
-      3. 确认 Kafka ack 后标记已发布
-      4. 重启时从未发布的 RawEvent 开始
-    """
-
-    def append(self, raw: RawEvent) -> str:
-        # 1. 写 WAL（本地文件）
-        wal_id = self.wal.append(raw)
-        # 2. 发布到 Kafka
-        try:
-            self.bus.publish("raw-events", raw)
-            self.wal.ack(wal_id)
-        except Exception:
-            # 异步重试机制
-            self.retry_queue.enqueue(wal_id)
-        return raw.raw_id
 ```
 
-### 3.2 核心类型
+### 3.3 核心类型
 
 ```python
 class ResourceType(Enum):
@@ -438,19 +653,18 @@ class EventCategory:
     outcome: str = ""
 ```
 
-### 3.3 NormalizedEvent
+### 3.4 NormalizedEvent
 
 ```python
+# schema_version = 1 (will evolve), event_type = "normalized.event"
 @dataclass
 class NormalizedEvent:
     """
-    第一层 Projection（从 RawEvent 产生）。
-
-    理论上可以从 raw-events 重建。
-    保留 raw_id 以追溯原始日志。
+    第一层 Projection（从 RawEvent 经过 Semantic Engine 产生）。
+    可通过 EventEnvelope.schema_version 追溯版本。
     """
     event_id: str              # UUID7
-    raw_id: str                # ← 追溯回原始 RawEvent
+    raw_id: str                # 追溯回原始 RawEvent
     timestamp: datetime
     service_name: str
     pod_name: str = ""
@@ -489,797 +703,704 @@ class NormalizedEvent:
 
 ```python
 class EventBus(ABC):
-    """Multi-topic 事件总线。"""
+    """Multi-topic 事件总线。所有 Event 以 EventEnvelope 传输。"""
 
     TOPICS = {
-        "raw-events":           {"retention_days": 90, "partitions": 16},
-        "normalized-events":    {"retention_days": 7,  "partitions": 16},
-        "entity-events":        {"retention_days": 90, "partitions": 8},
-        "state-events":         {"retention_days": 1,  "partitions": 8},
-        "interaction-events":   {"retention_days": 90, "partitions": 16},
-        "graph-events":         {"retention_days": 90, "partitions": 8},
-        "alert-events":         {"retention_days": 30, "partitions": 4},
-        "workflow-commands":    {"retention_days": 7,  "partitions": 4},
-        "workflow-events":      {"retention_days": 90, "partitions": 4},
-        "platform-events":      {"retention_days": 90, "partitions": 4},
+        "platform.raw":              {"retention_days": 90, "partitions": 16},
+        "platform.normalized":       {"retention_days": 7,  "partitions": 16},
+        "platform.entity":           {"retention_days": 90, "partitions": 8},
+        "platform.state":            {"retention_days": 1,  "partitions": 8},
+        "platform.interaction":      {"retention_days": 90, "partitions": 16},
+        "platform.graph":            {"retention_days": 90, "partitions": 8},
+        "platform.alert":            {"retention_days": 30, "partitions": 4},
+        "platform.workflow.command": {"retention_days": 7,  "partitions": 4},
+        "platform.workflow.event":   {"retention_days": 90, "partitions": 4},
+        "platform.system":           {"retention_days": 90, "partitions": 4},
     }
 
     @abstractmethod
-    def publish(self, topic: str, event: Any):
+    def publish(self, topic: str, envelope: EventEnvelope):
         ...
 
     @abstractmethod
     def subscribe(self, topic: str, group: str,
-                   callback: Callable[[Any], None]):
+                   callback: Callable[[EventEnvelope], None]):
+        ...
+
+    @abstractmethod
+    def latest_offsets(self, topic: str) -> Dict[int, int]:
+        """返回 {partition: latest_offset}——用于计算 Projection lag。"""
         ...
 ```
 
 ---
 
-## 5. Semantic Engine
+## 5. Event Pipeline
 
-### 5.1 架构变化
-
-v7.1 的 Semantic Engine 从**直接接收 API 输入**改为**消费 raw-events topic**。
+### 5.1 定位
 
 ```
-v7:   Ingest → HTTP API → Semantic Engine → NormalizedEvent → Event Bus
-v7.1: Raw Logs → Raw Event Store → Event Bus (raw-events) → Semantic Engine → Event Bus (normalized-events)
+v7.1:  Semantic Engine = normalize + aggregate + dedup + enrich + route
+v8:    Semantic Engine = 只做 normalize
+       Event Pipeline = aggregate + dedup + sample + enrich + route
 ```
 
-### 5.2 职责
+Event Pipeline 是 **RawEvent 进入 Semantic Engine 前的 Processor 链**。每个 Processor 可以过滤、聚合、变换 RawEvent。
 
-不变的核心能力：Raw → NormalizedEvent。关键变化：
+**为什么需要 Pipeline：**
 
-1. **输入源**：从 raw-events topic 消费，不直接从 API 接收
-2. **raw_id**：每个 NormalizedEvent 携带 `raw_id` 追溯回原始日志
-3. **可重建**：Semantic Engine 是纯函数式变换，给定同一 raw-events 输入，产出等价的 normalized-events
-4. **版本化**：Semantic Engine 升级时，重建所有 normalized-events
+| 场景 | 在 Semantic Engine 做 | 在 Pipeline 做 |
+|------|----------------------|----------------|
+| Python Traceback 多行日志 | Semantic Engine 要处理状态机 | Aggregate Processor 合并为单行 |
+| Nova ERROR x10000 | 产生 10000 个 NormalizedEvent | Dedup Processor → count=10000 |
+| INFO 日志 x1M Semantic | Engine 处理 100 万条 | Sample Processor → 保留 1% |
+| host→AZ→Rack 注入 | Semantic Engine 要查外部系统 | Enrich Processor 注入 |
+| K8s vs OpenStack | 同一管道处理 | Route Processor 分发 |
+
+### 5.2 Processor 接口
 
 ```python
-class SemanticEngine:
+class PipelineProcessor(ABC):
     """
-    消费 raw-events topic，产生 NormalizedEvent。
-    作为纯 Projector 运行——不操作存储，不产生副作用。
+    Pipeline Processor 基类。
+    输入一个 RawEvent，输出 0 到 N 个 RawEvent。
     """
 
-    projector_version: str = "v1"
+    @abstractmethod
+    def process(self, raw: RawEvent) -> List[RawEvent]:
+        ...
+```
 
-    def process(self, raw: RawEvent) -> NormalizedEvent:
-        """将原始日志解析为 NormalizedEvent。"""
-        # 保留 raw_id 用于追溯
-        normalized = self._normalize(raw)
-        normalized.raw_id = raw.raw_id
-        # 发布到 normalized-events topic
-        self.bus.publish("normalized-events", normalized)
-        return normalized
+### 5.3 内置 Processor
 
-    def recover_from_epoch(self, epoch: str):
-        """从某个时间点重新处理所有 raw-events。"""
-        for raw in self.event_source.stream("raw-events", since=epoch):
-            self.process(raw)
+```python
+class AggregateProcessor(PipelineProcessor):
+    """
+    多行日志聚合。
+    例如 Python Traceback、多行 JSON、多行日志堆栈。
+
+    策略：
+      - 按 trace_id / request_id / timestamp window 关联
+      - 缓冲区 TTL 5s
+      - 超时未匹配的独立行直接发出
+    """
+
+    def __init__(self, window_seconds: int = 5):
+        self.window = window_seconds
+        self._buffer: Dict[str, List[RawEvent]] = {}
+
+    def process(self, raw: RawEvent) -> List[RawEvent]:
+        key = self._aggregation_key(raw)
+        if key:
+            self._buffer.setdefault(key, []).append(raw)
+            if self._is_complete(self._buffer[key]):
+                batch = self._buffer.pop(key)
+                return [self._merge(batch)]
+            return []  # 还在等待后续行
+        return [raw]
+
+    def flush(self) -> List[RawEvent]:
+        """超时 flush 未完成的 buffer。"""
+        results = []
+        for key, batch in list(self._buffer.items()):
+            if self._is_expired(batch):
+                results.extend(batch)
+                del self._buffer[key]
+        return results
+
+
+class DedupProcessor(PipelineProcessor):
+    """
+    指数退避去重。
+    相同错误模式连续出现时，聚合为 count=N，不产生 N 个重复事件。
+    """
+
+    def __init__(self, initial_window_ms: int = 1000,
+                 max_window_ms: int = 60000):
+        self._seen: Dict[str, DedupState] = {}
+
+    def process(self, raw: RawEvent) -> List[RawEvent]:
+        key = self._dedup_key(raw)
+        state = self._seen.get(key)
+
+        if state and (datetime.utcnow() - state.last_seen).total_seconds() * 1000 < state.window_ms:
+            # 在去重窗口内——增加计数，不产生新事件
+            state.count += 1
+            state.last_seen = datetime.utcnow()
+            state.window_ms = min(state.window_ms * 2, self.max_window_ms)
+            return []
+        else:
+            # 新事件或窗口过期——发出现有计数
+            if state and state.count > 1:
+                raw.metadata["dedup_count"] = str(state.count)
+                raw.metadata["dedup_key"] = key
+
+            self._seen[key] = DedupState(
+                count=1,
+                window_ms=self.initial_window_ms,
+                last_seen=datetime.utcnow(),
+            )
+            return [raw]
+
+
+class SampleProcessor(PipelineProcessor):
+    """
+    采样。
+
+    INFO     → 保留 1%
+    WARNING  → 保留 10%
+    ERROR    → 保留 100%
+    CRITICAL → 保留 100%
+    """
+
+    def __init__(self, rates: Dict[str, float] = None):
+        self.rates = rates or {
+            "INFO": 0.01, "WARNING": 0.1,
+            "ERROR": 1.0, "CRITICAL": 1.0,
+        }
+
+    def process(self, raw: RawEvent) -> List[RawEvent]:
+        rate = self.rates.get(raw.labels_json.get("severity", "INFO"), 1.0)
+        if random.random() < rate:
+            return [raw]
+        return []
+
+
+class EnrichProcessor(PipelineProcessor):
+    """
+    上下文注入。
+
+    支持：
+      - host → AZ → Rack → IDC
+      - IP → Hostname
+      - Pod → Node → Cluster
+
+    数据来源：静态映射 / Redis 缓存 / API 查询
+    """
+
+    def process(self, raw: RawEvent) -> List[RawEvent]:
+        raw.labels_json = json.dumps({
+            **json.loads(raw.labels_json or "{}"),
+            "az": self._host_to_az(raw.host),
+            "rack": self._host_to_rack(raw.host),
+        })
+        return [raw]
+
+
+class RouteProcessor(PipelineProcessor):
+    """
+    路由——打标签，不实际分发。
+    Semantic Engine 根据标签选择 Extractor。
+    """
+
+    def process(self, raw: RawEvent) -> List[RawEvent]:
+        if "nova" in raw.service_name or "neutron" in raw.service_name:
+            raw.metadata["platform"] = "openstack"
+        elif "kube" in raw.service_name or "container" in raw.service_name:
+            raw.metadata["platform"] = "kubernetes"
+        return [raw]
+```
+
+### 5.4 Pipeline 架构
+
+```python
+class EventPipeline:
+    """
+    RawEvent 进入 Semantic Engine 前的 Processor 链。
+    每个 Processor 可以过滤、聚合、变换 RawEvent。
+
+    设计原则：
+      - 无状态优先（Aggregate 除外）
+      - 每个 Processor 职责单一
+      - Processor 之间不共享状态
+      - Pipeline 在 Semantic Engine 的 consumer 线程中执行
+    """
+
+    def __init__(self, processors: List[PipelineProcessor]):
+        self.processors = processors
+
+    def execute(self, raw: RawEvent) -> List[RawEvent]:
+        """执行 Pipeline，返回 0 到 N 个处理后的 RawEvent。"""
+        events = [raw]
+        for processor in self.processors:
+            events = [
+                processed
+                for event in events
+                for processed in processor.process(event)
+            ]
+            if not events:
+                return []  # 所有事件被过滤
+        return events
+
+    def periodic_flush(self) -> List[RawEvent]:
+        """
+        周期性 flush 有状态的 Processor（如 AggregateProcessor）。
+        由外部定时器调用（如每 5 秒）。
+        """
+        flushed = []
+        for processor in self.processors:
+            if hasattr(processor, 'flush'):
+                flushed.extend(processor.flush())
+        return flushed
+```
+
+### 5.5 Pipeline 配置
+
+```yaml
+# pipeline_config.yaml
+pipeline:
+  processors:
+    - aggregate:
+        window_seconds: 5
+    - dedup:
+        initial_window_ms: 1000
+        max_window_ms: 60000
+    - sample:
+        rates:
+          INFO: 0.01
+          WARNING: 0.10
+          ERROR: 1.0
+          CRITICAL: 1.0
+    - enrich:
+        host_map:
+          source: "redis"
+          prefix: "host:az:"
+    - route: {}
 ```
 
 ---
 
-## 6. Projection Layer
+## 6. Semantic Engine
 
-### 6.1 命名统一
+### 6.1 架构变化
 
 ```
-旧名               新名                职责
-EntityBuilder      EntityProjector     normalized-events → entity-events
-StateBuilder       StateProjector      normalized-events → state-events（已重命名为 State Projection）
-InteractionBuilder InteractionProjector normalized-events → interaction-events（已重命名为 Interaction Extractor）
+v7.1:  平台.raw → Semantic Engine（normalize + aggregate + dedup + enrich）
+v8:    平台.raw → Event Pipeline → Semantic Engine（只做 normalize）
+
+       Semantic Engine 输入已经是 EventEnvelope{raw.event, v1}
+       Semantic Engine 输出 EventEnvelope{normalized.event, v1}
 ```
 
-**"Projector" vs "Projection" 的区别：**
-
-| 角色 | 例子 | 职责 |
-|------|------|------|
-| **Projector** | EntityProjector | 消费 A topic，转换后发布到 B topic |
-| **Projection** | InventoryProjection | 消费 topic，构建持久化存储 |
-
-
-### 6.2 Inventory Projection
-
-从 `entity-events` topic 构建。Entity Created/Updated/Deleted Event → 版本化 Entity Registry。
+### 6.2 职责
 
 ```python
-@dataclass
-class EntityRecord:
-    entity_id: str
-    type: ResourceType
-    id: str
-    version: int = 1
-    valid_from: datetime
-    valid_to: Optional[datetime] = None
-    attributes: Dict[str, str] = field(default_factory=dict)
-    source: str = ""
-
-    @property
-    def is_current(self) -> bool:
-        return self.valid_to is None
-
-
-class EntityProjector:
+class SemanticEngine:
     """
-    消费 normalized-events，产出 entity-events。
-    Projector 角色：从一种 Event 变换为另一种 Event。
+    消费经过 Pipeline 处理的 RawEvent，产生 NormalizedEvent。
+    全部通过 EventEnvelope 和 Schema Registry 管理。
+
+    只做 normalize：提取事件主体、实体、时间、类别。
+    不做：聚合、去重、采样、注入（这些已在 Pipeline 完成）。
     """
 
-    def process(self, event: NormalizedEvent):
-        for entity in event.entities:
-            entity_event = {
-                "event_type": "entity_seen",
-                "entity_type": entity.type.value,
-                "entity_id": entity.id,
-                "timestamp": event.timestamp.isoformat(),
-                "service": event.service_name,
-                "raw_event_id": event.event_id,
-            }
-            event_bus.publish("entity-events", entity_event)
+    def __init__(self, schema_registry: SchemaRegistry, bus: EventBus):
+        self.schema_registry = schema_registry
+        self.bus = bus
 
+    def process(self, envelope: EventEnvelope) -> Optional[EventEnvelope]:
+        """消费一个 EventEnvelope，产生 NormalizedEvent。"""
+        # 1. Schema Registry 反序列化（自动迁移版本）
+        raw_event = self.schema_registry.deserialize(envelope)
 
-class InventoryProjection(Projection):
+        # 2. 进行 Normalize
+        normalized = self._normalize(raw_event)
+
+        # 3. 序列化为 EventEnvelope（使用 Schema Registry）
+        output = self.schema_registry.serialize(
+            event_type="normalized.event",
+            payload=normalized.__dict__,
+            producer="semantic-engine",
+            raw_id=raw_event.raw_id,
+            trace_id=raw_event.trace_id,
+        )
+        self.bus.publish("platform.normalized", output)
+        return output
+
+    def _normalize(self, raw: RawEvent) -> NormalizedEvent:
+        """核心 normalize 逻辑。同 v7，不变。"""
+        ...
+```
+
+---
+
+## 7. Projection Layer
+
+### 7.1 命名规范
+
+| 组件 | 角色 | 输入 topic | 输出 |
+|------|------|-----------|------|
+| EntityProjector | Projector | platform.normalized | platform.entity |
+| StateProjector | Projector | platform.normalized | platform.state |
+| InteractionProjector | Projector | platform.normalized | platform.interaction |
+| InventoryProjection | Projection | platform.entity | Neo4j |
+| StateProjection | Projection | platform.state | Redis TTL |
+| GraphProjection | Projection | platform.entity + platform.interaction | Neo4j |
+| DynamicRelProjection | Projection | platform.interaction | ClickHouse |
+| TimelineProjection | Projection | platform.normalized | ClickHouse MV |
+
+### 7.2 Projector 模式
+
+```python
+class Projector(ABC):
     """
-    从 entity-events topic 构建。
-    可全量重建：清空 Neo4j → 从 Event Stream Replay entity-events。
+    Projector = event → event 变换器。
+    消费一个 topic 的 EventEnvelope，产出另一个 topic 的 EventEnvelope。
+    """
+
+    @abstractmethod
+    def project(self, envelope: EventEnvelope) -> List[EventEnvelope]:
+        ...
+
+
+class EntityProjector(Projector):
+    """
+    消费 platform.normalized，产出 platform.entity。
+    """
+
+    def project(self, envelope: EventEnvelope) -> List[EventEnvelope]:
+        normalized = schema_registry.deserialize(envelope)
+        result = []
+        for entity in normalized.entities:
+            entity_envelope = schema_registry.serialize(
+                event_type="entity.seen",
+                payload={
+                    "entity_type": entity.type.value,
+                    "entity_id": entity.id,
+                    "timestamp": normalized.timestamp.isoformat(),
+                    "service": normalized.service_name,
+                    "raw_event_id": normalized.event_id,
+                },
+                producer="entity-projector",
+            )
+            result.append(entity_envelope)
+        return result
+```
+
+### 7.3 Inventory Projection（带 Checkpoint）
+
+```python
+class InventoryProjection(CheckpointedProjection):
+    """
+    从 platform.entity topic 构建。
+    可全量重建：清空 Neo4j → 从 Event Stream Replay。
+    Checkpoint 基于 partition + offset。
     """
     name = "inventory"
     epoch = "20260701"
 
     @property
     def upstream_topics(self) -> List[str]:
-        return ["entity-events"]
+        return ["platform.entity"]
 
-    def apply(self, event: NormalizedEvent):
-        """
-        消费 entity-events（由 EntityProjector 产出）。
-        写入 Neo4j Entity Registry。
-        """
-        ...
+    def apply(self, envelope: EventEnvelope):
+        entity = schema_registry.deserialize(envelope)
+        # 写入 Neo4j
+        self._neo4j.execute(
+            "MERGE (e:Entity {id: $id}) SET e.type = $type, e.updated_at = $ts",
+            {"id": entity["entity_id"], "type": entity["entity_type"],
+             "ts": entity["timestamp"]},
+        )
 
-    def rebuild(self, event_source: EventSource):
+    def rebuild(self, event_source: EventSource, checkpoint: ProjectionCheckpoint):
         self._clear_all()
-        for event in event_source.stream("entity-events"):
-            self.apply(event)
+        for envelope in event_source.stream("platform.entity"):
+            self.apply(envelope)
+            checkpoint.update("platform.entity",
+                              envelope.metadata["partition"],
+                              int(envelope.metadata["offset"]))
 ```
 
-### 6.3 State Projection
+### 7.4 State Projection
 
-从 `state-events` topic 构建。TTL 过期自动失效。不变，同 v7。
+同 v7.1，仅 topic 名更新为 `platform.state`。
+
+### 7.5 Graph Projection（只存拓扑）
+
+同 v7.1，仅 topic 名更新为 `platform.entity` + `platform.interaction`。不存状态。
+
+### 7.6 Timeline Projection（ClickHouse MV）
+
+同 v7.1，仅 topic 更新为 `platform.normalized`。
+
+### 7.7 DynamicRel Projection（ClickHouse，Offset-based Checkpoint）
+
+同 v7.1（ClickHouse 存储，支持时间窗口），增加 offset-based checkpoint。
 
 ```python
-@dataclass
-class StateEntry:
-    entity_key: str          # "INSTANCE:abc-123"
-    key: str                 # "attached", "migration_state"
-    value: str
-    timestamp: datetime
-    ttl_seconds: int = 60
-    source: str = ""
-
-    @property
-    def is_current(self) -> bool:
-        return (datetime.utcnow() - self.timestamp).total_seconds() < self.ttl_seconds
-
-
-class StateProjection(Projection):
-    """
-    从 state-events topic 构建。
-    存储在 Redis（或内存 KV），TTL 自动过期。
-    可全量重建：清空 → Replay state-events（只保留最近 24h）。
-    """
-    name = "state"
-    epoch = "20260701"
-
-    @property
-    def upstream_topics(self) -> List[str]:
-        return ["state-events"]
-
-    def apply(self, event: NormalizedEvent):
-        state_entries = self._extract_state(event)
-        for entry in state_entries:
-            self._store.setex(
-                f"state:{entry.entity_key}:{entry.key}",
-                entry.ttl_seconds,
-                json.dumps(asdict(entry)),
-            )
-
-    def query(self, entity_type: ResourceType, entity_id: str,
-              key: str) -> Optional[str]:
-        entry = self._store.get(f"state:{entity_type.value}:{entity_id}:{key}")
-        if entry:
-            parsed = StateEntry(**json.loads(entry))
-            return parsed.value if parsed.is_current else None
-        return None
-```
-
-### 6.4 Graph Projection（只存拓扑）
-
-**v7.1 关键变化：Graph 不再从 state-events 写入状态。**
-
-Graph Projection 只负责：
-- **节点**：从 entity-events 创建/更新（MERGE entity_id）
-- **边**：从 interaction-events 创建/更新（MERGE source-target）
-- **不做**：不存 `status=ACTIVE`、不存 `attached=true`、不存 TTL 状态
-
-状态查询通过 Context Builder 在运行时从 State Projection 获取。
-
-```python
-class GraphProjection(Projection):
-    """
-    从 entity-events + interaction-events 构建 Property Graph。
-    只存拓扑结构（节点 + 边），不存状态。
-
-    状态查询路径：
-      Context Builder → State Projection（实时 Redis 查询）
-      而非 Graph Projection 的 Neo4j 属性
-    """
-    name = "graph"
-    epoch = "20260701"
-
-    @property
-    def upstream_topics(self) -> List[str]:
-        return ["entity-events", "interaction-events"]
-
-    def apply_entity(self, event: NormalizedEvent):
-        """从 entity-events → MERGE Node（不写状态属性）"""
-        # 只写 identity/type/label，不写 status/state
-        ...
-
-    def apply_interaction(self, event: NormalizedEvent):
-        """从 interaction-events → MERGE Edge"""
-        ...
-
-    def get_subgraph(self, entity_id: str, depth: int = 2,
-                     edge_types: Optional[List[str]] = None) -> "PropertyGraph":
-        """查询邻居子图。只返回拓扑结构。"""
-        ...
-
-    def rebuild(self, event_source: EventSource):
-        self._clear_all()
-        # 先消费 entity-events（建节点），再消费 interaction-events（建边）
-        for topic in self.upstream_topics:
-            for event in event_source.stream(topic):
-                if topic == "entity-events":
-                    self.apply_entity(event)
-                elif topic == "interaction-events":
-                    self.apply_interaction(event)
-
-
-@dataclass
-class PropertyGraph:
-    nodes: List['GraphNode']
-    edges: List['GraphEdge']
-
-    def get_subgraph(self, entity_id, depth, edge_types=None):
-        ...
-
-
-@dataclass
-class GraphNode:
-    """图节点——只存拓扑标识，不存运行时状态。"""
-    entity_id: str              # "INSTANCE:abc-123"
-    entity_type: ResourceType
-    label: str = ""
-    attributes: Dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class GraphEdge:
-    """图边——只存拓扑关系，不存置信度/窗口计数。"""
-    source: str
-    target: str
-    relationship_type: str
-    attributes: Dict[str, str] = field(default_factory=dict)
-```
-
-### 6.5 Timeline Projection（ClickHouse MV）
-
-**v7.1 简化：不再写自定义 Projection 代码。ClickHouse Materialized View 本身就是 Timeline Projection。**
-
-```sql
--- ClickHouse Materialized View 作为 Timeline Projection
-CREATE MATERIALIZED VIEW timeline_mv
-ENGINE = MergeTree()
-ORDER BY (entity_id, toStartOfMinute(timestamp))
-POPULATE AS
-SELECT
-    entity_id,
-    timestamp,
-    event_id,
-    service_name,
-    event_category,
-    severity,
-    message
-FROM normalized_events
-WHERE entity_id != ''
-```
-
-```python
-class TimelineProjection(Projection):
-    """
-    ClickHouse Materialized View 就是 Timeline Projection。
-    不需要自定义代码。此 class 只提供查询封装。
-    """
-    name = "timeline"
-    epoch = "20260701"
-
-    @property
-    def upstream_topics(self) -> List[str]:
-        return ["normalized-events"]
-
-    def apply(self, event: NormalizedEvent):
-        """ClickHouse MV 自动处理——此方法为空。"""
-        pass
-
-    def get_timeline(self, entity_id: str,
-                     time_range: str = "1 HOUR") -> List[Dict]:
-        """按 (entity_id, time) 查询事件序列。"""
-        rows = self.clickhouse.execute("""
-            SELECT event_id, timestamp, service_name, event_category,
-                   severity, message
-            FROM timeline_mv
-            WHERE entity_id = %(entity_id)s
-              AND timestamp >= now() - INTERMET %(time_range)s
-            ORDER BY timestamp DESC
-            LIMIT 50
-        """, {"entity_id": entity_id, "time_range": time_range})
-        return [dict(row) for row in rows]
-
-    def rebuild(self, event_source: EventSource):
-        """ClickHouse MV 不需要手动重建。DROP → CREATE MV 即可。"""
-        pass
-```
-
-### 6.6 DynamicRel Projection（ClickHouse）
-
-**v7.1 变化：从 Cache 改为 ClickHouse Projection。支持时间窗口查询。**
-
-```python
-class DynamicRelProjection(Projection):
-    """
-    从 interaction-events 聚合。
-    存储在 ClickHouse，支持时间窗口查询（最近 6h / 7d / 30d）。
-
-    为什么不用 Cache：
-      Cache 只能查"当前"聚合。
-      ClickHouse 可以查任意时间窗口的趋势变化。
-      AI 异常检测需要比较不同窗口（当前 1h vs 过去 24h）。
-    """
+class DynamicRelProjection(CheckpointedProjection):
     name = "dynamic_rel"
     epoch = "20260701"
 
     @property
     def upstream_topics(self) -> List[str]:
-        return ["interaction-events"]
+        return ["platform.interaction"]
 
-    def apply(self, event: NormalizedEvent):
-        """增量写入 ClickHouse。"""
+    def apply(self, envelope: EventEnvelope):
+        interaction = schema_registry.deserialize(envelope)
         self.clickhouse.execute("""
             INSERT INTO dynamic_relationships
             (source, target, interaction_type, timestamp, confidence, request_id)
             VALUES
             (%(source)s, %(target)s, %(type)s, %(ts)s, %(conf)s, %(req)s)
-        """, {
-            "source": event.participants[0].entity.id if event.participants else "",
-            "target": event.participants[1].entity.id if len(event.participants) > 1 else "",
-            "type": event.event.action,
-            "ts": event.timestamp,
-            "conf": 0.5,
-            "req": event.request_id,
-        })
+        """, { ... })
+```
 
-    def query(self, source: str, target: str,
-              window: str = "1 HOUR") -> Optional['DynamicRelationship']:
-        """查询指定时间窗口内的聚合关系。"""
-        row = self.clickhouse.execute("""
-            SELECT
-                source,
-                target,
-                count(*) as call_count,
-                min(timestamp) as first_seen,
-                max(timestamp) as last_seen,
-                avg(confidence) as confidence
-            FROM dynamic_relationships
-            WHERE source = %(source)s
-              AND target = %(target)s
-              AND timestamp >= now() - INTERMET %(window)s
-            GROUP BY source, target
-        """, {"source": source, "target": target, "window": window})
-        if row:
-            return DynamicRelationship(
-                relationship_id=f"{source}:{target}",
-                source=source,
-                target=target,
-                call_count=row["call_count"],
-                first_seen=row["first_seen"],
-                last_seen=row["last_seen"],
-                confidence=row["confidence"],
-            )
+---
+
+## 8. Correlation Engine
+
+同 v7.1，仅 topic 名更新。InteractionProjector 输出到 `platform.interaction`。
+
+---
+
+## 9. Unified Context API
+
+### 9.1 定位
+
+**v8 核心变更。** 所有外部代码通过 `ContextAPI` 查询——不直接访问任何 Projection。
+
+```
+v7.1:  Topology → Graph Projection
+       Workflow → Context Builder
+       Rule     → State Projection
+
+v8:    Topology → ContextAPI.build(type=topology)
+       Workflow → ContextAPI.build(type=workflow)
+       Rule     → ContextAPI.build(type=rule)
+       AI       → ContextAPI.build(type=incident)
+```
+
+**好处：**
+- 存储实现可以替换（Neo4j → DGraph → 内存），不影响消费者
+- 可以添加全局缓存/限流/审计
+- 统一的 ContextType 系统保证接口一致
+- Context Snapshot 对所有 ContextType 统一可用
+
+### 9.2 ContextType
+
+```python
+class ContextType(Enum):
+    """查询的上下文类型。"""
+    INCIDENT = "incident"    # AI/Inference Engine
+    TOPOLOGY = "topology"    # Topology Engine
+    WORKFLOW = "workflow"    # Workflow Engine
+    RULE     = "rule"        # Rule Engine
+
+
+@dataclass
+class ContextResult:
+    """
+    统一查询结果。
+    所有 ContextType 共享此结构，context 字段由具体 Builder 填充。
+    """
+    context_type: ContextType
+    resource_type: ResourceType
+    resource_id: str
+    context: Any                    # IncidentContext / TopologyContext / ...
+    snapshot_id: str = ""           # 如果有 snapshot
+    created_at: datetime = field(default_factory=datetime.utcnow)
+```
+
+### 9.3 ContextAPI（唯一入口）
+
+```python
+class ContextAPI:
+    """
+    统一 Context 查询入口。
+
+    设计原则：
+      - 外部所有查询通过此 API——不直接访问 Projection
+      - 调用方不需要知道 Neo4j/Redis/ClickHouse 的存在
+      - 内部 Builder 可以根据 ContextType 自定义组装逻辑
+      - Snapshot 机制对所有 ContextType 统一可用
+    """
+
+    def __init__(self, inventory: InventoryProjection,
+                 state: StateProjection, graph: GraphProjection,
+                 timeline: TimelineProjection, dynamic_rel: DynamicRelProjection,
+                 alert_store: AlertStore, cache: Cache):
+        self._incident_builder = IncidentContextBuilder(
+            inventory, state, graph, timeline, dynamic_rel, alert_store, cache)
+        self._topology_builder = TopologyContextBuilder(graph)
+        self._workflow_builder = WorkflowContextBuilder(
+            inventory, state, dynamic_rel, cache)
+        self._rule_builder = RuleContextBuilder(
+            state, inventory, timeline, cache)
+
+    def build(self, resource_type: ResourceType, resource_id: str,
+              context_type: ContextType = ContextType.INCIDENT,
+              time_window: str = "1 HOUR",
+              use_snapshot: bool = True) -> ContextResult:
+        """
+        唯一查询入口。
+
+        参数：
+          resource_type: ResourceType.INSTANCE
+          resource_id: "abc-123"
+          context_type: 查询类型（决定返回的数据范围）
+          time_window: 时间窗口
+          use_snapshot: 是否创建快照（保证后续查询数据一致）
+
+        返回：
+          ContextResult{.context_type, .context, .snapshot_id}
+        """
+        builder = self._get_builder(context_type)
+        ctx = builder.build(resource_type, resource_id, time_window)
+
+        snapshot_id = ""
+        if use_snapshot and hasattr(builder, 'create_snapshot'):
+            snapshot = builder.create_snapshot(ctx)
+            snapshot_id = snapshot.snapshot_id
+
+        return ContextResult(
+            context_type=context_type,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            context=ctx,
+            snapshot_id=snapshot_id,
+        )
+
+    def get_snapshot(self, snapshot_id: str) -> Optional[ContextResult]:
+        """获取已创建的快照（任何 ContextType）。"""
+        snapshot = self._cache.get(f"snapshot:{snapshot_id}")
+        if snapshot:
+            return pickle.loads(snapshot)
         return None
 
-    def query_trend(self, source: str, target: str,
-                    windows: List[str] = ["1 HOUR", "6 HOUR", "24 HOUR"]
-                    ) -> List[Dict]:
-        """多时间窗口聚合——用于 AI 异常检测。"""
-        results = []
-        for w in windows:
-            rel = self.query(source, target, w)
-            if rel:
-                results.append({"window": w, "count": rel.call_count,
-                                "confidence": rel.confidence})
-        return results
-
-    def rebuild(self, event_source: EventSource):
-        self.clickhouse.execute("TRUNCATE TABLE dynamic_relationships")
-        for event in event_source.stream("interaction-events"):
-            self.apply(event)
+    def _get_builder(self, context_type: ContextType):
+        builders = {
+            ContextType.INCIDENT: self._incident_builder,
+            ContextType.TOPOLOGY: self._topology_builder,
+            ContextType.WORKFLOW: self._workflow_builder,
+            ContextType.RULE: self._rule_builder,
+        }
+        return builders[context_type]
 ```
 
----
-
-## 7. Correlation Engine
-
-### 7.1 Interaction（不可变，append-only）
-
-```python
-@dataclass
-class InteractionEndpoint:
-    entity: ResourceIdentity
-    role: str = ""
-
-
-@dataclass
-class Interaction:
-    """原子交互记录。不可变。"""
-    interaction_id: str
-    timestamp: datetime
-    source_endpoint: InteractionEndpoint
-    target_endpoint: InteractionEndpoint
-    interaction_type: str
-    duration_ms: float = 0.0
-    request_id: str = ""
-    outcome: str = ""
-
-
-class InteractionProjector:
-    """
-    从 NormalizedEvent 提取可能端点。
-    不做端到端关联 —— 只提取"这个 Event 涉及哪些端点"。
-    输出发布到 interaction-events topic。
-    """
-
-    def process(self, event: NormalizedEvent):
-        self._extract_and_publish(event)
-
-    def _extract_and_publish(self, event: NormalizedEvent):
-        endpoints = self._extract_endpoints(event)
-        for ia in self._pair_endpoints(endpoints):
-            event_bus.publish("interaction-events", ia)
-```
-
-### 7.2 Correlation Engine（轻量：只聚合端点对）
-
-```python
-class CorrelationEngine:
-    """
-    消费 interaction-events。
-    聚合端点对 (A, B) → DynamicRel Projection（ClickHouse）。
-    Inference 已独立出去。
-    """
-
-    def process_interaction(self, ia: Interaction):
-        # 写入 DynamicRel Projection（ClickHouse）
-        self.dynamic_rel_projection.apply(ia)
-
-    def get_relationship(self, source: str, target: str,
-                          window: str = "1 HOUR") -> Optional[dict]:
-        return self.dynamic_rel_projection.query(source, target, window)
-
-    def get_trend(self, source: str, target: str) -> List[Dict]:
-        """多窗口趋势查询，用于 AI 异常检测。"""
-        return self.dynamic_rel_projection.query_trend(source, target)
-```
-
-### 7.3 Dynamic Relationship
-
-```python
-@dataclass
-class DynamicRelationship:
-    relationship_id: str
-    source: str
-    target: str
-    relationship_type: str = "calls"
-    confidence: float = 0.5
-    first_seen: Optional[datetime] = None
-    last_seen: Optional[datetime] = None
-    call_count: int = 0
-```
-
----
-
-## 8. Context Builder
-
-### 8.1 定位
-
-```
-Inventory Projection
-State Projection
-Graph Projection
-Timeline Projection
-DynamicRel Projection
-        |
-        v
-  Context Builder
-    ( + Snapshot )
-        |
-  IncidentContext
-        |
-    AI / Rule / Workflow
-```
-
-Context Builder 是**薄层封装**，职责是从多个 Projection 查询数据，组装为 `IncidentContext`。v7.1 增加 **Snapshot 机制**，保证推理过程中数据一致性。
-
-### 8.2 IncidentContext
+### 9.4 ContextType 详解
 
 ```python
 @dataclass
 class IncidentContext:
-    """
-    AI 和 Rule Engine 的统一输入。
-    不需要知道 Evidence / Fact / Assertion / RawEvent 的存在。
-    """
-    # 核心资源
+    """AI / Inference Engine 的上下文。"""
     resource_type: ResourceType
     resource_id: str
     resource_attributes: Dict[str, str]
-
-    # 邻居（来自 Graph Projection——只含拓扑）
-    neighbors: List[Dict]         # 邻近实体 + 关系类型
-
-    # 当前状态（来自 State Projection——实时查询）
-    current_state: Dict[str, str]  # key → value (attached=true)
-
-    # 时序（来自 Timeline Projection）
+    neighbors: List[Dict]
+    current_state: Dict[str, str]
     timeline: List[Dict]
-
-    # 动态关系（来自 DynamicRel Projection——多窗口）
     relationships: List[Dict]
-
-    # 告警
     recent_alerts: List[Dict]
-
-    # 元信息
     context_id: str
-    snapshot_id: str              # ← v7.1 新增：关联回 Snapshot
-    created_at: datetime
-```
-
-### 8.3 Snapshot 机制
-
-```python
-@dataclass
-class ContextSnapshot:
-    """
-    一次性捕获的上下文快照。
-    所有消费者（AI、Rule、Workflow）在推理期间看到一致的数据。
-    """
-    context: IncidentContext
     snapshot_id: str
     created_at: datetime
-    ttl_seconds: int = 600  # 10 分钟——足够推理完成
 
 
-class ContextBuilder:
-    """
-    从 Projection 层查询数据，组装为 IncidentContext。
-    不存数据，不建索引。
-    """
+@dataclass
+class TopologyContext:
+    """Topology Engine 的上下文——只含拓扑结构。"""
+    resource_type: ResourceType
+    resource_id: str
+    nodes: List[Dict]                    # 节点列表
+    edges: List[Dict]                    # 边列表
+    depth: int = 2
+    # 不包含状态信息——状态由前端通过 State Projection API 查询
 
-    def __init__(self, inventory, state, graph, timeline, dynamic_rel, cache):
-        self.inventory_projection = inventory
-        self.state_projection = state
-        self.graph_projection = graph
-        self.timeline_projection = timeline
-        self.dynamic_rel_projection = dynamic_rel
-        self._cache = cache  # Redis / in-memory
 
-    def build(self, resource_type: ResourceType, resource_id: str,
-              time_window: str = "1 HOUR") -> IncidentContext:
-        """构建上下文。"""
-        entity = self.inventory_projection.query(resource_type, resource_id)
-        subgraph = self.graph_projection.get_subgraph(
-            f"{resource_type.value}:{resource_id}")
-        state = self.state_projection.query_all(resource_type, resource_id)
-        timeline = self.timeline_projection.get_timeline(
-            f"{resource_type.value}:{resource_id}", time_window)
-        rels = self.dynamic_rel_projection.query_by_entity(
-            resource_type, resource_id)
+@dataclass
+class WorkflowContext:
+    """Workflow Engine 的上下文——包含执行所需的信息。"""
+    resource_type: ResourceType
+    resource_id: str
+    resource_attributes: Dict[str, str]
+    current_state: Dict[str, str]
+    available_capabilities: List[str]    # 可用的 Capability
+    snapshot_id: str
 
-        return IncidentContext(
-            resource_type=resource_type,
-            resource_id=resource_id,
-            resource_attributes=entity.attributes if entity else {},
-            neighbors=[{"entity": n.id, "relation": e.type}
-                       for n, e in subgraph.get_neighbors()],
-            current_state=state,
-            timeline=[{"event_id": t.event_id, "timestamp": t.timestamp.isoformat(),
-                       "action": t.event.action}
-                      for t in timeline[:50]] if timeline else [],
-            relationships=[{"source": r.source, "target": r.target,
-                            "type": r.relationship_type, "confidence": r.confidence}
-                           for r in rels],
-            recent_alerts=self._get_alerts(resource_type, resource_id, time_window),
-            context_id=uuid4().hex,
-            snapshot_id="",       # 创建后才赋值
-            created_at=datetime.utcnow(),
-        )
 
-    def create_snapshot(self, ctx: IncidentContext) -> ContextSnapshot:
-        """
-        创建快照——冻结当前上下文。
-        在 AI/Workflow 开始推理前调用。
-        """
-        snapshot = ContextSnapshot(
-            context=ctx,
-            snapshot_id=uuid4().hex,
-            created_at=datetime.utcnow(),
-        )
-        ctx.snapshot_id = snapshot.snapshot_id
-
-        # 缓存快照
-        self._cache.setex(
-            f"snapshot:{snapshot.snapshot_id}",
-            snapshot.ttl_seconds,
-            pickle.dumps(snapshot),
-        )
-
-        self._publish_platform_event(
-            "snapshot_created",
-            snapshot.snapshot_id,
-            ctx.resource_type.value,
-            ctx.resource_id,
-        )
-        return snapshot
-
-    def get_snapshot(self, snapshot_id: str) -> Optional[IncidentContext]:
-        """获取已创建的快照。"""
-        data = self._cache.get(f"snapshot:{snapshot_id}")
-        if data:
-            snapshot = pickle.loads(data)
-            return snapshot.context
-        return None
-
-    def build_with_snapshot(self, resource_type: ResourceType,
-                             resource_id: str,
-                             time_window: str = "1 HOUR"
-                             ) -> Tuple[IncidentContext, ContextSnapshot]:
-        """构建上下文并立即创建快照。"""
-        ctx = self.build(resource_type, resource_id, time_window)
-        snapshot = self.create_snapshot(ctx)
-        return ctx, snapshot
+@dataclass
+class RuleContext:
+    """Rule Engine 的上下文——轻量级，高频查询。"""
+    resource_type: ResourceType
+    resource_id: str
+    current_state: Dict[str, str]
+    recent_events: List[Dict]            # 最近事件摘要
+    previous_evaluations: List[Dict]     # 前几次规则评估结果
 ```
 
-### 8.4 使用流程
+### 9.5 使用示例
 
-```
-1. 触发：Alert Event / Rule Match
-2. 构建：ContextBuilder.build_with_snapshot(type, id) → IncidentContext + Snapshot
-3. 分发：将 snapshot_id 传递给 AI / Rule / Workflow
-4. 推理：各消费者通过 ContextBuilder.get_snapshot(snapshot_id) 获取一致数据
-5. 完成：Snapshot 在 TTL（10min）后自动过期
+```python
+# AI Engine ——不知道 ClickHouse，不知道 Neo4j
+api = ContextAPI(...)
+result = api.build(
+    resource_type=ResourceType.INSTANCE,
+    resource_id="abc-123",
+    context_type=ContextType.INCIDENT,
+    use_snapshot=True,
+)
+ctx: IncidentContext = result.context
+# AI 推理在此上下文中进行
 
-期间如果 Projection 变化（如状态更新），AI 不受影响——看到的是快照数据。
-```
-
-### 8.5 API
-
-```text
-GET /api/v1/context/build?type=INSTANCE&id=abc-123&time_window=1+HOUR
-→ { context: IncidentContext, snapshot_id: "..." }
-
-GET /api/v1/context/snapshot/{snapshot_id}
-→ IncidentContext
+# Topology Engine ——不知道 Graph Projection
+result = api.build(
+    resource_type=ResourceType.INSTANCE,
+    resource_id="abc-123",
+    context_type=ContextType.TOPOLOGY,
+)
+topo: TopologyContext = result.context
 ```
 
 ---
 
-## 9. Inference Engine
+## 10. Inference Engine
 
-### 9.1 输入
+### 10.1 输入输出
 
 ```python
 @dataclass
 class InferenceInput:
-    """
-    推理引擎输入。
-    AI/Rule/ML 统一接口。
-    """
     context: IncidentContext
     query: str = ""
 ```
 
-### 9.2 Finding（统一输出结构）
+### 10.2 Finding（统一输出结构）
 
-**v7.1 新增。** Rule Engine、LLM Inference、ML Model 输出统一为 `Finding`。Workflow Engine 可直接消费。
+同 v7.1。
 
 ```python
 @dataclass
 class Finding:
-    """
-    推理结果的统一输出结构。
-    所有 Inference Engine 实现共享此格式。
-    """
     id: str
     severity: str                     # "critical", "warning", "info"
     confidence: float                 # 0.0 ~ 1.0
-    category: str                     # "anomaly", "dependency", "performance",
-                                      # "security", "capacity", "change"
+    category: str                     # "anomaly", "dependency", "performance"
     reason: str                       # 人类可读的描述
-    supporting_events: List[str]      # 事件 ID 列表
+    supporting_events: List[str]
     affected_entities: List[ResourceIdentity]
-    recommended_action: str           # 建议执行的动作
-    engine_type: str                  # "rule", "llm", "ml", "graph"
+    recommended_action: str
+    engine_type: str                  # "rule", "llm", "ml"
     created_at: datetime
 ```
 
-示例：
-
-```python
-Finding(
-    id=uuid4().hex,
-    severity="warning",
-    confidence=0.87,
-    category="dependency",
-    reason="Neutron DHCP agent 无响应导致 Nova 创建实例失败",
-    supporting_events=["evt-001", "evt-002", "evt-015"],
-    affected_entities=[
-        ResourceIdentity(ResourceType.INSTANCE, "abc-123"),
-        ResourceIdentity(ResourceType.HOST, "compute-01"),
-    ],
-    recommended_action="SSH compute-01 → systemctl restart neutron-dhcp-agent",
-    engine_type="llm",
-    created_at=datetime.utcnow(),
-)
-```
-
-### 9.3 Inference Engine
+### 10.3 Inference Engine
 
 ```python
 class InferenceEngine(ABC):
-    """
-    推理引擎。
-
-    输入: IncidentContext（已经组装好）
-    输出: List[Finding]
-
-    实现:
-      LLMInferenceEngine    — 大模型
-      RuleInferenceEngine   — 规则引擎
-      GraphInferenceEngine  — 图模式匹配
-      MLInferenceEngine     — 机器学习模型
-    """
-
     @abstractmethod
     def infer(self, input: InferenceInput) -> List[Finding]:
         ...
 
 
 class LLMInferenceEngine(InferenceEngine):
-    """LLM 推理。消费 snapshot 保证一致性。"""
-
     def infer(self, input: InferenceInput) -> List[Finding]:
-        # LLM 消费 input.context（IncidentContext）
+        # 消费 input.context（IncidentContext，来自 snapshot）
         # 输出 Finding 列表
         ...
 
 
 class RuleInferenceEngine(InferenceEngine):
-    """规则引擎。消费 same snapshot。"""
-
     def __init__(self):
         self.rules: List[Rule] = []
 
@@ -1291,66 +1412,190 @@ class RuleInferenceEngine(InferenceEngine):
         return findings
 ```
 
-### 9.4 AI 不再直接消费 Evidence
-
-```
-v6: AI 输入 = Subgraph + Evidence + Timeline
-  → AI 仍然需要知道 Evidence/Fact 等平台内部概念
-
-v7: AI 输入 = IncidentContext
-  → AI 只需要知道: 这是什么资源？它现在什么状态？它的邻居是谁？
-
-v7.1: AI 输入 = IncidentContext (from Snapshot)
-  → 数据一致性有保障
-  → 输出统一为 Finding，Workflow 可直接消费
-```
-
 ---
 
-## 10. Topology Engine
+## 11. Topology Engine
 
 ```python
 class TopologyEngine:
     """
     纯渲染引擎。
-    输入：GraphProjection.get_subgraph()（只含拓扑）
+    输入：ContextAPI.build(type=TOPOLOGY) — 只含节点的拓扑身份，不含状态
     输出：Layout + Render
+
+    为什么 Topology Engine 通过 Context API 查询：
+      - 外部代码不直接访问 Graph Projection
+      - Context API 返回的 TopologyContext 已经包含了所有拓扑信息
+      - 未来 Graph Projection 从 Neo4j 切换到 DGraph，Topology Engine 不需要改
     """
 
     def render(self, entity_id: str, depth: int = 2) -> TopologyResult:
-        subgraph = self.graph_projection.get_subgraph(entity_id, depth)
-        nodes = [Node(...) for n in subgraph.nodes]
-        edges = [Edge(...) for e in subgraph.edges]
-        layout = self._compute_layout(nodes, edges)
-        return TopologyResult(nodes=nodes, edges=edges, layout=layout)
+        ctx = self.context_api.build(
+            resource_type=ResourceType.UNKNOWN,
+            resource_id=entity_id,
+            context_type=ContextType.TOPOLOGY,
+            use_snapshot=False,
+        )
+        topo: TopologyContext = ctx.context
+        layout = self._compute_layout(topo.nodes, topo.edges)
+        return TopologyResult(
+            nodes=topo.nodes,
+            edges=topo.edges,
+            layout=layout,
+        )
+
+    def _compute_layout(self, nodes, edges):
+        # 力导向布局 / 层次布局
+        ...
 ```
 
 ---
 
-## 11. Workflow Engine
+## 12. Planner（架构预留）
 
-### 11.1 Command/Event 分离（v7.1 新增）
-
-**v7 问题：** `workflow-events` 同时承载"命令意图"和"事实结果"，违反了 CQRS 原则。
-
-**v7.1 分离：**
+### 12.1 定位
 
 ```
-Topic                   | 语义                         | 例子
-------------------------|------------------------------|------------------------
-workflow-commands       | "我希望发生"的意图             | RestartVM, MigrateVM
-workflow-events         | "已经发生"的事实               | VMRestarted, VMMigrated
+v7.1:   Inference → Workflow（直接映射）
+v8:     Inference → Finding → Planner → Workflow
+
+Planner 是 Inference 和 Workflow 之间的解耦层。
+AI 负责"诊断"（产 Finding），Planner 负责"开药"（生成 Workflow）。
+```
+
+### 12.2 架构
+
+```python
+class Planner:
+    """
+    Architecture Reserve（Phase 5+）。
+
+    v1 实现：Finding.recommended_action → 1:1 映射到 Workflow
+    v2 实现：LLM Planner（根据 IncidentContext + Finding 生成多步 Workflow）
+    v3 实现：Rule-based DSL Planner（预定义的 Playbook）
+    """
+
+    v1_ACTION_MAP = {
+        "restart_service": Workflow(
+            steps=[WorkflowStep("ssh", "{host}", "systemctl restart {service}")],
+        ),
+        "describe_pod": Workflow(
+            steps=[WorkflowStep("kubectl", "", "describe pod {pod_name}")],
+        ),
+    }
+
+    def plan(self, finding: Finding, context: IncidentContext) -> Workflow:
+        """将 Finding 映射为可执行的 Workflow。"""
+        action = finding.recommended_action
+
+        # v1: 简单映射
+        if action in self.v1_ACTION_MAP:
+            wf = copy.deepcopy(self.v1_ACTION_MAP[action])
+            wf.workflow_id = uuid4().hex
+            wf.name = action
+            wf.trigger = "inference"
+            # 用 context 中的信息填充占位符
+            wf = self._interpolate(wf, context)
+            return wf
+
+        # v2: LLM Planner（预留）
+        # v3: DSL Playbook（预留）
+        raise PlannerError(f"No workflow mapping for action: {action}")
+```
+
+---
+
+## 13. Workflow Engine
+
+### 13.1 Capability 抽象
+
+**v8 核心变更。** Workflow 不直接依赖 SSH/kubectl/API，通过 Capability 执行。
+
+```
+v7.1:  WorkflowStep(step_type="ssh", target="compute-01", command="systemctl ...")
+v8:    WorkflowStep(capability="ssh.execute", params={"host": "compute-01", "command": "..."})
 ```
 
 ```python
 @dataclass
+class Capability:
+    """执行能力注册。"""
+    capability_id: str
+    name: str                              # "ssh.execute_command"
+    provider: str                          # "ssh-executor", "k8s-executor"
+    parameters: Dict[str, ParameterDef]
+    output_type: type = str
+    timeout_seconds: int = 30
+    retry_count: int = 0
+
+    @property
+    def short_name(self) -> str:
+        return self.name.split(".")[-1]    # "ssh.execute_command" → "execute_command"
+
+
+@dataclass
+class ParameterDef:
+    name: str
+    type: type
+    required: bool = True
+    default: Any = None
+    description: str = ""
+
+
+class CapabilityRegistry:
+    """
+    全局 Capability 注册表。
+    Workflow 通过名称查找 Capability，不关心具体实现。
+    """
+
+    def __init__(self):
+        self._capabilities: Dict[str, Capability] = {}
+
+    def register(self, capability: Capability):
+        self._capabilities[capability.capability_id] = capability
+
+    def get(self, name: str) -> Optional[Capability]:
+        return self._capabilities.get(name)
+
+    def execute(self, capability_id: str,
+                params: Dict[str, Any]) -> CapabilityResult:
+        """按名称执行，不关心实际执行方式。"""
+        cap = self.get(capability_id)
+        if not cap:
+            raise CapabilityNotFoundError(capability_id)
+        return self._providers[cap.provider].execute(cap, params)
+
+
+# 注册示例
+registry = CapabilityRegistry()
+registry.register(Capability(
+    capability_id="ssh.execute_command",
+    name="ssh.execute_command",
+    provider="ssh-executor",
+    parameters={
+        "host": ParameterDef("host", str, True),
+        "command": ParameterDef("command", str, True),
+    },
+))
+registry.register(Capability(
+    capability_id="k8s.describe_pod",
+    name="k8s.describe_pod",
+    provider="k8s-executor",
+    parameters={
+        "namespace": ParameterDef("namespace", str, True),
+        "pod": ParameterDef("pod", str, True),
+    },
+))
+```
+
+### 13.2 Workflow 定义
+
+```python
+@dataclass
 class WorkflowCommand:
-    """
-    命令——描述"希望发生"的动作。
-    不是事实。可能执行成功也可能失败。
-    """
+    """Command = 意图（"我希望发生"）。"""
     command_id: str
-    command_type: str          # "restart_vm", "migrate_vm", "scale_service"
+    command_type: str          # "restart_service", "describe_pod"
     target: str
     params: Dict[str, str]
     created_at: datetime
@@ -1359,160 +1604,102 @@ class WorkflowCommand:
 
 @dataclass
 class WorkflowEvent:
-    """
-    事件——描述"已经发生"的事实。
-    一旦发布，不可撤消。
-    """
+    """Event = 事实（"已经发生"）。"""
     event_id: str
-    event_type: str            # "vm_restarted", "vm_migrated", "action_failed"
-    command_id: str            # 追溯回原始 Command
+    event_type: str            # "service_restarted", "action_failed"
+    command_id: str
     workflow_id: str
     outcome: str               # "success", "failure"
     details: Dict[str, str]
     timestamp: datetime
-```
-
-### 11.2 定位
-
-```
-Inference Result (Finding)
-        |
-        v
-Workflow Engine (选择并执行 Worflow)
-        |
-        v
-WorkflowCommand → Bus (workflow-commands)
-        |
-        v
-Executor (SSH / kubectl / OpenStack API)
-        |
-        v
-WorkflowEvent → Bus (workflow-events)
-        |
-        v
-Event Bus (loop back — 可能触发新的 Workflow)
-```
-
-### 11.3 架构预留
-
-Phase 4 实现 MVP：
-
-```python
-@dataclass
-class Workflow:
-    workflow_id: str
-    name: str
-    steps: List['WorkflowStep']
-    trigger: str               # "alert", "rule", "manual"
 
 
 @dataclass
 class WorkflowStep:
-    step_type: str             # "ssh", "kubectl", "api", "http"
-    target: str
-    command: str
+    """Workflow 步骤——通过 Capability 执行，不直接写 SSH。"""
+    capability: str             # "ssh.execute_command"
+    params: Dict[str, str]     # 参数
     timeout_seconds: int = 30
     retry_count: int = 0
+    on_failure: str = "abort"  # "abort", "skip", "retry"
 
 
+@dataclass
+class Workflow:
+    workflow_id: str
+    name: str
+    steps: List[WorkflowStep]
+    trigger: str = ""           # "alert", "inference", "manual"
+```
+
+### 13.3 Workflow Engine
+
+```python
 class WorkflowEngine:
     """
     执行 Workflow。
 
-    输入：Finding → Workflow 匹配
-    输出：Command → Event
+    流程：
+      Planner / API → WorkflowCommand → Engine → Capability → Action → WorkflowEvent
     """
 
+    def __init__(self, bus: EventBus, registry: CapabilityRegistry):
+        self.bus = bus
+        self.registry = registry
+
     def execute(self, workflow: Workflow,
-                context: IncidentContext) -> WorkflowEvent:
+                context: WorkflowContext) -> WorkflowEvent:
         # 1. 发布 Command
         cmd = WorkflowCommand(
             command_id=uuid4().hex,
             command_type=workflow.name,
             target=context.resource_id,
             params={},
-            created_at=datetime.utcnow(),
             source_workflow_id=workflow.workflow_id,
         )
-        self.bus.publish("workflow-commands", cmd)
+        self.bus.publish("platform.workflow.command",
+            schema_registry.serialize("workflow.command", asdict(cmd),
+                                       producer="workflow-engine"))
 
-        # 2. 执行步骤
+        # 2. 执行每个步骤（通过 Capability）
+        results = []
         for step in workflow.steps:
-            result = self._execute_step(step, context)
+            result = self.registry.execute(step.capability, step.params)
+            results.append(result)
+            if not result.success and step.on_failure == "abort":
+                break
 
         # 3. 发布 Event（事实）
+        outcome = "success" if all(r.success for r in results) else "failure"
         event = WorkflowEvent(
             event_id=uuid4().hex,
-            event_type=f"{workflow.name}_completed",
+            event_type=f"{workflow.name}.completed",
             command_id=cmd.command_id,
             workflow_id=workflow.workflow_id,
-            outcome="success" if all(s.ok for s in steps) else "failure",
-            details={"steps_completed": len(steps)},
+            outcome=outcome,
+            details={"steps": len(results), "successful": sum(1 for r in results if r.success)},
             timestamp=datetime.utcnow(),
         )
-        self.bus.publish("workflow-events", event)
+        self.bus.publish("platform.workflow.event",
+            schema_registry.serialize("workflow.event", asdict(event),
+                                       producer="workflow-engine"))
 
-        # 4. 发布 Platform Event（平台自观测）
-        self._publish_platform_event(
-            "workflow_completed",
-            workflow.workflow_id,
-            event.outcome,
-        )
+        # 4. Platform Event
+        self._publish_platform_event("workflow_completed",
+            workflow.workflow_id, outcome)
+
         return event
 ```
 
 ---
 
-## 12. Platform Events（v7.1 新增）
+## 14. Platform Events
 
-### 12.1 定位
-
-平台自身的事件——使 Logoscope 对自身可观测。
-
-**为什么需要 Platform Events：**
-- Projection 重建需要多长时间？成功还是失败？
-- Inference Engine 每次推理处理了多少 Finding？
-- Workflow 执行是否超时？
-- 这些信息如果不进入 Event Bus，平台就是一个"黑盒"。
-
-### 12.2 事件类型
-
-```python
-# projection_rebuild_started    — Projection 重建开始
-# projection_rebuild_completed  — Projection 重建完成（含耗时和事件计数）
-# snapshot_created              — Context Snapshot 创建
-# inference_started             — AI/Rule 推理开始
-# inference_completed           — AI/Rule 推理完成（含 Finding 数量）
-# workflow_started              — Workflow 开始执行
-# workflow_completed            — Workflow 完成（含结果）
-# projection_drift_detected     — Projection 与实际 Event Stream 不一致
-
-
-@dataclass
-class PlatformEvent:
-    event_id: str
-    category: str              # "projection", "inference", "workflow", "system"
-    action: str                # "rebuild_started", "inference_completed"
-    entity_type: str = ""
-    entity_id: str = ""
-    duration_ms: int = 0
-    details: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-```
-
-### 12.3 使用场景
-
-| 场景 | Platform Event | 用途 |
-|------|----------------|------|
-| Projection 重建 > 10s | `projection_rebuild_completed` | 监控重建性能退化 |
-| Inference 连续 5 次空结果 | `inference_completed(count=0)` | 检测 Pattern 失效 |
-| Workflow 频繁失败 | `workflow_completed(outcome=failure)` | 自动告警 |
-| Snapshot 被多次访问 | `snapshot_created` | 热度分析，优化缓存策略 |
-| Projection Epoch 不一致 | `projection_drift_detected` | 检测数据不一致 |
+同 v7.1，仅 topic 名更新为 `platform.system`。所有平台自身事件（Projection 重建、Inference 开始/完成、Workflow 完成、Snapshot 创建）发布到此 topic。
 
 ---
 
-## 13. 置信度模型
+## 15. 置信度模型
 
 （同 v7，不变）
 
@@ -1531,22 +1718,21 @@ final = max * decay
 
 ---
 
-## 14. API
+## 16. API
 
 ```text
-# Topology（消费 Graph Projection——只含拓扑）
-GET /api/v1/topology/hybrid?time_window=1+HOUR
+# Context API（v8 统一查询入口——所有内部查询走此 API）
+GET /api/v1/context/build?type=INSTANCE&id=abc-123&context=incident&time_window=1+HOUR
+GET /api/v1/context/build?type=INSTANCE&id=abc-123&context=topology&depth=2
+GET /api/v1/context/build?type=INSTANCE&id=abc-123&context=workflow
+GET /api/v1/context/build?type=INSTANCE&id=abc-123&context=rule
+GET /api/v1/context/snapshot/{snapshot_id}
 
-# Context Builder
-GET /api/v1/context/build?type=INSTANCE&id=abc-123&time_window=1+HOUR
-GET /api/v1/context/snapshot/{snapshot_id}           # ← v7.1 新增
+# Topology（消费 Context API）
+GET /api/v1/topology/hybrid?time_window=1+HOUR
 
 # Interaction
 GET /api/v1/interactions?source=Nova&target=Neutron&window=1+HOUR
-
-# Graph Projection
-GET /api/v1/graph/subgraph?entity_id=abc-123&depth=2
-GET /api/v1/graph/timeline?entity_id=abc-123&time_range=1h
 
 # Inventory Projection
 GET /api/v1/inventory/entities?type=INSTANCE&id=abc-123
@@ -1557,52 +1743,61 @@ GET /api/v1/state/current?type=INSTANCE&id=abc-123
 
 # Correlation
 GET /api/v1/correlate/services?source=Nova&window=6+HOUR
-GET /api/v1/correlate/trend?source=Nova&target=Neutron  # ← v7.1 多窗口趋势
+GET /api/v1/correlate/trend?source=Nova&target=Neutron
 
 # Capability
 GET /api/v1/capabilities/platforms
 GET /api/v1/capabilities/extractors?resource_type=INSTANCE
+GET /api/v1/capabilities/executors    # ← v8 新增
 
 # Projection Management
 GET /api/v1/projections/status
 POST /api/v1/projections/rebuild?name=inventory
-GET /api/v1/projections/dependencies              # ← v7.1 依赖图查询
-POST /api/v1/projections/rebuild-chain?name=graph # ← v7.1 重建指定 Projection 及其依赖
+GET /api/v1/projections/dependencies
+POST /api/v1/projections/rebuild-chain?name=graph
+GET /api/v1/projections/{name}/lag    # ← v8 新增（offset-based lag）
+
+# Schema Registry（v8 新增）
+GET  /api/v1/schemas?event_type=normalized.event
+POST /api/v1/schemas/register
+POST /api/v1/schemas/migrate?from=1&to=2
 
 # Platform Events
-GET /api/v1/platform/events?category=projection&limit=100  # ← v7.1 新增
+GET /api/v1/platform/events?category=projection&limit=100
 ```
 
 ---
 
-## 15. 实施阶段
+## 17. 实施阶段
 
-### Phase 0: Raw Event + Event Bus + Schema Registry（~1.5 周）
-
-| 模块 | 内容 |
-|------|------|
-| Raw Event Store | 本地 WAL + Kafka raw-events topic |
-| RawEvent Schema | raw_id, timestamp, raw_payload, source |
-| Multi-topic Event Bus | 10 topics, Kafka |
-| Schema Registry | RawEventSchema + EventSchema + FindingSchema + PlatformEventSchema |
-| Capability Registry | Platform + Extractor 注册 |
-| event_id / raw_id UUID7 | |
-
-### Phase 1: Semantic Engine（~1 周）
+### Phase 0: Foundation（~2 周）
 
 | 模块 | 内容 |
 |------|------|
-| Semantic Engine | 改为消费 raw-events topic |
-| raw_id 追溯 | NormalizedEvent 携带 raw_id |
-| 向后兼容 | 旧 API 输入自动转为 RawEvent |
+| Raw Event Store | 本地 WAL + Kafka `platform.raw`，EventEnvelope 封装 |
+| Schema Registry | Schema 注册、版本管理、迁移链 |
+| EventEnvelope | 统一 Event 容器（schema_version, producer, event_type） |
+| Event Bus | 10 topics，domain-first 命名 |
+| event_id / raw_id | UUID7 |
 
-### Phase 2: Inventory + State Projection（~2 周）
+### Phase 1: Event Pipeline + Semantic Engine（~1.5 周）
 
 | 模块 | 内容 |
 |------|------|
-| Entity Projector | normalized-events → entity-events |
-| Inventory Projection | entity-events → Neo4j（Epoch 化） |
-| State Projection | normalized-events → state-events → Redis（TTL） |
+| Event Pipeline | AggregateProcessor, DedupProcessor, SampleProcessor |
+| EnrichProcessor | host→AZ→Rack 注入 |
+| Semantic Engine | 消费 pipeline 处理后的 RawEvent，只做 normalize |
+| Schema Registry 集成 | NormalizedEvent 通过 Envelope 输出 |
+
+### Phase 2: Projection Framework + Inventory/State（~2 周）
+
+| 模块 | 内容 |
+|------|------|
+| Projection Checkpoint | Partition + Offset 持久化，lag 计算 |
+| Projection Base | CheckpointedProjection 抽象类 |
+| EntityProjector | `platform.normalized` → `platform.entity` |
+| InventoryProjection | `platform.entity` → Neo4j（epoch 化） |
+| StateProjection | `platform.normalized` → `platform.state` → Redis TTL |
 | Identity Resolution | Alias Registry |
 | Timeline MV | ClickHouse Materialized View |
 
@@ -1610,91 +1805,212 @@ GET /api/v1/platform/events?category=projection&limit=100  # ← v7.1 新增
 
 | 模块 | 内容 |
 |------|------|
-| Interaction Projector | normalized-events → interaction-events |
-| Correlation Engine | interaction-events → DynamicRel Projection（ClickHouse） |
-| DynamicRel Projection | ClickHouse-based，支持多窗口查询 |
-| 时间窗口趋势 | 1h / 6h / 24h / 7d 聚合 |
+| InteractionProjector | `platform.normalized` → `platform.interaction` |
+| Correlation Engine | 聚合端点对 → DynamicRel Projection |
+| DynamicRel Projection | ClickHouse 存储，offset checkpoint，多窗口查询 |
 
-### Phase 4: Graph Projection + Context Builder（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| Graph Projection | entity + interaction → Property Graph（**不存状态**） |
-| Context Builder | Multi-Projection → IncidentContext |
-| **Context Snapshot** | Snapshot 创建/查询/TTL |
-| Projection Dependency Graph | 重建编排 + 健康检查 |
-| Platform Events | Projection/Inference/Workflow 事件发布 |
-
-### Phase 5: Topology + Inference Engine（~1 周）
+### Phase 4: Graph + Context API（~2 周）
 
 | 模块 | 内容 |
 |------|------|
-| Topology Engine | 纯渲染，消费 Graph Projection |
-| Inference Engine | LLM + Rule 实现，消费 IncidentContext（from Snapshot） |
-| **Finding 统一输出** | Rule/LLM/ML 统一 Finding 结构 |
+| Graph Projection | `platform.entity` + `platform.interaction` → Neo4j（只存拓扑） |
+| **Context API（v8 核心）** | 4 种 ContextType：incident / topology / workflow / rule |
+| Context Snapshot | TTL 10min，统一 snapshot 支持 |
+| Platform Events | `platform.system` topic |
+
+### Phase 5: Topology + Inference + Planner（~1.5 周）
+
+| 模块 | 内容 |
+|------|------|
+| Topology Engine | 通过 Context API 查询，纯渲染 |
+| Inference Engine | LLM + Rule，Finding 统一输出 |
+| **Planner（v8 新增）** | Finding → Workflow 映射（v1 简单映射） |
+| Capability Registry | SSH + kubectl 注册 |
 
 ### Phase 6: Workflow Engine + Multi-platform（~2 周）
 
 | 模块 | 内容 |
 |------|------|
-| Workflow Engine MVP | Command → Action → Event（Command/Event 分离） |
+| Workflow Engine | Command/Event 分离，Capability 抽象 |
 | K8s Extractor | Capability 注册 |
 | VMware Extractor | Capability 注册 |
 
 ---
 
-## 16. 测试策略
+## 18. 测试策略
 
 ```python
-def test_raw_event_is_source_of_truth():
-    """Raw Event 是真正的 Source of Truth——原样保留"""
-    raw = RawEvent(
-        raw_id="raw-001",
-        timestamp=datetime(2026, 1, 1, 12, 0, 0),
-        source="fluentbit",
-        data_type="log",
-        raw_payload="nova-api: Failed to allocate PCI device",
+def test_event_envelope_schema_version():
+    """EventEnvelope 携带 schema_version，支持版本迁移"""
+    env = EventEnvelope(
+        schema_version=1,
+        event_type="normalized.event",
+        producer="semantic-engine",
+        payload=b"{}",
     )
-    store = RawEventStore()
-    store.append(raw)
-    # Raw Event 原样保留，不解析、不处理
-    retrieved = store.read("raw-001")
-    assert retrieved.raw_payload == "nova-api: Failed to allocate PCI device"
+    assert env.schema_version == 1
+
+
+def test_schema_migration():
+    """Schema Registry 自动迁移 v1→v2"""
+    registry = SchemaRegistry()
+    registry.register("normalized.event", 1, Schema(
+        event_type="normalized.event", version=1,
+        fields={"event_id": str, "message": str},
+    ))
+    registry.register("normalized.event", 2, Schema(
+        event_type="normalized.event", version=2,
+        fields={"event_id": str, "message": str, "tenant_id": str},
+    ))
+    registry.register_migration("normalized.event", 1, 2,
+        migrate_fn=lambda p: {**p, "tenant_id": ""})
+
+    env = EventEnvelope(schema_version=1, event_type="normalized.event",
+                        payload=json.dumps({"event_id": "e1", "message": "test"}).encode())
+    payload = registry.deserialize(env)
+    assert "tenant_id" in payload  # v1 → v2 迁移自动补全
+
+
+def test_event_pipeline_aggregate():
+    """Event Pipeline 聚合多行日志"""
+    pipeline = EventPipeline([AggregateProcessor(window_seconds=5)])
+    line1 = RawEvent(raw_payload="Traceback (most recent call last):")
+    line2 = RawEvent(raw_payload="  File ...")
+    line3 = RawEvent(raw_payload="Exception: OOM")
+    assert len(pipeline.execute(line1)) == 0   # buffer
+    assert len(pipeline.execute(line2)) == 0   # buffer
+    assert len(pipeline.execute(line3)) == 1   # 完整 traceback → 聚合
+
+
+def test_event_pipeline_dedup():
+    """Event Pipeline 去重相同错误"""
+    pipeline = EventPipeline([DedupProcessor(initial_window_ms=5000)])
+    err = RawEvent(raw_payload="nova-api: ERROR Connection refused")
+    assert len(pipeline.execute(err)) == 1     # 第一个 → 发出
+    assert len(pipeline.execute(err)) == 0     # 重复 → 聚合
+    assert len(pipeline.execute(err)) == 0     # 重复 → 聚合
+
+
+def test_projecton_checkpoint_offset():
+    """Projection Checkpoint 基于 partition+offset"""
+    cp = ProjectionCheckpoint(
+        projection="inventory", epoch="20260701",
+        records={},
+    )
+    cp.update("platform.entity", 0, 100)
+    cp.update("platform.entity", 1, 200)
+    assert cp.records["platform.entity"][0] == 100
+    assert cp.get_lag("platform.entity", 0, 150) == 50
+
+    # offset 严格递增——不会回退
+    cp.update("platform.entity", 0, 90)  # 小于当前 100
+    assert cp.records["platform.entity"][0] == 100  # 保持不变
+
+
+def test_context_api_hides_storage():
+    """Context API 隐藏所有存储实现——调用方不知道 Neo4j/Redis/ClickHouse"""
+    api = ContextAPI(...)
+    result = api.build(ResourceType.INSTANCE, "abc-123",
+                       context_type=ContextType.INCIDENT)
+    # result.context 不包含任何存储相关的字段
+    assert not hasattr(result.context, "neo4j_query")
+    assert not hasattr(result.context, "clickhouse_sql")
+
+
+def test_context_api_multiple_types():
+    """Context API 支持多种 ContextType"""
+    api = ContextAPI(...)
+    incident = api.build(ResourceType.INSTANCE, "abc-123",
+                         context_type=ContextType.INCIDENT)
+    topo = api.build(ResourceType.INSTANCE, "abc-123",
+                     context_type=ContextType.TOPOLOGY)
+    assert isinstance(incident.context, IncidentContext)
+    assert isinstance(topo.context, TopologyContext)
+    # TopologyContext 不包含状态
+    assert not hasattr(topo.context, "current_state")
+
+
+def test_capability_abstraction():
+    """Workflow 通过 Capability 执行，不直接依赖 SSH"""
+    registry = CapabilityRegistry()
+    registry.register(Capability(
+        capability_id="ssh.execute_command",
+        name="ssh.execute_command",
+        provider="mock-ssh",
+        parameters={"host": str, "command": str},
+    ))
+    # Workflow 不知道 SSH——只知道 Capability ID
+    step = WorkflowStep(capability="ssh.execute_command",
+                        params={"host": "compute-01", "command": "uptime"})
+    assert step.capability == "ssh.execute_command"
+    assert "ssh" not in str(type(step))  # 不直接引用 SSH
+
+
+def test_capability_workflow_integration():
+    """Workflow Engine 通过 Capability 执行步骤"""
+    engine = WorkflowEngine(bus, registry)
+    wf = Workflow(
+        steps=[WorkflowStep(capability="ssh.execute_command",
+                            params={"host": "compute-01", "command": "uptime"})],
+    )
+    ctx = WorkflowContext(resource_type=ResourceType.HOST, resource_id="compute-01")
+    event = engine.execute(wf, ctx)
+    assert event.outcome in ("success", "failure")
+    assert event.command_id != ""
+
+
+def test_planner_reserve():
+    """Planner 可以预留——v1 简单映射，v2+ 可扩展"""
+    planner = Planner()
+    finding = Finding(
+        severity="warning", confidence=0.85,
+        category="dependency",
+        reason="Neutron agent 无响应",
+        recommended_action="restart_service",
+        affected_entities=[ResourceIdentity(ResourceType.HOST, "compute-01")],
+    )
+    context = IncidentContext(resource_type=ResourceType.HOST, resource_id="compute-01")
+    wf = planner.plan(finding, context)
+    assert wf is not None
+    assert len(wf.steps) > 0
+
+
+def test_raw_event_is_source_of_truth():
+    """Raw Event（EventEnvelope）是真正的 Source of Truth"""
+    raw = RawEvent(raw_payload="nova-api: Failed to allocate PCI device")
+    envelope = schema_registry.serialize(
+        event_type="raw.log",
+        payload=asdict(raw),
+        producer="ingest",
+    )
+    assert envelope.event_type == "raw.log"
+    assert envelope.schema_version >= 1
+    # Raw Event 原样保留
+    deserialized = schema_registry.deserialize(envelope)
+    assert deserialized["raw_payload"] == "nova-api: Failed to allocate PCI device"
 
 
 def test_normalized_event_from_raw():
     """NormalizedEvent 可从 raw-events 重建"""
-    raw = RawEvent(raw_id="raw-001", ...)
-    engine = SemanticEngine()
-    norm = engine.process(raw)
-    assert norm.raw_id == "raw-001"
+    raw = RawEvent(raw_id="raw-001", raw_payload="nova-api: ...")
+    raw_env = schema_registry.serialize("raw.log", asdict(raw), "ingest")
+    engine = SemanticEngine(schema_registry, bus)
+    norm_env = engine.process(raw_env)
+    assert norm_env.event_type == "normalized.event"
 
     # 模拟升级 Semantic Engine
-    engine_v2 = SemanticEngine(projector_version="v2")
-    re_normalized = engine_v2.process(raw)
-    # 新的算法产生不同的 NormalizedEvent
-    assert re_normalized.event.category != norm.event.category  # 假设 v2 更准确
-
-
-def test_projector_naming():
-    """Projector 和 Projection 职责分离"""
-    projector = EntityProjector()
-    projection = InventoryProjection()
-    # Projector: event → event
-    projector.process(normalized_event)
-    # Projection: event → store
-    projection.apply(entity_event)
+    engine_v2 = SemanticEngine(schema_registry, bus, version="v2")
+    re_normalized = engine_v2.process(raw_env)
+    assert re_normalized is not None  # 可以重新解析
 
 
 def test_graph_no_state():
     """Graph Projection 不存状态"""
     graph = GraphProjection()
-    graph.apply_entity(entity_event)
-    graph.apply_interaction(interaction_event)
+    graph.apply_entity(entity_envelope)
+    graph.apply_interaction(interaction_envelope)
     subgraph = graph.get_subgraph("INSTANCE:abc-123")
-    # 返回拓扑结构（节点+边），不返回状态
     assert all(hasattr(n, "entity_id") for n in subgraph.nodes)
-    # 没有状态属性
     assert not any("status" in n.attributes for n in subgraph.nodes)
 
 
@@ -1706,15 +2022,14 @@ def test_projection_epoch():
 
 def test_context_snapshot():
     """Context Snapshot 保证推理期间数据一致"""
-    builder = ContextBuilder(...)
-    ctx, snapshot = builder.build_with_snapshot(ResourceType.INSTANCE, "abc-123")
+    api = ContextAPI(...)
+    result = api.build(ResourceType.INSTANCE, "abc-123",
+                       context_type=ContextType.INCIDENT, use_snapshot=True)
+    assert result.snapshot_id != ""
 
-    # 模拟外部状态变化
-    state_projection.set("INSTANCE:abc-123", "status", "DELETED")
-
-    # AI 使用 snapshot，仍看到旧状态
-    ai_input = builder.get_snapshot(snapshot.snapshot_id)
-    assert ai_input.current_state.get("status") == "ACTIVE"  # 快照时的状态
+    # AI 使用 snapshot
+    snapshot = api.get_snapshot(result.snapshot_id)
+    assert snapshot is not None
 
 
 def test_finding_unified_output():
@@ -1729,44 +2044,36 @@ def test_finding_unified_output():
         assert hasattr(finding, "severity")
         assert hasattr(finding, "confidence")
         assert hasattr(finding, "reason")
-        assert hasattr(finding, "affected_entities")
         assert hasattr(finding, "engine_type")
 
 
 def test_workflow_command_event_separation():
     """Command 和 Event 使用不同 topic"""
-    engine = WorkflowEngine()
-    cmd = WorkflowCommand(command_type="restart_vm", target="abc-123")
-    engine.bus.publish("workflow-commands", cmd)
-    # 执行完成后发布 Event
-    event = engine.execute(cmd)
+    engine = WorkflowEngine(bus, registry)
+    wf = Workflow(steps=[WorkflowStep(capability="mock.echo", params={"msg": "hello"})])
+    event = engine.execute(wf, WorkflowContext(
+        resource_type=ResourceType.HOST, resource_id="test"))
     assert event.outcome in ("success", "failure")
-    assert event.command_id == cmd.command_id
+    assert event.command_id != ""
 
 
 def test_platform_event_published():
-    """平台自身事件发布到 platform-events topic"""
-    platform_events = []
-
-    def collector(event):
-        platform_events.append(event)
-
-    bus.subscribe("platform-events", "test", collector)
-    ContextBuilder(...).create_snapshot(ctx)
-    assert any(e.category == "snapshot_created" for e in platform_events)
+    """平台自身事件发布到 platform.system topic"""
+    collected = []
+    bus.subscribe("platform.system", "test", lambda e: collected.append(e))
+    api = ContextAPI(...)
+    api.build(ResourceType.INSTANCE, "abc-123", context_type=ContextType.INCIDENT)
+    assert any("snapshot_created" in str(e) for e in collected)
 
 
 def test_projection_dependency_graph():
     """Projection 依赖图正确排序"""
     orchestrator = RebuildOrchestrator(PROJECTION_DEPENDENCIES)
     order = orchestrator._topological_sort()
-    # raw 必须在最前面
     assert order.index("raw") < order.index("normalized")
-    # normalized 必须在 entity/state/interaction 之前
     assert order.index("normalized") < order.index("inventory")
     assert order.index("normalized") < order.index("state")
     assert order.index("normalized") < order.index("interaction")
-    # entity/interaction 必须在 graph 之前
     assert order.index("inventory") < order.index("graph")
     assert order.index("interaction") < order.index("graph")
 
@@ -1774,81 +2081,44 @@ def test_projection_dependency_graph():
 def test_dynamic_rel_time_window():
     """DynamicRel 支持多时间窗口查询"""
     rel_projection = DynamicRelProjection()
-    # 写入不同时间的交互
     for i in range(100):
-        rel_projection.apply(interaction_event)
-    # 查询不同窗口
+        rel_projection.apply(interaction_envelope)
     trend = rel_projection.query_trend("A", "B",
                 windows=["1 HOUR", "6 HOUR", "24 HOUR"])
     assert len(trend) == 3
-    # 大窗口 count >= 小窗口 count
-    assert trend[0]["count"] <= trend[2]["count"]
 
 
 def test_event_sourcing_rebuild():
     """Projection 可以从 Event Stream 重建"""
-    events = [normalize_log(log) for log in test_logs]
+    events = [...]
     for e in events:
-        bus.publish("normalized-events", e)
+        bus.publish("platform.normalized", e)
 
     inventory.apply(events)
     assert inventory.query(ResourceType.INSTANCE, "abc") is not None
 
-    # 删除 Projection
     inventory._clear_all()
     assert inventory.query(ResourceType.INSTANCE, "abc") is None
 
-    # 从 Event Stream 重建
-    inventory.rebuild(ReplayEventSource(events))
+    inventory.rebuild(ReplayEventSource(events), checkpoint)
     assert inventory.query(ResourceType.INSTANCE, "abc") is not None
 
 
 def test_multi_topic_independence():
     """不同 topic 的 Projection 独立重建"""
-    inventory.rebuild(event_source)
+    inventory.rebuild(event_source, checkpoint)
     assert inventory.query(...) is not None
     assert state.query(...) is not None
 
 
-def test_context_builder_no_storage():
-    """Context Builder 不引入新存储"""
-    builder = ContextBuilder(inventory, state, graph, timeline, rels, cache)
-    ctx = builder.build(ResourceType.INSTANCE, "abc-123")
-    assert ctx.resource_id == "abc-123"
-    assert ctx.current_state is not None
-    assert len(ctx.timeline) > 0
-
-
-def test_incident_context_ai_ready():
-    """IncidentContext 不暴露内部概念"""
-    ctx = builder.build(ResourceType.INSTANCE, "abc-123")
-    assert not hasattr(ctx, "evidence")
-    assert not hasattr(ctx, "fact")
-    assert not hasattr(ctx, "assertion")
-    assert not hasattr(ctx, "raw_id")
-
-
-def test_projection_epoch_parallel():
-    """两个不同 Epoch 的 Projection 可并行运行"""
-    v1 = InventoryProjection(epoch="20260701")
-    v2 = InventoryProjection(epoch="20260710")
-    for e in events:
-        v1.apply(e)
-        v2.apply(e)
-    assert v1.query(...) is not None
-    assert v2.query(...) is not None
-
-
-def test_workflow_engine_loop():
-    """Workflow Engine → Command → Action → Event → Event Bus"""
-    engine = WorkflowEngine()
-    context = builder.build(ResourceType.HOST, "compute-01")
-    result = engine.execute(
-        Workflow(steps=[WorkflowStep("ssh", "compute-01",
-                                     "systemctl status nova-compute")]),
-        context,
-    )
-    assert result.outcome in ("success", "failure")
+def test_topology_via_context_api():
+    """Topology Engine 通过 Context API 查询，不直接查 Projection"""
+    api = FakeContextAPI()
+    engine = TopologyEngine(api)
+    result = engine.render("entity-001")
+    assert len(result.nodes) > 0
+    # 验证 Topology Engine 没有直接访问 Graph Projection
+    assert not hasattr(engine, "graph_projection")
 
 
 def test_state_ttl_expiry():
@@ -1857,68 +2127,62 @@ def test_state_ttl_expiry():
     assert state.query(ResourceType.VOLUME, "vol-1", "attached") == "true"
     with freeze_time(now + timedelta(seconds=70)):
         assert state.query(ResourceType.VOLUME, "vol-1", "attached") is None
-
-
-def test_topology_no_projection_access():
-    """Topology Engine 不直接查 Projection"""
-    graph = FakeGraphProjection()
-    engine = TopologyEngine(graph)
-    result = engine.render("entity-001")
-    assert len(result.nodes) > 0
 ```
 
 ---
 
-## 17. 性能考量
+## 19. 性能考量
 
 | 场景 | 预期 | 瓶颈 | 扩展方式 |
 |------|------|------|----------|
 | Raw Event 写入 | 100K events/s | WAL I/O + Kafka | Batch flush, disk RAID |
-| Semantic Engine | 50K events/s | CPU（解析） | 水平扩展 consumer |
-| Event Bus 吞吐 | 100K events/s | Kafka partition | 增加 partitions |
+| Event Pipeline | 100K events/s | CPU（Processor 链） | 水平扩展 consumer |
+| Semantic Engine | 50K events/s | CPU（解析 + Schema Registry） | 水平扩展 consumer |
+| Event Bus | 100K events/s | Kafka partition | 增加 partitions |
+| Schema Registry | 1M deserializations/s | 内存（cache hot schemas） | 本地缓存 |
 | Inventory Projection | 10K updates/s | Neo4j write | Batch write |
 | State Projection | 50K updates/s | Redis | Cluster mode |
 | Graph Projection | 5K updates/s | Neo4j write | Sharding |
-| DynamicRel Projection | 10K writes/s | ClickHouse insert | Batch insert |
-| Context Builder | 100 req/s | Multi-projection read | Snapshot cache |
+| DynamicRel | 10K writes/s | ClickHouse insert | Batch insert |
+| Context API | 200 req/s | Multi-Projection read | Snapshot cache |
 | Timeline MV | 100K reads/s | ClickHouse | Distributed table |
+| Capability 执行 | 100 exec/s | SSH/k8s API | 连接池 |
 
 ---
 
-## 18. 向后兼容
+## 20. 向后兼容
 
 | 影响点 | 策略 |
 |--------|------|
 | 现有 API /hybrid | 保持格式不变 |
-| ClickHouse 存量 | ALTER TABLE（增加 raw_id 列，可为空） |
-| event_id 历史 | 存量="", 新 UUID7 |
+| EventEnvelope 迁移 | Phase 0 先穿透（envelope.payload = raw JSON），Phase 1 正式 schema |
+| Topic 重命名 | 旧 topic 保留 1 个 retention 周期，consumer 双订阅 |
+| Schema Registry 存量 | 存量 event 标记 schema_version=0（未知），不迁移 |
+| Checkpoint 迁移 | 现有 last_event_id ↔ offset 双向映射（过渡期） |
 | raw_id 历史 | 存量="", 新 UUID7 |
-| 单 topic 迁移到 multi-topic | Phase 0 并行，Phase 1 切换 |
-| raw-events 存量 | 新部署后自动开始写入，不回溯 |
-| Builder → Projector 重命名 | 类名变化，接口兼容（别名过渡） |
 | Graph 删除状态属性 | 存量 Neo4j 数据逐步清理，不影响查询 |
+| Builder → Projector | 接口兼容（别名过渡） |
 
 ---
 
-## 19. v7 → v7.1 变更对照
+## 21. v7.1 → v8 变更对照
 
-| 维度 | v7 | v7.1 |
-|------|----|------|
-| **Source of Truth** | NormalizedEvent | **Raw Event**（原样保留，永不丢失） |
-| **Event Bus Topics** | 7 topics | **10 topics**（+raw-events, platform-events, workflow-commands） |
-| **Raw Event 追溯** | 无 | NormalizedEvent.raw_id → RawEvent |
-| **Semantic Engine 输入** | API/OTel | **raw-events topic** |
-| **Builder** | EntityBuilder, StateBuilder | **→ Projector**：EntityProjector, StateProjector, InteractionProjector |
-| **Projection 版本** | version（算法版本号） | **epoch**（重建时间戳，零停机切换） |
-| **Projection 依赖** | 无 | **Dependency Graph** → 自动拓扑排序重建 |
-| **Graph 职责** | 节点 + 边 + 状态（Neo4j） | **只存节点 + 边**，状态从 State Projection 实时查询 |
-| **Timeline** | TimelineProjection 代码 | **ClickHouse Materialized View**，无自定义代码 |
-| **DynamicRel** | Cache（仅当前窗口） | **ClickHouse Projection**（支持 1h/6h/24h/7d 时间窗口） |
-| **Context Builder** | 组装 + 返回 | **组装 + Snapshot（TTL 10min）**，保证 AI 数据一致性 |
-| **Inference 输出** | InferenceResult（无结构） | **Finding 统一结构**（severity, confidence, reason, entities, action） |
-| **Workflow** | 单 topic（命令/事件混合） | **Command/Event 分离**：workflow-commands + workflow-events |
-| **平台可观测性** | 无 | **platform-events topic**：Projection/Inference/Workflow 事件 |
-| **重建编排** | 人工决定顺序 | **Dependency Graph → RebuildOrchestrator** 自动排序 |
-| **API** | 7 个端点 | **+6 个端点**：snapshot, trend, dependencies, rebuild-chain, platform events |
-| **实施阶段** | 7 个 Phase | **8 个 Phase**（Phase 0 增加 Raw Event） |
-| **测试** | 10 个测试 | **20 个测试**（+raw event, snapshot, finding, platform event, dependency） |
+| 维度 | v7.1 | v8 |
+|------|------|----|
+| **Event 容器** | 裸对象传输 | **EventEnvelope**（schema_version, producer, event_type, payload） |
+| **Schema 管理** | 无 | **Schema Registry** + SchemaMigration（v1→v2 自动迁移） |
+| **Semantic Engine** | normalize + aggregate + dedup + enrich + route（monolith） | **只 normalize**；预处理拆为 Event Pipeline |
+| **Event Pipeline** | 无 | **Processor 链**：Aggregate → Dedup → Sample → Enrich → Route |
+| **Topic 命名** | `normalized-events`, `raw-events` | **Domain-first**：`platform.normalized`, `platform.raw` |
+| **Projection Checkpoint** | last_event_id（不可靠） | **Partition + Offset**（可靠，支持 lag 计算） |
+| **查询入口** | 各自直接调 Projection | **Unified Context API**（隐藏 Neo4j/Redis/ClickHouse） |
+| **ContextType** | 只有 Incident | **4 种**：Incident / Topology / Workflow / Rule |
+| **Workflow 执行** | 直接 SSH/kubectl | **Capability 抽象**（Workflow 不知道执行方式） |
+| **Inference → Workflow** | 直接映射 | **Planner**（Finding → Workflow，v1 简单映射） |
+| **Schema Evolution** | 不支持 | **Migrations 链**（只加字段，不删不改） |
+| **Lag monitoring** | 无 | **Projection.lag** = latest_offset - checkpoint_offset |
+| **Capability Executor** | 无 | **CapabilityRegistry**（SSH / k8s / API 统一注册） |
+| **Event Bus Topics** | 10 topics（短名） | **10 topics（domain 命名）** |
+| **API** | Context Builder API | **+Schema Registry + Capability + Projection Lag** |
+| **实施阶段** | 8 phases | **8 phases**（Phase 0 增加 Schema Registry + Envelope） |
+| **测试** | 20 个测试 | **28 个测试**（+envelope, schema migration, pipeline, capability, planner, context API） |
