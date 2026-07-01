@@ -63,6 +63,7 @@ class TestConfidenceQuality:
                 "target": "payment",
                 "metrics": {
                     "data_source": "traces",
+                    "data_sources": ["traces"],
                     "call_count": 20,
                     "error_rate": 0.05,
                     "p95": 240,

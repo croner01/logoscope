@@ -158,6 +158,12 @@ class HybridTopologyBuilder:
         self._traces_source_cluster_exists_cache: Optional[bool] = None
         self._metrics_source_cluster_exists_cache: Optional[bool] = None
 
+        # hash 采样率 — 控制推断边日志采样比例，默认 20 = ~20% 确定性采样
+        self.HASH_SAMPLE_PERCENT = HybridTopologyBuilder._parse_env_int(
+            "TOPOLOGY_HASH_SAMPLE_PERCENT", 20,
+            minimum=1, maximum=100,
+        )
+
     @staticmethod
     def _parse_env_bool(name: str, default: bool) -> bool:
         return hybrid_utils.parse_env_bool(name, default)
@@ -1728,9 +1734,9 @@ class HybridTopologyBuilder:
         prewhere_clause = "PREWHERE " + " AND ".join(prewhere_conditions)
 
         # 使用 cityHash64 确定性采样替代滚动窗口采样，确保相邻 poll 之间推断边稳定。
-        # 每次查询命中相同的 ~20% 行，新数据只有 hash 命中的部分才进入样本，大幅降低抖动。
+        # 每次查询命中相同的 ~N% 行（由 TOPOLOGY_HASH_SAMPLE_PERCENT 控制），新数据只有 hash 命中的部分才进入样本，大幅降低抖动。
         HASH_SAMPLE_MOD = 100
-        HASH_SAMPLE_MIN = 20  # ~20% 确定性采样
+        HASH_SAMPLE_MIN = self.HASH_SAMPLE_PERCENT  # 确定性采样百分比
         query = f"""
         SELECT
             id,

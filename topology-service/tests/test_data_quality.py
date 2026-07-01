@@ -1,4 +1,8 @@
 """Tests for _compute_data_quality."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph.hybrid_topology import HybridTopologyBuilder
 
@@ -15,7 +19,7 @@ def test_data_quality_all_available():
     }
     logs_data = {"nodes": [{"id": "svc-a"}]}
     metrics_data = {"nodes": [{"id": "svc-a"}]}
-    dq = builder._compute_data_quality(traces_data, logs_data, metrics_data, [])
+    dq = builder._compute_data_quality(traces_data, logs_data, metrics_data, {}, [])
     assert dq["traces_available"] is True
     assert dq["logs_available"] is True
     assert dq["metrics_available"] is True
@@ -30,7 +34,7 @@ def test_data_quality_no_traces():
     logs_data = {"nodes": [{"id": "svc-a"}]}
     metrics_data = {"nodes": []}
     edges = [{"source": "a", "target": "b", "metrics": {"data_source": "inferred"}}]
-    dq = builder._compute_data_quality(traces_data, logs_data, metrics_data, edges)
+    dq = builder._compute_data_quality(traces_data, logs_data, metrics_data, {}, edges)
     assert dq["traces_available"] is False
     assert dq["logs_available"] is True
     assert dq["dimension_status"]["latency"] == "missing"
@@ -45,6 +49,7 @@ def test_data_quality_no_data_at_all():
         {"nodes": [], "edges": []},
         {"nodes": []},
         {"nodes": []},
+        {},
         [],
     )
     assert dq["traces_available"] is False
@@ -100,6 +105,6 @@ def test_data_quality_traces_no_duration():
     }
     logs_data = {"nodes": [{"id": "svc-a"}]}
     metrics_data = {"nodes": []}
-    dq = builder._compute_data_quality(traces_data, logs_data, metrics_data, [])
+    dq = builder._compute_data_quality(traces_data, logs_data, metrics_data, {}, [])
     assert dq["traces_available"] is True
     assert dq["dimension_status"]["latency"] == "missing"  # p99 is 0, durations are all 0

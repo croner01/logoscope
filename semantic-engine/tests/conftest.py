@@ -5,8 +5,15 @@ import sys
 import os
 import pytest
 
-# 添加项目根目录到Python路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 添加项目根目录到Python路径（使 shared_src 可导入）
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+# 添加 semantic-engine 目录到Python路径
+_semantic_engine_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _semantic_engine_root not in sys.path:
+    sys.path.insert(0, _semantic_engine_root)
 
 from normalize.normalizer import normalize_log, extract_service_name, extract_k8s_context
 from storage.adapter import StorageAdapter
