@@ -1,11 +1,10 @@
 # Logoscope Data Architecture v1 — AI Observability Operating System
 
-> **Event Sourcing + CQRS + Unified Context + Knowledge Feedback — 只有 Raw Event 是 Source of Truth。**
-> Event 携带全血缘链条。Context 带版本可重现。Inference 依赖 Context + Knowledge。Workflow 被 OPA Policy 约束。Capability 声明 Effect 和 Risk。Action 产生 Feedback 闭环学习。
+> **Event Sourcing + CQRS + Goal-Driven + Decision State Machine + Episode Learning**
 >
-> 定义完整的 **Observe → Understand → Decide → Act → Learn** 闭环。
+> Goal 描述目标状态（不是 Workflow）。WorldView 是组合式查询（不是 God Object）。Capability 用结构化表达式声明条件。Episode 记录完整决策路径。Orchestrator 编排生命周期。
 
-**Status:** Draft v10
+**Status:** Draft v15
 **Date:** 2026-07-01
 **Authors:** croner01, Claude
 
@@ -13,140 +12,138 @@
 
 ## 1. Problem
 
-### 1.1 当前架构的系统性瓶颈
+### 1.1 v14 的系统性问题
 
-v9 引入了 Event Lineage、Knowledge & Memory Store、Policy Engine、Feedback Loop 和 Versioned Projection，但仍有根本性问题：
+v14 引入了 Decision State Machine、WorldView、Episode Memory 和 Blast Radius Analyzer，但仍有根本性问题：
 
-**① Context 没有版本。**
-Finding 依赖 Context，Context 依赖特定 Epoch 的 Projection。Projection 重建后，Finding 可能变化。没有 `context_version` 就无法验证 Finding 是否可以重现。
+**① WorldView 正在变成 God Object。**
+`WorldView` 同时承担 Topology、State、History、Impact Estimate、Alarm 查询——10+ 方法挤在一个类里。Planner、RiskEngine、BlastRadiusAnalyzer 全部依赖它。后续会膨胀到 50+ 方法。
 
-**② Policy 用自定义 DSL。**
-v9 的 `Policy.condition: Callable` 需要自行维护 DSL 解析器，没有测试框架、没有版本管理、无法与行业标准集成。
+**② Goal 的语义是 Workflow，不是目标状态。**
+`GoalNode.action = "restart"`、`GoalNode.ordering = "sequential"`——这些是 Workflow 的概念。Goal 应该描述"什么状态应该达到"（RabbitMQ healthy），不是"怎么做"（restart、verify）。
 
-**③ Planner 只出一个方案。**
-一个 Finding 只有一个 Workflow。没有备选方案的比较（风险、成本、成功率），Policy Engine 只能在"执行/拒绝"之间二选一。
+**③ Capability Precondition 是字符串，无法程序化检查。**
+`preconditions: List[str] = ["host.alive", "service.exists"]` —"alive"和"exists"没有标准定义。Planner 无法自动求值。
 
-**④ Capability 没有副作用声明。**
-`Capability.execute()` 没有声明它做了什么（读/写/重启/删除）、风险多高。Policy Engine 只能靠匹配 Workflow name 来判断风险，脆弱且不安全。
+**④ Episode 缺少决策理由。**
+Episode 记录 observation / hypothesis / workflow / outcome，但不记录"为什么没选 Candidate A"或"为什么选 Candidate B"。这是 LLM 训练最宝贵的数据。
 
-### 1.2 v10 核心理念
+**⑤ DecisionManager 职责过重。**
+既做 orchestrator（串 Planner → Execution → Risk → Policy → Execution），又做 lifecycle management。可以拆分为更专注的组件。
+
+### 1.2 v15 核心理念
 
 ```
-Context 与 Finding 都携带 context_version，支持重现验证。
-Policy 使用 OPA (Open Policy Agent) 标准 Rego 语言。
-Planner 每次产出多个 Candidate，Policy 在候选方案之间选择。
-Capability 声明 effect 和 risk_score，Policy 直接基于副作用决策。
+WorldView 是 Facade——内部由 TopologyQuery / StateQuery / HistoryQuery 实现。
+Goal 描述目标状态（desired_state），不含 action/ordering/completion 等 Workflow 概念。
+Capability 用 Expression 结构化表达式声明条件——可被 Planner 自动求值。
+Episode 增加 DecisionStep——记录候选方案评分和拒绝理由。
+DecisionManager 拆为 DecisionOrchestrator + DecisionStateMachine。
+Utility 权重通过 OPA Rego or Config 配置。
+Blast Radius 综合考虑 Capability Metadata + Dependency Graph + Current State。
 ```
 
-### 1.3 v9 → v10 变更
+### 1.3 v14 → v15 变更
 
-| 维度 | v9 | v10 |
-|------|----|-----|
-| **Context** | 无版本 | **context_version**（sha256 of all inputs） |
-| **Finding** | 无 context 引用 | **+context_version**（可追踪到哪个 Context） |
-| **Policy Engine** | 自定义 DSL（Callable condition） | **OPA (Open Policy Agent)** + Rego |
-| **Planner** | 单个 Workflow | **List[WorkflowCandidate]**（多候选 + confidence + risk） |
-| **Capability** | execute() 无副作用声明 | **+effect + risk_score**（声明读写重启等 effect） |
-| **配套变更** | — | Policy 利用 Capability effect 做决策；Planner 返回多个方案；Context 可重现 |
+| 维度 | v14 | v15 |
+|------|-----|-----|
+| **WorldView** | 单体类（10+ 方法） | **Facade** + TopologyQuery/StateQuery/HistoryQuery |
+| **Goal** | `action` + `ordering` + `completion`（Workflow 化） | **`desired_state` + `target`**（目标状态） |
+| **Precondition** | `List[str]`（字符串） | **`List[Expression]`**（field + operator + value） |
+| **EpisodeStep** | observation / hypothesis / goal / workflow / execution / outcome | **+ `DecisionStep`**（candidate_scores + reject_reasons） |
+| **DecisionManager** | lifecycle + orchestration 混合 | **DecisionOrchestrator** + **DecisionStateMachine**（分离） |
+| **Utility 权重** | 硬编码（0.5/0.3/0.1/0.05） | **OPA Rego 可配置** |
+| **Blast Radius 输入** | 仅 Dependency Graph | **+ Capability Metadata + Current State** |
+| **ExperienceGraph Key** | `(capability_id, env_fingerprint)` | **`(failure_pattern, capability_id, env_fingerprint)`** |
+| **API** | — | **+`/worldview/topology`、`/worldview/state`、`/expressions/evaluate`** |
+| **测试** | 50+ | **55+** |
 
 ---
 
 ## 2. Architecture
 
-### 2.1 整体架构
-
-同 v9，增加 context_version 标注：
+### 2.1 整体架构（更新）
 
 ```
-Context API 产出:
-  ContextResult {
-    context,
-    context_version="v20260701.abc123def",
-    snapshot_id="...",
-  }
-
-Inference Engine 产出:
-  Finding {
-    context_version="v20260701.abc123def",  # 可追溯
-    knowledge_sources=[...],
-  }
+Raw Event → Projection Layer
+                │
+                ▼
+            WorldView（Facade）
+              ├── TopologyQuery（DAG + Dependents + Impact Set）
+              ├── StateQuery（Current State + Timeline）
+              └── HistoryQuery（Recent Events + Alarms）
+                │
+                ▼
+            Inference Registry → Pipeline → Finding（无 recommended_action）
+                │
+                ▼
+            GoalInferrer → Goal Tree（目标状态节点，不含 action/ordering）
+                │
+                │  GoalNode: RabbitMQ.healthy
+                │    ├── GoalNode: NovaAPI.responding
+                │    └── GoalNode: Neutron.connected
+                │
+                ▼
+            IntentGenerator（Finding + GoalNode → PlanIntent）
+                │
+                ▼
+            ExecutionPlanner（Intent → WorkflowCandidate）
+                │
+                ▼
+            Blast Radius Analyzer（Capability Metadata + Dependency + State）
+                │
+                ▼
+            RiskEngine（三层 + Constraint + Expression 检查）
+                │
+                ▼
+            PolicyEngine（Utility 权重可配置 + OPA）
+                │
+                ▼ ═══════ Decision State Machine ═══════
+                │
+            DecisionOrchestrator（编排 Planner→Evaluate→Policy→Execute）
+            DecisionStateMachine（纯生命周期管理）
+                │
+                ▼
+            Workflow Engine → Execution Event
+                │
+                ▼
+            Episode（含 DecisionStep）
+                │
+                ├── ExperienceGraphProjection（+ Failure Pattern 维度）
+                └── CapabilityStatsProjector
 ```
 
-### 2.2 Event Sourcing 原则
+### 2.2 原则
 
 ```
-原则 1-15: 同 v9。
-新增原则 16: 每个 Context 有 version（sha256），Finding 引用 context_version。
-新增原则 17: Policy 用 OPA/Rego 编写，与 Kubernetes/GitOps 生态兼容。
-新增原则 18: Planner 产出多个候选方案，每个带 confidence + risk。
-新增原则 19: 所有 Capability 声明 effect 和 risk_score，Policy 据此决策。
+新增原则 37: WorldView 是 Facade——组合多个 Query 接口，不负责任何查询实现。
+新增原则 38: Goal 描述目标状态（desired_state）。Workflow 描述如何达到目标状态。两者不同。
+新增原则 39: Capability 条件用结构化 Expression 声明——可被程序自动求值。
+新增原则 40: 所有决策理由必须记录在 Episode 中——包括"为什么不选 A"。
+新增原则 41: Decision Orchestration 和 State Management 是两种不同职责，由不同组件承担。
 ```
-
-### 2.3 EventEnvelope
-
-同 v9。`parent_event_ids` 构建血缘链。
-
-### 2.4 Topic 结构
-
-同 v9。domain-first 命名。
-
-### 2.5 Projection 框架（含 Versioned Projection）
-
-同 v9。
-
-### 2.6 Component Responsibilities
-
-（更新 Policy Engine 和 Planner 一行）
-
-| 层 | 职责 | 不做什么 |
-|----|------|----------|
-| **Inference Engine** | Context + Knowledge → Finding（维护血缘） | 不生成 Workflow |
-| **Planner** | Finding → **List[WorkflowCandidate]**（多方案） | 不执行、不决策 |
-| **Policy Engine** | **OPA 评估** → **ALLOW/DENY/APPROVAL** | 不做推理 |
-| **Workflow Engine** | Workflow → Capability → Action | 不做决策 |
-| **Capability Registry** | 执行方式抽象，**声明 effect/risk** | 不做编排 |
 
 ---
 
 ## 3. Event Schema
 
-### 3.1 EventEnvelope
-
 同 v9。
-
-### 3.2 RawEvent / NormalizedEvent / Finding
-
-同 v9。
-
-### 3.3 Schema Evolution
-
-同 v9。
-
----
 
 ## 4. Event Bus
 
-同 v9。
-
----
+同 v9。Topic 列表同 v14。
 
 ## 5. Event Pipeline
 
 同 v9。
 
----
-
 ## 6. Semantic Engine
 
 同 v9。
 
----
-
 ## 7. Projection Layer
 
-同 v9。
-
----
+同 v13（Snapshot 含版本元数据）。
 
 ## 8. Correlation Engine
 
@@ -154,575 +151,572 @@ Inference Engine 产出:
 
 ---
 
-## 9. Unified Context API
+## 9. WorldView（v15：组合式 Query 接口）
 
-### 9.1 ContextResult（v10 增加 context_version）
-
-```python
-@dataclass
-class ContextResult:
-    """统一查询结果。
-    v10 增加 context_version——确保 Finding 可重现。"""
-    context_type: ContextType
-    resource_type: ResourceType
-    resource_id: str
-    context: Any                    # IncidentContext / TopologyContext / ...
-    context_version: str = ""       # ← v10: sha256(resource_type + resource_id +
-                                    #                context_type + time_window +
-                                    #                projection_epochs +
-                                    #                knowledge_version + timestamp)
-    snapshot_id: str = ""
-    created_at: datetime = field(default_factory=datetime.utcnow)
-```
-
-### 9.2 ContextAPI（v10 生成 context_version）
+### 9.1 Query 接口层（v15 新增）
 
 ```python
-class ContextAPI:
-    """
-    统一查询入口。
-    v10：每次 build 生成 context_version，Finding 引用此版本。
-    """
+class TopologyQuery:
+    """拓扑查询——依赖关系、Imapt Set。"""
 
-    def build(self, resource_type, resource_id,
-              context_type=ContextType.INCIDENT,
-              time_window="1 HOUR",
-              use_snapshot=True) -> ContextResult:
-        builder = self._get_builder(context_type)
-        ctx = builder.build(resource_type, resource_id, time_window)
+    def __init__(self, graph_projection: GraphProjection):
+        self.graph = graph_projection
 
-        # ← v10: 计算 context_version
-        context_version = self._compute_version(
-            resource_type, resource_id, context_type, time_window,
-            projection_epochs=self._get_current_epochs(),
-            knowledge_version=self._get_knowledge_version(),
-        )
+    def get_dependents(self, rid: ResourceIdentity) -> List[ResourceIdentity]:
+        """谁依赖此资源。"""
+        return self.graph.get_downstream(rid.resource_type, rid.resource_id)
 
-        snapshot_id = ""
-        if use_snapshot and hasattr(builder, 'create_snapshot'):
-            snapshot = builder.create_snapshot(ctx)
-            snapshot_id = snapshot.snapshot_id
+    def get_dependencies(self, rid: ResourceIdentity) -> List[ResourceIdentity]:
+        """此资源依赖谁。"""
+        return self.graph.get_upstream(rid.resource_type, rid.resource_id)
 
-        return ContextResult(
-            context_type=context_type,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            context=ctx,
-            context_version=context_version,
-            snapshot_id=snapshot_id,
-        )
+    def get_impact_set(self, rid: ResourceIdentity, depth: int = 3
+                       ) -> List[List[ResourceIdentity]]:
+        """按 BFS 层返回影响集合。"""
+        return self.graph.bfs_downstream(rid, depth)
 
-    def _compute_version(self, *args, **kwargs) -> str:
-        """所有输入的 sha256——相同输入产出相同 version。"""
-        raw = f"{args}|{json.dumps(kwargs, sort_keys=True)}"
-        return f"v{datetime.utcnow().strftime('%Y%m%d')}.{sha256(raw.encode()).hexdigest()[:12]}"
+    def query_path(self, from_rid: ResourceIdentity,
+                   to_rid: ResourceIdentity) -> List[ResourceIdentity]:
+        """查询两个资源间的通路。"""
+        return self.graph.find_path(from_rid, to_rid)
+
+
+class StateQuery:
+    """状态查询——当前状态、状态演化链。"""
+
+    def __init__(self, state_projection: StateProjection,
+                 timeline_projection: TimelineProjection):
+        self.state = state_projection
+        self.timeline = timeline_projection
+
+    def get_state(self, rid: ResourceIdentity) -> Optional[str]:
+        """当前状态（ACTIVE / ERROR / SHUTOFF / ...）。"""
+        return self.state.query(rid.resource_type, rid.resource_id)
+
+    def get_states(self, rids: List[ResourceIdentity]) -> Dict[str, str]:
+        """批量查询。"""
+        return {str(r): self.state.query(r.resource_type, r.resource_id)
+                for r in rids}
+
+    def get_timeline(self, rid: ResourceIdentity, window: str = "1 HOUR"
+                     ) -> List[StateTransition]:
+        """状态演化链。"""
+        return self.timeline.get_timeline(rid, window)
+
+    def has_state_changed(self, rid: ResourceIdentity,
+                          window: str = "5 MINUTE") -> bool:
+        """指定窗口内状态是否变化过。"""
+        timeline = self.get_timeline(rid, window)
+        return len(timeline) > 0
+
+    def resolve_field(self, field_path: str, target: ResourceIdentity
+                      ) -> Any:
+        """按字段路径解析当前值——供 Expression 求值使用。
+
+        "host.status" → worldview.state.get_state(host_rid)
+        "vm.vcpus" → worldview.inventory.get_attribute(vm_rid, "vcpus")
+        """
+        parts = field_path.split(".")
+        if parts[0] == "resource":
+            return self.state.get_state(target)
+        elif parts[0] == "host":
+            host_id = self._resolve_host(target)
+            return self.state.get_state(ResourceIdentity(ResourceType.HOST, host_id))
+        elif parts[0] == "service":
+            return self.state.get_state(target)
+        ...
+
+
+class HistoryQuery:
+    """历史事件查询。"""
+
+    def __init__(self, event_store: RawEventStore):
+        self.event_store = event_store
+
+    def get_recent_events(self, rid: ResourceIdentity,
+                          count: int = 50) -> List[EventEnvelope]:
+        return self.event_store.query(resource=rid, limit=count)
+
+    def get_alarms(self, rid: ResourceIdentity) -> List[Dict]:
+        ...
+
+    def get_events_by_type(self, event_type: str,
+                           window: str = "1 HOUR") -> List[EventEnvelope]:
+        ...
 ```
+
+### 9.2 WorldView Facade（v15：组合而非实现）
+
+```python
+class WorldView:
+    """
+    世界视图——AI 组件的统一查询入口。
+
+    v15: Facade 模式——组合多个 Query 接口，不负责任何查询的实现逻辑。
+         避免 God Object——新增查询能力 = 新增 Query 类，不膨胀 WorldView 自身。
+    """
+
+    def __init__(self, topology: TopologyQuery,
+                 state: StateQuery,
+                 history: HistoryQuery):
+        self.topology = topology
+        self.state = state
+        self.history = history
+```
+
+### 9.3 ContextAPI + CanonicalContextHasher
+
+同 v14。ContextAPI 内部使用 WorldView 查询状态。
 
 ---
 
 ## 10. Inference Engine
 
-### 10.1 Finding（v10 增加 context_version）
+同 v13（InferenceRegistry + Pipeline + Finding 不含 recommended_action）。
+
+---
+
+## 11. Knowledge & Memory（v15：Expression 类型）
+
+### 11.1 Expression（v15 新增——结构化条件表达式）
 
 ```python
 @dataclass
-class Finding:
+class Expression:
     """
-    推理结果。
-    v10 增加 context_version——引用生成此 Finding 时的 Context 版本。
+    结构化条件表达式——可被 Planner 和 Policy 自动求值。
+
+    v15: 替代字符串 precondition/postcondition。
+         不再有"host.alive"这种模糊字符串——而是明确的字段路径 + 操作符 + 值。
     """
-    id: str
-    severity: str
-    confidence: float
-    category: str
-    reason: str
-    supporting_events: List[str]
-    affected_entities: List[ResourceIdentity]
-    recommended_action: str
-    engine_type: str
-    knowledge_sources: List[str] = field(default_factory=list)
-    context_version: str = ""          # ← v10: 关联到 ContextResult.context_version
-    context_snapshot_id: str = ""      # ← v10: 关联到 ContextSnapshot
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    field: str                          # "resource.status", "host.host_status",
+                                        # "service.exists", "ssh.accessible"
+    operator: str                       # "==", "!=", "in", "not_in",
+                                        # "exists", "not_exists", "contains"
+    value: Any = None                   # 比较值（for "==", "!=", "in", ...）
+                                        # None for "exists", "not_exists"
+
+    def evaluate(self, worldview: WorldView, target: ResourceIdentity) -> bool:
+        """使用 WorldView 求值。"""
+        actual = worldview.state.resolve_field(self.field, target)
+        if self.operator == "==":
+            return actual == self.value
+        elif self.operator == "!=":
+            return actual != self.value
+        elif self.operator == "in":
+            return actual in self.value
+        elif self.operator == "not_in":
+            return actual not in self.value
+        elif self.operator == "exists":
+            return actual is not None
+        elif self.operator == "not_exists":
+            return actual is None
+        elif self.operator == "contains":
+            return self.value in actual if isinstance(actual, (list, str)) else False
+        return False
+
+    def __str__(self) -> str:
+        return f"{self.field} {self.operator} {self.value}"
+
+
+# 预定义常用 Expression——方便 Capability 声明
+def expr_status_eq(status: str) -> Expression:
+    return Expression(field="resource.status", operator="==", value=status)
+
+def expr_host_alive() -> Expression:
+    return Expression(field="host.host_status", operator="==", value="alive")
+
+def expr_service_exists() -> Expression:
+    return Expression(field="service.exists", operator="==", value=True)
+
+def expr_not_pinned() -> Expression:
+    return Expression(field="vm.pinned_to_host", operator="!=", value=True)
 ```
 
-### 10.2 Inference Engine
+### 11.2 Constraint Knowledge（v15：使用 Expression）
 
 ```python
-class LLMInferenceEngine(InferenceEngine):
-    def infer(self, input: InferenceInput) -> List[Finding]:
-        # 1. 检索 Knowledge
-        if not input.knowledge:
-            input.knowledge = self.knowledge_store.retrieve(...)
+@dataclass
+class Constraint(KnowledgeObject):
+    """约束——使用 Expression 表达条件。"""
+    source_type: str = "constraint"
+    applies_to: str = ""                # "restart_service", "migrate_vm", "*"
+    condition: Expression = None        # 适用条件（用 Expression 表达）
+    restriction: str = ""               # 限制内容
+    severity: str = "error"             # "error", "warning"
+    policy_hint: str = ""
+```
 
-        # 2. LLM 推理
-        prompt = self._build_prompt(input.context, input.knowledge)
-        llm_result = self.llm.complete(prompt)
+---
 
-        # 3. 产出 Finding（带 context_version 和 snapshot_id）
-        finding = Finding(
-            ...
-            context_version=input.context.context_version,      # ← v10
-            context_snapshot_id=input.context.snapshot_id,       # ← v10
-            knowledge_sources=[d.document_id for d in input.knowledge],
+## 12. Planner（v15：Goal = 目标状态，不是 Workflow）
+
+### 12.1 GoalNode（v15：只描述目标状态）
+
+```python
+@dataclass
+class GoalNode:
+    """
+    目标状态节点——只描述"什么状态应该达到"。
+
+    v15: 不再有 action/ordering/completion 等 Workflow 概念。
+         action → Workflow Composer 负责。
+         ordering → ExecutionPlanner 的优化问题。
+         completion → 验证环节的任务。
+    """
+    goal_id: str
+    desired_state: str                  # "RabbitMQ.healthy", "NovaAPI.responding",
+                                        # "Neutron.connected"
+    target: ResourceIdentity            # 哪个资源要达到这个状态
+    children: List['GoalNode'] = field(default_factory=list)
+    # 不含: action, ordering, completion_criteria, status
+
+
+@dataclass
+class Goal:
+    """顶层目标——只描述目标状态，不描述执行步骤。"""
+    primary: str                        # "restore_messaging"
+    tree: GoalNode
+    priority: int = 50
+    reason: str = ""
+```
+
+### 12.2 Goal 示例
+
+```python
+# v15: Goal 描述目标状态
+goal = Goal(
+    primary="restore_messaging",
+    tree=GoalNode(
+        goal_id="root",
+        desired_state="Cluster.healthy",
+        target=ResourceIdentity(ResourceType.CLUSTER, "rabbitmq-prod"),
+        children=[
+            GoalNode(
+                goal_id="mq-ready",
+                desired_state="RabbitMQ.healthy",
+                target=ResourceIdentity(ResourceType.SERVICE, "rabbitmq-server"),
+            ),
+            GoalNode(
+                goal_id="nova-ready",
+                desired_state="NovaAPI.responding",
+                target=ResourceIdentity(ResourceType.SERVICE, "nova-api"),
+                children=[
+                    GoalNode(
+                        goal_id="nova-mq",
+                        desired_state="NovaAPI.rabbitmq_connected",
+                        target=ResourceIdentity(ResourceType.SERVICE, "nova-api"),
+                    ),
+                ],
+            ),
+        ],
+    ),
+)
+
+# v14 对比（Workflow 化）:
+# GoalNode(action="restart_rabbitmq", ordering="sequential", ...)  ← 这是 Workflow
+# v15: GoalNode(desired_state="RabbitMQ.healthy", ...)              ← 这是 Goal
+```
+
+### 12.3 IntentGenerator（v15：匹配 GoalNode.desired_state）
+
+```python
+class IntentGenerator(ABC):
+    @abstractmethod
+    def can_handle(self, finding: Finding, goal_node: GoalNode,
+                   worldview: WorldView) -> bool:
+        """此 Generator 能否帮助达到 goal_node 描述的目标状态。"""
+        ...
+
+    @abstractmethod
+    def generate(self, finding: Finding, goal_node: GoalNode,
+                 worldview: WorldView) -> Optional[PlanIntent]:
+        ...
+
+
+class RestartIntentGenerator(IntentGenerator):
+    """重启——适用于"service healthy"类目标状态。"""
+    def can_handle(self, finding, goal_node, worldview) -> bool:
+        desired = goal_node.desired_state
+        # 检查约束
+        constraints = self.knowledge_store.get_constraints("restart_service")
+        if any(c.severity == "error" for c in constraints):
+            return False
+        return any(keyword in desired
+                   for keyword in ["healthy", "responding", "connected"])
+
+    def generate(self, finding, goal_node, worldview) -> Optional[PlanIntent]:
+        state = worldview.state.get_state(goal_node.target)
+        if state == "ERROR":
+            return PlanIntent(action="restart_service",
+                              target=goal_node.target, ...)
+        return None
+
+
+class DiagnosticIntentGenerator(IntentGenerator):
+    """诊断——适用于"unknown"类目标状态或缺少证据的场景。"""
+    def can_handle(self, finding, goal_node, worldview) -> bool:
+        return ("unknown" in goal_node.desired_state or
+                "diagnose" in goal_node.desired_state or
+                finding.confidence < 0.5)
+
+    def generate(self, finding, goal_node, worldview) -> Optional[PlanIntent]:
+        return PlanIntent(action="collect_diagnostic",
+                          target=goal_node.target, ...)
+
+
+class FailoverIntentGenerator(IntentGenerator):
+    """故障转移——适用于"可用性"类目标状态。"""
+    def can_handle(self, finding, goal_node, worldview) -> bool:
+        desired = goal_node.desired_state
+        return ("available" in desired or "failover" in desired) and \
+               self._has_standby(goal_node.target, worldview)
+
+    def generate(self, finding, goal_node, worldview) -> Optional[PlanIntent]:
+        return PlanIntent(action="failover",
+                          target=goal_node.target, ...)
+```
+
+### 12.4 Planner（v15：Goal Tree 构建 + Intent 生成）
+
+```python
+class GoalInferrer:
+    """Finding → Goal Tree（目标状态树）。"""
+
+    def infer(self, finding: Finding, context: Context,
+              worldview: WorldView) -> Goal:
+        # 示例：RabbitMQ 心跳丢失 → 目标状态是恢复消息层
+        if finding.category == "RabbitMQHeartbeatLost":
+            primary_target = finding.affected_entities[0]
+            return Goal(
+                primary="restore_messaging",
+                tree=GoalNode(
+                    goal_id="root",
+                    desired_state="Cluster.healthy",
+                    target=primary_target,
+                    children=[
+                        GoalNode(goal_id="svc",
+                                 desired_state="RabbitMQ.healthy",
+                                 target=primary_target),
+                        GoalNode(goal_id="nova",
+                                 desired_state="NovaAPI.responding",
+                                 target=self._find_nova_api(finding, worldview)),
+                    ],
+                ),
+                priority=90,
+                reason="RabbitMQ heartbeat lost → restore messaging cluster",
+            )
+        # 默认：收集证据
+        return Goal(
+            primary="collect_evidence",
+            tree=GoalNode(goal_id="root",
+                          desired_state="evidence_collected",
+                          target=finding.affected_entities[0]),
+            priority=50,
         )
-        return [finding]
-```
-
----
-
-## 11. Knowledge & Memory Store
-
-### 11.1 KnowledgeDocument（v10 增加 Provenance）
-
-```python
-@dataclass
-class KnowledgeDocument:
-    document_id: str
-    title: str
-    content: str
-    source_type: str                  # "runbook", "sop", "incident", "docs"
-    relevance_score: float = 0.0
-
-    # ← v10: Provenance（知识来源的可信度）
-    origin: str = ""                  # "openstack-official", "community", "vendor"
-    version: str = ""                 # "wallaby-2025-12", "1.2.3"
-    trust_level: int = 3             # 1-5（5=官方认证，1=社区未验证）
-    updated_at: Optional[datetime] = None
-    owner: str = ""                   # 维护者/团队
-    license: str = ""                 # "Apache-2.0", "CC-BY-4.0"
-
-    source_url: str = ""
-    created_at: datetime = field(default_factory=datetime.utcnow)
-```
-
-### 11.2 KnowledgeMemoryStore
-
-同 v9。增加按 `trust_level` 过滤的能力。
-
----
-
-## 12. Planner（v10 增加 Multi-Candidate）
-
-### 12.1 定位
-
-```
-v9:   Finding → Workflow（单个方案）
-v10:  Finding → List[WorkflowCandidate]（多个方案，Policy 选择）
-```
-
-### 12.2 Candidate 模型
-
-```python
-@dataclass
-class WorkflowCandidate:
-    """
-    Workflow 候选方案。
-    v10 新增——Planner 每次产出多个候选，Policy Engine 在候选间选择。
-    """
-    workflow: 'Workflow'
-    confidence: float          # 0.0 ~ 1.0（此方案的成功概率）
-    risk_score: int            # 1-100（来自 Capability.risk_score 的综合计算）
-    risk_reason: str = ""      # 高风险的具体原因
-    estimated_duration_ms: int = 0
-    required_approval: bool = False  # 是否需要审批
 
 
-@dataclass
-class PlannerResult:
-    """Planner 输出——多个候选方案。"""
-    finding_id: str
-    candidates: List[WorkflowCandidate]
-    created_at: datetime = field(default_factory=datetime.utcnow)
-
-    @property
-    def primary(self) -> Optional[WorkflowCandidate]:
-        """按 confidence 降序排列的第一个方案。"""
-        return self.candidates[0] if self.candidates else None
-```
-
-### 12.3 Planner
-
-```python
 class Planner:
     """
-    Finding → List[WorkflowCandidate]。
+    Finding → Goal Tree → Intent（通过 IntentGenerator + WorldView）。
 
-    v1 实现：primary + 1~2 个 alternative
-    v2 实现：LLM Planner：根据 IncidentContext + Knowledge 动态生成多个方案
+    v15: Goal 描述目标状态。每个 GoalNode 独立匹配 IntentGenerator。
     """
 
-    def __init__(self, knowledge_store: KnowledgeMemoryStore,
-                 registry: CapabilityRegistry):
-        self.knowledge_store = knowledge_store
-        self.registry = registry
+    def plan(self, finding: Finding, context: Context,
+             goal: Goal = None) -> PlannerResult:
+        if not goal:
+            goal = self.goal_inferrer.infer(finding, context, self.worldview)
 
-    def plan(self, finding: Finding,
-             context: IncidentContext) -> PlannerResult:
-        """产出多个候选方案。"""
-        candidates = []
-
-        # Primary: 推荐方案（从 Finding.recommended_action 映射）
-        primary = self._build_primary(finding, context)
-        if primary:
-            candidates.append(primary)
-
-        # Alternative 1: 备选方案（同类操作的不同实现）
-        alt1 = self._build_alternative(finding, context, primary)
-        if alt1:
-            candidates.append(alt1)
-
-        # Alternative 2: 保守方案（只读诊断，不执行修复）
-        alt2 = self._build_readonly_diagnostic(finding, context)
-        if alt2:
-            candidates.append(alt2)
-
-        # 按 confidence 降序排列
-        candidates.sort(key=lambda c: c.confidence, reverse=True)
+        # 遍历 Goal Tree，为每个节点生成 Intent
+        intents = []
+        self._plan_goal_node(goal.tree, finding, intents)
 
         return PlannerResult(
             finding_id=finding.id,
-            candidates=candidates,
+            goal=goal,
+            intents=intents,
         )
 
-    def _compute_risk(self, finding: Finding,
-                      workflow: Workflow) -> int:
-        """根据所有 Capability 的 risk_score 综合计算。"""
-        max_risk = 0
-        for step in workflow.steps:
-            cap = self.registry.get(step.capability)
-            if cap:
-                max_risk = max(max_risk, cap.risk_score)
-        return max_risk
-
-    def _build_primary(self, finding, context) -> Optional[WorkflowCandidate]:
-        action = finding.recommended_action
-        if action not in self._workflow_templates:
-            return None
-        wf = copy.deepcopy(self._workflow_templates[action])
-        wf.workflow_id = uuid4().hex
-        wf.trigger = "inference"
-        wf = self._interpolate(wf, context)
-        return WorkflowCandidate(
-            workflow=wf,
-            confidence=min(finding.confidence, 0.95),
-            risk_score=self._compute_risk(finding, wf),
-        )
-
-    def _build_alternative(self, finding, context,
-                           primary) -> Optional[WorkflowCandidate]:
-        """备选方案——不同实现，风险/成本不同。"""
-        # 例如：重启失败 → 用 evacuate 替代
-        alt_map = {
-            "restart_service": "migrate_vm",
-            "restart_network": "reboot_host",
-        }
-        alt_action = alt_map.get(finding.recommended_action)
-        if not alt_action:
-            return None
-        return WorkflowCandidate(
-            workflow=self._build_workflow(alt_action, context),
-            confidence=finding.confidence * 0.8,
-            risk_score=min(self._compute_risk(finding, primary.workflow) + 10, 100),
-            risk_reason="备选方案风险更高",
-        )
-
-    def _build_readonly_diagnostic(self, finding,
-                                   context) -> WorkflowCandidate:
-        """只读诊断方案——不执行修复，只收集更多信息。"""
-        return WorkflowCandidate(
-            workflow=self._build_workflow("collect_diagnostic", context),
-            confidence=0.95,  # 只读操作几乎总是安全的
-            risk_score=5,     # 风险最低
-        )
-
-    def plan_with_policy(self, finding, context) -> tuple:
-        """
-        一次性完成 Plan + Policy 评估。
-        返回 (PlannerResult, PolicyDecision)。
-        """
-        result = self.plan(finding, context)
-        # Policy Engine 在所有候选方案中选择
-        decision = self.policy_engine.evaluate_candidates(
-            result, context, finding)
-        return result, decision
+    def _plan_goal_node(self, node: GoalNode, finding: Finding,
+                        intents: List[PlanIntent]):
+        """递归处理 Goal 树中的每个节点。"""
+        for gen in self.generators:
+            if gen.can_handle(finding, node, self.worldview):
+                intent = gen.generate(finding, node, self.worldview)
+                if intent:
+                    intents.append(intent)
+        for child in node.children:
+            self._plan_goal_node(child, finding, intents)
 ```
 
 ---
 
-## 13. Policy Engine（v10 改为 OPA）
+## 13. Policy + Risk + Utility + Blast Radius（v15：可配置 Utility + 完整 Blast Radius）
 
-### 13.1 定位
-
-**v10 核心变更。** 从自定义 DSL（Callable condition）改为 **OPA（Open Policy Agent）**。
-
-```
-v9:   Policy(condition=lambda ctx: "restart" in ctx.workflow.name)
-v10:  policy/no_restart_biz_hours.rego（Rego 语言，OPA 评估）
-
-为什么换 OPA：
-  - CNCF 毕业项目，Kubernetes 生态标准
-  - Rego 语言专门做策略评估
-  - `opa test` 原生测试框架
-  - 策略可以 Git 管理 + CI 测试
-  - 不需要自己维护 DSL 解析器
-  - 性能基准 < 1ms 评估
-```
-
-### 13.2 架构
+### 13.1 Blast Radius Analyzer（v15：综合 3 个输入）
 
 ```python
 @dataclass
-class PolicyEvaluationRequest:
-    """Policy 评估请求。"""
-    candidates: List[WorkflowCandidate]    # Planner 产出的候选
-    context: IncidentContext
-    finding: Finding
-    resource_type: ResourceType
-    resource_id: str
+class ImpactModel:
+    """影响模型——从 Capability Metadata 提取。"""
+    severity: str                # "temporary", "permanent", "degradation"
+    duration: str                # "30s", "5min", "permanent"
+    scope: str                   # "service", "instance", "data", "network"
 
 
-class PolicyDecision(Enum):
-    ALLOW = "allow"
-    DENY = "deny"
-    PENDING_APPROVAL = "pending_approval"
-    CANDIDATE_SELECTED = "candidate_selected"  # ← v10：从多个候选中选择
+class BlastRadiusAnalyzer:
+    """
+    影响范围分析器——综合 Capability + Dependency + State。
 
+    v15:
+      - Capability.side_effects → ImpactModel（影响类型 + 持续时间）
+      - Dependency Graph → 谁受影响
+      - Current State → 影响程度调整
+    """
 
-@dataclass
-class PolicyEvaluationResult:
-    """Policy 评估结果。"""
-    decision: PolicyDecision
-    selected_candidate: Optional[WorkflowCandidate] = None  # ← v10
-    reason: str = ""
-    matched_rules: List[str] = field(default_factory=list)
-    evaluated_rules: int = 0
+    def analyze(self, intent: PlanIntent, target: ResourceIdentity,
+                capability: Capability, worldview: WorldView) -> BlastRadiusReport:
+        # 1. Capability Metadata
+        impact = self._get_impact_model(capability)
+
+        # 2. Dependency Graph
+        impact_sets = worldview.topology.get_impact_set(target, depth=5)
+        directly = impact_sets[0] if impact_sets else []
+
+        # 3. Current State 调整
+        current_state = worldview.state.get_state(target)
+        risk_level = self._assess_risk_level(impact, current_state, directly)
+
+        return BlastRadiusReport(
+            primary_target=target,
+            directly_affected=directly,
+            indirectly_affected=self._flatten(impact_sets[1:]) if len(impact_sets) > 1 else [],
+            estimated_vm_count=worldview.topology.estimate_vm_count(target),
+            estimated_service_count=len(directly),
+            risk_level=risk_level,
+            reasoning=self._build_reasoning(impact, current_state, risk_level),
+        )
+
+    def _get_impact_model(self, capability: Capability) -> ImpactModel:
+        if any("delete" in e for e in capability.effects):
+            return ImpactModel("permanent", "permanent", "data")
+        if any("restart" in e for e in capability.effects):
+            return ImpactModel("temporary", "30s", "service")
+        if any("migrate" in e for e in capability.effects):
+            return ImpactModel("temporary", "5s", "instance")
+        return ImpactModel("degradation", "unknown", "service")
+
+    def _assess_risk_level(self, impact: ImpactModel, current_state: str,
+                            dependents: list) -> str:
+        if impact.severity == "permanent":
+            return "critical"
+        if impact.severity == "temporary" and len(dependents) > 10:
+            return "high"
+        if current_state == "ERROR" and len(dependents) > 5:
+            return "high"
+        return "medium" if len(dependents) > 2 else "low"
 ```
 
-### 13.3 PolicyEngine（OPA）
+### 13.2 RiskEngine（v15：Expression 检查）
 
 ```python
+class RiskEngine:
+    def compute(self, intent: PlanIntent, candidate: WorkflowCandidate,
+                context: Context, worldview: WorldView) -> RiskProfile:
+        business_risk = self._business_risk(intent.action)
+        execution_risk = self._execution_risk(candidate)
+        operational_risk = self._operational_risk(context)
+
+        # Blast Radius
+        blast = self.blast_analyzer.analyze(intent, intent.target,
+                                             self._get_capability(candidate),
+                                             worldview)
+        if blast.risk_level in ("critical", "high"):
+            operational_risk += 30 if blast.risk_level == "critical" else 15
+
+        # Constraint 检查（使用 Expression）
+        constraints = self.knowledge_store.get_constraints(intent.action, context)
+        for c in constraints:
+            if c.condition:
+                if c.condition.evaluate(worldview, intent.target):
+                    if c.severity == "error":
+                        operational_risk += 50
+                        candidate.blocked_reason = c.restriction
+
+        return RiskProfile(
+            business_risk=business_risk,
+            execution_risk=execution_risk,
+            operational_risk=operational_risk,
+        )
+```
+
+### 13.3 PolicyEngine（v15：可配置 Utility 权重）
+
+```python
+@dataclass
+class UtilityWeights:
+    """Utility 权重配置——可被 OPA 或 Config 覆盖。"""
+    success: float = 0.5
+    risk: float = 0.3
+    cost: float = 0.1
+    blast: float = 0.05
+
+
 class PolicyEngine:
-    """
-    Policy Engine——基于 OPA (Open Policy Agent) 的安全治理层。
+    def __init__(self, opa_endpoint, policy_dir, decision_store=None,
+                 weights: Optional[UtilityWeights] = None):
+        self.weights = weights or UtilityWeights()
+        ...
 
-    策略用 Rego 语言编写，存储在 policies/ 目录下：
-      policies/
-        ├── no_restart_biz_hours.rego
-        ├── prod_needs_approval.rego
-        ├── no_bulk_operation.rego
-        ├── deny_high_risk.rego
-        └── policy_test.rego
+    def _rank(self, candidates: List[WorkflowCandidate],
+              intent: PlanIntent, worldview: WorldView) -> List[WorkflowCandidate]:
 
-    OPA 评估流程：
-      1. 将请求转为 OPA input（JSON）
-      2. 调用 OPA REST API / Library
-      3. OPA 按 Rego 规则评估
-      4. 返回 decision + reason
-    """
+        blast = self.blast_analyzer.analyze(intent, intent.target, ...)
 
-    def __init__(self, opa_endpoint: str = "http://localhost:8181",
-                 policy_dir: str = "/etc/logoscope/policies"):
-        self.opa = OPAClient(opa_endpoint)
-        self.policy_dir = policy_dir
-
-    def evaluate(self, request: PolicyEvaluationRequest,
-                 candidate: WorkflowCandidate) -> PolicyEvaluationResult:
-        """评估单个候选方案。"""
-        input = self._build_opa_input(request, candidate)
-        result = self.opa.evaluate("logoscope/policy", input)
-
-        return PolicyEvaluationResult(
-            decision=PolicyDecision(result.get("decision", "deny")),
-            reason=result.get("reason", ""),
-            matched_rules=result.get("matched", []),
-            evaluated_rules=result.get("evaluated", 0),
-        )
-
-    def evaluate_candidates(self, planner_result: 'PlannerResult',
-                            context: IncidentContext,
-                            finding: Finding) -> PolicyEvaluationResult:
-        """评估所有候选方案，选择最佳合规方案。"""
-        request = PolicyEvaluationRequest(
-            candidates=planner_result.candidates,
-            context=context,
-            finding=finding,
-            resource_type=context.resource_type,
-            resource_id=context.resource_id,
-        )
-
-        # 1. 检查每个候选是否合规
-        passing = []
-        for candidate in request.candidates:
-            result = self.evaluate(request, candidate)
-            if result.decision == PolicyDecision.ALLOW:
-                passing.append((candidate, result))
-
-        # 2. 在合规候选中选择 confidence 最高的
-        if passing:
-            passing.sort(key=lambda x: x[0].confidence, reverse=True)
-            best_candidate, best_result = passing[0]
-            return PolicyEvaluationResult(
-                decision=PolicyDecision.CANDIDATE_SELECTED,
-                selected_candidate=best_candidate,
-                reason=f"Selected from {len(passing)} passing candidates",
-                matched_rules=best_result.matched_rules,
-                evaluated_rules=best_result.evaluated_rules,
+        def utility(c: WorkflowCandidate) -> float:
+            risk = c.risk_profile.final_risk if c.risk_profile else 50
+            return (
+                c.estimated_success_rate * 100 * self.weights.success
+                - risk * self.weights.risk
+                - c.estimated_duration_minutes * self.weights.cost
+                - blast.estimated_vm_count * self.weights.blast
             )
 
-        # 3. 所有候选都被拒绝
-        # 检查是否有需要审批的
-        pending = [c for c in request.candidates
-                   if self._check_pending(c, request)]
-        if pending:
-            return PolicyEvaluationResult(
-                decision=PolicyDecision.PENDING_APPROVAL,
-                selected_candidate=pending[0],
-                reason="Best candidate needs manual approval",
-            )
-
-        return PolicyEvaluationResult(
-            decision=PolicyDecision.DENY,
-            reason="All candidates denied by policy",
-        )
-
-    def _build_opa_input(self, request: PolicyEvaluationRequest,
-                         candidate: WorkflowCandidate) -> dict:
-        """将请求转为 OPA input JSON。"""
-        return {
-            "candidate": {
-                "confidence": candidate.confidence,
-                "risk_score": candidate.risk_score,
-                "steps": [
-                    {
-                        "capability": s.capability,
-                        "params": s.params,
-                        # OPA 可以从 capability 名称推断 effect
-                    }
-                    for s in candidate.workflow.steps
-                ],
-            },
-            "resource": {
-                "type": request.resource_type.value,
-                "id": request.resource_id,
-            },
-            "finding": {
-                "severity": request.finding.severity,
-                "category": request.finding.category,
-                "confidence": request.finding.confidence,
-            },
-            "context": {
-                "current_state": request.context.current_state,
-            },
-            "environment": {
-                "time": {
-                    "hour": datetime.utcnow().hour,
-                    "day_of_week": datetime.utcnow().weekday(),
-                },
-            },
-        }
+        return sorted(candidates, key=utility, reverse=True)
 ```
 
-### 13.4 Rego 策略示例
+### 13.4 OPA Rego（v15：可配置 Utility weights）
 
 ```rego
-# policies/no_restart_biz_hours.rego
 package logoscope.policy
 
-# 禁止在工作时间（9:00-18:00）执行重启类操作
-default deny = false
+# Utility 权重通过 data.logoscope.utility_weights 注入
+# 不同环境可有不同权重：
+#   生产:  {"success": 0.4, "risk": 0.4, "cost": 0.1, "blast": 0.1}
+#   测试:  {"success": 0.6, "risk": 0.1, "cost": 0.2, "blast": 0.1}
 
-deny = "restart_during_business_hours" {
-    input.candidate.risk_score >= 60
-    input.environment.time.hour >= 9
-    input.environment.time.hour <= 18
+default utility = 0
+
+utility = score {
+    w := data.logoscope.utility_weights
+    score := (input.candidate.estimated_success_rate * 100 * w.success)
+           - (input.candidate.risk.final_risk * w.risk)
+           - (input.candidate.estimated_duration_minutes * w.cost)
+           - (input.candidate.blast.vm_count * w.blast)
 }
 
-# 高风险操作（risk_score >= 80）默认拒绝
-default high_risk_deny = false
-
-high_risk_deny = "high_risk_operation" {
-    input.candidate.risk_score >= 80
-}
-
-# 生产环境需要审批
-default need_approval = false
-
-need_approval = "prod_operation" {
-    contains(input.resource.id, "prod")
-    input.candidate.risk_score >= 40
-}
-```
-
-```rego
-# policies/policy.rego（主策略入口）
-package logoscope.policy
-
-# 综合决策
-decision = "deny" {
-    deny != ""
-}
-
+decision = "deny" { input.candidate.risk.final_risk >= 80 }
 decision = "pending_approval" {
-    deny == ""
-    need_approval != ""
+    input.candidate.risk.final_risk >= 40
+    input.candidate.risk.final_risk < 80
 }
-
-decision = "allow" {
-    deny == ""
-    need_approval == ""
-}
-
-reason = reason {
-    deny = deny
-    deny != ""
-    reason := sprintf("Policy denied: %v", [deny])
-}
-
-reason = "Operation requires manual approval" {
-    deny == ""
-    need_approval != ""
-}
-
-reason = "All policies passed" {
-    deny == ""
-    need_approval == ""
-}
+decision = "allow" { input.candidate.risk.final_risk < 40 }
 ```
 
-### 13.5 OPA 集成优势
+### 13.5 ExecutionPlanner
 
-| 场景 | v9 自定义 DSL | v10 OPA |
-|------|---------------|---------|
-| 策略语言 | Python Callable | Rego（专用策略语言） |
-| 测试框架 | 无 | `opa test`（原生支持） |
-| Git 管理 | 代码 + 策略混在一起 | `policies/*.rego` 独立版本管理 |
-| 热加载 | 需重启 Python | OPA 支持 REST API 动态更新 |
-| 生态集成 | 仅 Logoscope | Kubernetes / Envoy / Istio 通用 |
-| 性能 | Lambda 评估 | < 1ms（编译后 Native） |
-| 策略可视化 | 无 | OPA Compile → Graph |
-
-### 13.6 Policy + Capability Effect 联动
-
-```rego
-# policies/capability_effect.rego
-package logoscope.policy
-
-# 通过 Capability effect 推断操作风险
-restart_operation {
-    # effect=RESTART 的操作是重启类
-    input.candidate.steps[_].capability == "ssh.restart_service"
-}
-
-delete_operation {
-    input.candidate.steps[_].capability == "openstack.delete_volume"
-}
-
-# 禁止删除操作
-deny = "delete_not_allowed" {
-    delete_operation
-}
-```
+同 v14，集成 Blast Radius Analyzer + Expression 检查。
 
 ---
 
@@ -732,395 +726,671 @@ deny = "delete_not_allowed" {
 
 ---
 
-## 15. Workflow Engine
+## 15. Workflow Engine + Capability（v15：Expression Pre/Post + ImpactModel）
 
-### 15.1 Capability（v10 增加 Effect Model）
+### 15.1 Capability（v15：Expression + ImpactModel）
 
 ```python
-class EffectType(Enum):
-    READ = "read"              # 只读操作
-    WRITE = "write"            # 写入/修改
-    RESTART = "restart"        # 重启服务/进程
-    DELETE = "delete"          # 删除资源
-    NETWORK = "network"        # 网络变更
-    STORAGE = "storage"        # 存储操作
-    CREATE = "create"          # 创建资源
-    EXECUTE = "execute"        # 执行命令
-
-
 @dataclass
-class ParameterDef:
-    name: str
-    type: type
-    required: bool = True
-    default: Any = None
-    description: str = ""
+class Expression:
+    field: str
+    operator: str           # "==", "!=", "in", "exists", "contains"
+    value: Any = None
 
 
 @dataclass
 class Capability:
-    """
-    执行能力注册。
-    v10 增加 effect 和 risk_score——Policy Engine 据此决策。
-    """
     capability_id: str
-    name: str                              # "ssh.execute_command"
-    provider: str                          # "ssh-executor", "k8s-executor"
+    name: str
+    provider: str
+    effects: List[str] = field(default_factory=list)
+    base_risk: int = 50
+    risk_reason: str = ""
 
-    effect: EffectType = EffectType.EXECUTE  # ← v10：声明副作用类型
-    risk_score: int = 50                     # ← v10：风险评分 1-100
-    risk_reason: str = ""                    # ← v10：高风险的说明
+    # v15: 结构化表达式（不再是字符串）
+    preconditions: List[Expression] = field(default_factory=list)
+    postconditions: List[Expression] = field(default_factory=list)
+    side_effects: List[str] = field(default_factory=list)
+    impact_model: Optional['ImpactModel'] = None  # 影响模型（Blast Radius 用）
+    rollback_capability: str = ""
 
+    estimated_duration_ms: int = 30000
+    estimated_cost: float = 1.0
     parameters: Dict[str, ParameterDef] = field(default_factory=dict)
-    output_type: type = str
     timeout_seconds: int = 30
     retry_count: int = 0
-
-    @property
-    def short_name(self) -> str:
-        return self.name.split(".")[-1]
 ```
 
-### 15.2 Capability 注册示例
+### 15.2 注册示例
 
 ```python
-registry = CapabilityRegistry()
-
-# 只读操作——风险低
-registry.register(Capability(
-    capability_id="ssh.check_process",
-    name="ssh.check_process",
-    provider="ssh-executor",
-    effect=EffectType.READ,             # ← v10
-    risk_score=10,                       # ← v10（只读，几乎无风险）
-    parameters={
-        "host": ParameterDef("host", str, True),
-        "process": ParameterDef("process", str, True),
-    },
-))
-
-# 重启操作——风险高
 registry.register(Capability(
     capability_id="ssh.restart_service",
-    name="ssh.restart_service",
     provider="ssh-executor",
-    effect=EffectType.RESTART,          # ← v10
-    risk_score=70,                       # ← v10（重启可能导致服务中断）
-    risk_reason="Restarting a service causes temporary downtime",
-    parameters={
-        "host": ParameterDef("host", str, True),
-        "service": ParameterDef("service", str, True),
-    },
+    effects=["service.restart", "process.modify"],
+    base_risk=50,
+    preconditions=[
+        Expression("host.host_status", "==", "alive"),
+        Expression("service.exists", "==", True),
+        Expression("ssh.accessible", "==", True),
+    ],
+    postconditions=[
+        Expression("resource.status", "==", "running"),
+        Expression("service.active", "==", True),
+    ],
+    side_effects=["service.restart -> 30s_connection_drop"],
+    impact_model=ImpactModel("temporary", "30s", "service"),
+    rollback_capability="ssh.restart_service",
 ))
 
-# 删除操作——风险最高
 registry.register(Capability(
-    capability_id="openstack.delete_volume",
-    name="openstack.delete_volume",
+    capability_id="openstack.migrate_vm",
     provider="openstack-api",
-    effect=EffectType.DELETE,           # ← v10
-    risk_score=95,                       # ← v10（删除不可逆）
-    risk_reason="Deleting a volume causes permanent data loss",
-    parameters={
-        "volume_id": ParameterDef("volume_id", str, True),
-    },
+    effects=["vm.migrate", "network.modify"],
+    base_risk=60,
+    preconditions=[
+        Expression("resource.status", "==", "ACTIVE"),
+        Expression("host.host_status", "==", "alive"),
+        Expression("vm.pinned_to_host", "!=", True),
+    ],
+    postconditions=[
+        Expression("resource.status", "==", "ACTIVE"),
+    ],
+    side_effects=["vm.migrate -> 5s_network_interruption"],
+    impact_model=ImpactModel("temporary", "5s", "instance"),
+    rollback_capability="openstack.migrate_vm",
 ))
 ```
 
-### 15.3 Workflow Engine + Capability
-
-同 v9。
-
----
-
-## 16. Feedback Loop
-
-同 v9。
-
----
-
-## 17. Platform Events
-
-同 v9。
-
----
-
-## 18. 置信度模型
-
-（同 v7，不变）
-
----
-
-## 19. API
-
-```text
-# Context API（v10：context_version）
-GET /api/v1/context/build?type=INSTANCE&id=abc-123&context=incident
-  → { context, context_version, snapshot_id }
-
-# Planner（v10：多个 candidate）
-POST /api/v1/planner/plan
-  → { finding_id, candidates: [{workflow, confidence, risk_score}, ...] }
-
-# Policy Engine（v10：OPA）
-POST /api/v1/policies/evaluate   # 用 OPA 评估
-POST /api/v1/policies/evaluate-candidates  # 评估候选方案
-GET  /api/v1/policies/rego       # 查看当前加载的 Rego 策略
-POST /api/v1/policies/reload     # 热加载 Rego 策略
-
-# Capability（v10：effect + risk_score）
-GET /api/v1/capabilities/executors
-  → [{ capability_id, effect, risk_score, ... }]
-
-# Event Lineage
-GET /api/v1/lineage/trace/{event_id}
-
-# Knowledge & Memory Store
-GET    /api/v1/knowledge/retrieve?query=...
-POST   /api/v1/knowledge/sources/register
-POST   /api/v1/memory/feedback
-GET    /api/v1/memory/forget?days=90&min_confidence=0.2  # ← v10
-
-# Topology / Inventory / State / Interaction（同 v8）
-...
-
-# Projection Management
-GET   /api/v1/projections/status
-POST  /api/v1/projections/rebuild
-POST  /api/v1/projections/{name}/traffic-split
-
-# Schema Registry
-GET  /api/v1/schemas?event_type=normalized.event
-POST /api/v1/schemas/register
-POST /api/v1/schemas/migrate
-
-# Platform Events
-GET /api/v1/platform/events?category=policy
-```
-
----
-
-## 20. 实施阶段
-
-### Phase 0: Foundation（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| Raw Event Store | WAL + Kafka `platform.raw`，EventEnvelope 含 parent_event_ids |
-| Schema Registry | Schema 注册 + Migration + EventEnvelope |
-| Event Bus | 10 topics，domain 命名 |
-
-### Phase 1: Event Pipeline + Semantic Engine（~1.5 周）
-
-| 模块 | 内容 |
-|------|------|
-| Event Pipeline | Aggregate / Dedup / Sample / Enrich / Route |
-| Semantic Engine | 只 normalize，维护血缘 |
-
-### Phase 2: Projection Framework + Inventory/State（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| Projection Checkpoint | Partition + Offset，lag |
-| Versioned Projection | 多算法并行 + 流量切换 |
-| EntityProjector / Inventory / State / Timeline | |
-
-### Phase 3: Interaction + Correlation（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| InteractionProjector + Correlation Engine | |
-| DynamicRel Projection | ClickHouse，多窗口 |
-| Lineage API | 血缘追踪查询 |
-
-### Phase 4: Graph + Context API（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| Graph Projection | entity + interaction → Neo4j，只存拓扑 |
-| **Context API（含 context_version）** | **4 种 ContextType + version** |
-| Context Snapshot | |
-
-### Phase 5: Knowledge + Inference + Planner（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| Knowledge & Memory Store | Static Knowledge + Memory + Provenance |
-| Inference Engine | LLM + Rule，Context + Knowledge → Finding（含 context_version） |
-| **Planner（多 Candidate）** | **Finding → List[WorkflowCandidate]** |
-
-### Phase 6: Policy + Workflow + Feedback（~2 周）
-
-| 模块 | 内容 |
-|------|------|
-| **Policy Engine（OPA）** | **Rego 策略 + OPA 评估 + 候选方案选择** |
-| **Capability（Effect Model）** | **Capability.risk_score + Capability.effect** |
-| Workflow Engine | Command/Event 分离 + Capability |
-| Feedback Loop | Evaluation + Memory 写入 |
-
----
-
-## 21. 测试策略
+### 15.3 Planner 使用 Expression
 
 ```python
-def test_context_version():
-    """Context 有 version，相同输入产出相同 version"""
-    api = ContextAPI(...)
-    r1 = api.build(ResourceType.INSTANCE, "abc-123")
-    r2 = api.build(ResourceType.INSTANCE, "abc-123")
-    assert r1.context_version == r2.context_version
-
-
-def test_finding_references_context():
-    """Finding 引用 context_version"""
-    api = ContextAPI(...)
-    result = api.build(ResourceType.INSTANCE, "abc-123")
-    finding = Finding(
-        id="f1", severity="warning",
-        context_version=result.context_version,
-        context_snapshot_id=result.snapshot_id,
-    )
-    assert finding.context_version == result.context_version
-    assert finding.context_snapshot_id == result.snapshot_id
-
-
-def test_planner_multiple_candidates():
-    """Planner 产出多个候选方案"""
-    planner = Planner(knowledge_store, registry)
-    result = planner.plan(mock_finding, mock_context)
-    assert len(result.candidates) >= 2  # primary + diagnostic
-    assert result.primary is not None
-    # 按 confidence 降序
-    for i in range(len(result.candidates) - 1):
-        assert result.candidates[i].confidence >= result.candidates[i+1].confidence
-
-
-def test_planner_candidate_risk():
-    """Candidate 带 risk_score"""
-    planner = Planner(knowledge_store, registry)
-    result = planner.plan(mock_finding, mock_context)
-    for c in result.candidates:
-        assert 1 <= c.risk_score <= 100
-        assert 0 <= c.confidence <= 1.0
-
-
-def test_policy_opa_evaluate():
-    """Policy Engine 用 OPA 评估"""
-    engine = PolicyEngine(opa_endpoint="http://localhost:8181")
-    request = PolicyEvaluationRequest(
-        candidates=[WorkflowCandidate(
-            workflow=Workflow(name="restart_service", steps=[
-                WorkflowStep(capability="ssh.restart_service",
-                             params={"host": "prod-db-01", "service": "mysql"})
-            ]),
-            confidence=0.9,
-            risk_score=70,  # 来自 Capability.risk_score
-        )],
-        context=mock_context,
-        finding=mock_finding,
-    )
-    # 测试 OPA 集成
-    result = engine.evaluate(request, request.candidates[0])
-    assert result.decision in (PolicyDecision.ALLOW, PolicyDecision.DENY,
-                                PolicyDecision.PENDING_APPROVAL)
-
-
-def test_policy_selects_best_candidate():
-    """Policy Engine 从多个候选中选择最佳合规方案"""
-    engine = PolicyEngine(...)
-    result = PlannerResult(
-        finding_id="f1",
-        candidates=[
-            WorkflowCandidate(workflow=wf1, confidence=0.9, risk_score=70),
-            WorkflowCandidate(workflow=wf2, confidence=0.6, risk_score=20),
-            WorkflowCandidate(workflow=wf3, confidence=0.95, risk_score=85),
-        ],
-    )
-    decision = engine.evaluate_candidates(result, mock_context, mock_finding)
-    assert decision.decision == PolicyDecision.CANDIDATE_SELECTED
-    # 应该选择合规中 confidence 最高的
-    # （假设 risk 70 被拒绝，risk 20 和 risk 85 中 20 通过，confidence 0.6）
-    assert decision.selected_candidate.workflow == wf2
-
-
-def test_capability_effect():
-    """Capability 声明 effect 类型"""
-    cap = Capability(
-        capability_id="ssh.restart_service",
-        name="ssh.restart_service",
-        provider="ssh-executor",
-        effect=EffectType.RESTART,
-        risk_score=70,
-    )
-    assert cap.effect == EffectType.RESTART
-    assert cap.risk_score == 70
-
-
-def test_policy_uses_capability_effect():
-    """Policy 通过 Capability effect 做决策"""
-    registry = CapabilityRegistry()
-    registry.register(Capability(
-        capability_id="openstack.delete_volume",
-        provider="openstack-api",
-        effect=EffectType.DELETE,
-        risk_score=95,
-    ))
-    # OPA Rego 识别 effect=DELETE → deny
-    steps = [WorkflowStep(capability="openstack.delete_volume",
-                          params={"volume_id": "vol-001"})]
-    opa_input = {
-        "candidate": {
-            "steps": [{"capability": s.capability, "params": s.params}
-                      for s in steps],
-            "risk_score": 95,
-        },
-    }
-    # 调用 OPA 评估 delete 策略
-    # 期望：DENY（delete_not_allowed）
-
-
-def test_context_version_changes_with_input():
-    """不同输入产生不同 context_version"""
-    api = ContextAPI(...)
-    r1 = api.build(ResourceType.INSTANCE, "abc-123", time_window="1 HOUR")
-    r2 = api.build(ResourceType.INSTANCE, "abc-123", time_window="6 HOUR")
-    assert r1.context_version != r2.context_version  # time_window 不同
-
-
-def test_context_version_reproducible():
-    """相同输入始终产生相同 context_version"""
-    api = ContextAPI(...)
-    versions = []
-    for _ in range(3):
-        r = api.build(ResourceType.INSTANCE, "abc-123")
-        versions.append(r.context_version)
-    assert len(set(versions)) == 1  # 全部相同
-
-
-def test_event_envelope_with_lineage():
-    """EventEnvelope 必须携带 parent_event_ids"""
-    env = EventEnvelope(
-        event_id="test-001",
-        parent_event_ids=["parent-001"],
-    )
-    assert len(env.parent_event_ids) == 1
-
-
-def test_knowledge_memory_store_types():
-    """Knowledge & Memory Store 区分 Static/Memory"""
-    ...
-
-
-def test_feedback_loop_writes_memory():
-    """Feedback Loop 将执行结果写入 Memory"""
-    ...
+class WorkflowComposer:
+    def _check_preconditions(self, capability: Capability,
+                              target: ResourceIdentity, worldview: WorldView) -> bool:
+        """使用 Expression 自动检查前置条件。"""
+        for expr in capability.preconditions:
+            if not expr.evaluate(worldview, target):
+                logger.info(f"Precondition failed: {expr} for {target}")
+                return False
+        return True
 ```
 
 ---
 
-## 22. 性能考量
+## 16. Feedback + Episode（v15：DecisionStep）
 
-同 v9。
+### 16.1 EpisodeStep（v15：增加 DecisionStep）
+
+```python
+@dataclass
+class EpisodeStep:
+    order: int
+    step_type: str                    # "observation", "hypothesis", "goal_choice",
+                                      # "decision", "intent", "workflow",
+                                      # "execution", "outcome", "user_feedback",
+                                      # "reflection"（P3）
+    data: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
+class DecisionStep(EpisodeStep):
+    """决策步骤——记录"为什么选这个"。
+
+    v15 新增。这是 LLM 训练最宝贵的数据。
+    """
+    step_type: str = "decision"
+    candidates_scores: Dict[str, float] = field(default_factory=dict)
+                                        # {"candidate_a": 85.0, "candidate_b": 72.3}
+    selected_candidate_id: str = ""
+    reject_reasons: List[str] = field(default_factory=list)
+                                        # ["candidate_a: Policy denied (risk >= 80)",
+                                        #  "candidate_b: Lower utility score"]
+    selected_reason: str = ""
+```
+
+### 16.2 Episode 生命周期
+
+```python
+# 完整 Episode 示例
+episode = Episode(
+    episode_id="ep-001",
+    finding_id="f-001",
+    decision_id="d-001",
+    context_hash="ctx_abc123",
+)
+
+# Step 1: 观察到什么
+episode.add_step("observation", {
+    "category": "RabbitMQHeartbeatLost",
+    "confidence": 0.91,
+    "evidence": ["heartbeat timeout", "AMQP disconnected"],
+})
+
+# Step 2: 假设
+episode.add_step("hypothesis", {
+    "hypothesis": "RabbitMQ network partition",
+    "confidence": 0.91,
+})
+
+# Step 3: Goal
+episode.add_step("goal_choice", {
+    "primary": "restore_messaging",
+    "desired_state": "RabbitMQ.healthy",
+})
+
+# Step 4: 决策（v15 新增）
+episode.add_step("decision", {
+    "candidates_scores": {
+        "restart_service": 85.0,
+        "collect_diagnostic": 72.3,
+        "failover": 45.0,
+    },
+    "selected_candidate_id": "restart_service",
+    "reject_reasons": [
+        "collect_diagnostic: Lower utility (will not achieve goal)",
+        "failover: No standby available",
+    ],
+    "selected_reason": "Highest utility: 85.0 (success=0.95, risk=30, duration=15s)",
+})
+
+# Step 5: 执行
+episode.add_step("execution", {
+    "workflow_id": "wf-001",
+    "outcome": "success",
+    "duration_ms": 12000,
+})
+
+# Step 6: 结果
+episode.add_step("outcome", {
+    "final_outcome": "success",
+    "actual_state": "RabbitMQ.healthy",
+})
+
+episode.final_outcome = "success"
+episode.total_duration_ms = 12000
+```
+
+### 16.3 PolicyEngine 记录 DecisionStep（v15）
+
+```python
+class PolicyEngine:
+    def evaluate_candidates(self, ...) -> PolicyEvaluationResult:
+        # ... 评估逻辑 ...
+        decision_step = DecisionStep(
+            candidates_scores={
+                c.workflow.name: self._compute_utility(c)
+                for c in candidates
+            },
+            selected_candidate_id=selected.workflow.name if selected else "",
+            reject_reasons=[f"{c.workflow.name}: {reason}"
+                           for c, reason in rejected],
+            selected_reason=selected_reason,
+        )
+        # DecisionStep 将被写入 Episode
+        result.decision_step = decision_step
+        return result
+```
+
+---
+
+## 17. Decision State Machine + Orchestrator（v15：职责分离）
+
+### 17.1 DecisionStateMachine（纯生命周期管理）
+
+```python
+class DecisionStatus(Enum):
+    CREATED = "created"
+    PLANNING = "planning"
+    PLANNED = "planned"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTING = "executing"
+    VERIFYING = "verifying"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    ROLLING_BACK = "rolling_back"
+    ROLLED_BACK = "rolled_back"
+    CANCELLED = "cancelled"
+
+
+class DecisionStateMachine:
+    """
+    纯生命周期管理。
+
+    v15: 只负责状态转换 + Event 发布。
+        不负责编排（编排由 DecisionOrchestrator 负责）。
+    """
+
+    TRANSITIONS = { ... }  # 同 v14
+
+    def transition(self, decision: 'DecisionRecord',
+                   to: DecisionStatus) -> 'DecisionRecord':
+        current = decision.status
+        allowed = self.TRANSITIONS.get(current, [])
+        if to not in allowed:
+            raise InvalidTransitionError(
+                f"Cannot transition from {current.value} to {to.value}")
+        decision.status = to
+        decision.status_history.append((to, datetime.utcnow()))
+        if to in (DecisionStatus.SUCCEEDED, DecisionStatus.FAILED,
+                  DecisionStatus.ROLLED_BACK, DecisionStatus.CANCELLED):
+            decision.completed_at = datetime.utcnow()
+        self.bus.publish("platform.decision.state", self._build_event(decision, to))
+        return decision
+```
+
+### 17.2 DecisionOrchestrator（编排——v15 新增）
+
+```python
+class DecisionOrchestrator:
+    """
+    Decision 编排器——v15 从 DecisionManager 拆分。
+
+    职责：串联规划→评估→策略→执行的完整流程。
+    不负责：生命周期状态管理（DecisionStateMachine 负责）。
+    """
+
+    def __init__(self, planner: Planner,
+                 exec_planner: ExecutionPlanner,
+                 risk_engine: RiskEngine,
+                 blast_analyzer: BlastRadiusAnalyzer,
+                 policy_engine: PolicyEngine,
+                 state_machine: DecisionStateMachine,
+                 workflow_engine: 'WorkflowEngine',
+                 episode_store: EpisodeStore):
+        ...
+
+    def execute(self, finding: Finding, context: Context,
+                goal: Goal = None) -> DecisionResult:
+        """完整决策执行流程。"""
+        decision = DecisionRecord(
+            decision_id=uuid4().hex,
+            finding_id=finding.id,
+            context_hash=context.context_hash,
+        )
+
+        try:
+            # === Phase 1: PLAN ===
+            self.state_machine.transition(decision, DecisionStatus.PLANNING)
+            plan_result = self.planner.plan(finding, context, goal)
+            decision.goal = plan_result.goal
+            decision.intents = plan_result.intents
+            self.state_machine.transition(decision, DecisionStatus.PLANNED)
+
+            # === Phase 2: EVALUATE ===
+            candidates = self.exec_planner.plan(plan_result, context)
+            for intent, candidate in zip(plan_result.intents, candidates):
+                candidate.risk_profile = self.risk_engine.compute(
+                    intent, candidate, context, self.planner.worldview)
+            decision.candidates = candidates
+
+            # === Phase 3: POLICY ===
+            result = self.policy_engine.evaluate_candidates(
+                plan_result, candidates, context, finding, decision)
+            decision.selected_candidate = result.selected_candidate
+            decision.policy_rules_matched = result.matched_rules
+
+            if result.decision == PolicyDecision.CANDIDATE_SELECTED:
+                self.state_machine.transition(decision, DecisionStatus.APPROVED)
+            elif result.decision == PolicyDecision.PENDING_APPROVAL:
+                self.state_machine.transition(decision, DecisionStatus.PENDING_APPROVAL)
+                return DecisionResult(decision=decision, status="pending_approval")
+            else:
+                self.state_machine.transition(decision, DecisionStatus.REJECTED)
+                return DecisionResult(decision=decision, status="rejected")
+
+            # === Phase 4: EXECUTE ===
+            self.state_machine.transition(decision, DecisionStatus.EXECUTING)
+            execution_result = self.workflow_engine.execute(
+                result.selected_candidate.workflow)
+            self.state_machine.transition(decision, DecisionStatus.VERIFYING)
+            # Verify ...
+            outcome = "success" if execution_result.success else "failed"
+            if outcome == "success":
+                self.state_machine.transition(decision, DecisionStatus.SUCCEEDED)
+            else:
+                self.state_machine.transition(decision, DecisionStatus.FAILED)
+
+            # === Phase 5: LEARN ===
+            self._record_episode(decision, plan_result, execution_result)
+
+            return DecisionResult(decision=decision, status=outcome)
+
+        except Exception as e:
+            self.state_machine.transition(decision, DecisionStatus.FAILED)
+            raise
+
+    def _record_episode(self, decision, plan_result, execution_result):
+        """记录 Episode（含 DecisionStep）。"""
+        episode = Episode(episode_id=uuid4().hex,
+                          finding_id=decision.finding_id,
+                          decision_id=decision.decision_id,
+                          context_hash=decision.context_hash)
+        # ... 记录各步骤 ...
+        self.feedback_loop.record_episode(episode)
+```
+
+---
+
+## 18. Episode + ExperienceGraph（v15：增加 Failure Pattern 维度）
+
+### 18.1 ExperienceGraphProjection（v15：key 增加 failure_pattern）
+
+```python
+@dataclass
+class ExperienceStats:
+    """统计经验——按 (failure_pattern, capability_id, env_fingerprint) 索引。
+
+    v15: 增加 failure_pattern 维度。
+         不同故障场景的相同操作有不同成功率。
+    """
+    failure_pattern: str = ""         # "RabbitMQHeartbeatLost", "NovaOOM"
+    capability_id: str = ""
+    env_fingerprint: str = ""
+    total_executions: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    avg_duration_ms: float = 0.0
+
+    @property
+    def key(self) -> str:
+        return f"{self.failure_pattern}|{self.capability_id}|{self.env_fingerprint}"
+
+    @property
+    def success_rate(self) -> float:
+        return self.success_count / self.total_executions if self.total_executions else 0.0
+
+
+class ExperienceGraphProjection(Projection):
+    """
+    Episode → 统计投影。
+
+    v15: key = failure_pattern|capability_id|env_fingerprint。
+         "RabbitMQHeartbeatLost 时 restart 成功率"
+         不再被 "NovaOOM 时 restart 成功率" 干扰。
+    """
+
+    name = "experience_graph"
+
+    def apply(self, envelope: EventEnvelope):
+        if envelope.event_type == "feedback.learning":
+            event = deserialize_learning_event(envelope)
+            key = ExperienceStats(
+                failure_pattern=event.failure_pattern,
+                capability_id=event.capability_id,
+                env_fingerprint=event.env_fingerprint,
+            ).key
+            stats = self._stats.get(key)
+            if not stats:
+                stats = ExperienceStats(
+                    failure_pattern=event.failure_pattern,
+                    capability_id=event.capability_id,
+                    env_fingerprint=event.env_fingerprint,
+                )
+                self._stats[key] = stats
+            stats.total_executions += 1
+            if event.outcome == "success":
+                stats.success_count += 1
+```
+
+---
+
+## 19. 置信度模型
+
+同 v7。
+
+---
+
+## 20. API
+
+```text
+# WorldView（v15：拆为 3 个 Query 端点）
+GET /api/v1/worldview/topology/dependents?type=SERVICE&id=rabbitmq
+GET /api/v1/worldview/state/current?type=INSTANCE&id=abc-123
+GET /api/v1/worldview/history/events?type=SERVICE&id=nova-api&count=50
+
+# Expressions（v15 新增）
+POST /api/v1/expressions/evaluate
+  → { field, operator, value, target → result: true/false }
+
+# Goal（v15：目标状态）
+POST /api/v1/goals/infer
+  → { primary, tree: [{ desired_state, target, children }] }
+
+# Decision Orchestrator（v15 拆分）
+POST /api/v1/decisions/execute  # Orchestrator.execute() — 全流程
+POST /api/v1/decisions/state    # StateMachine.transition()
+GET  /api/v1/decisions/{id}     # DecisionRecord
+
+# Episode（v15：DecisionStep）
+GET /api/v1/episodes/by-decision/{decision_id}
+  → { steps: [..., {step_type: "decision", candidates_scores, reject_reasons}] }
+
+# Capability（v15：Expression）
+GET /api/v1/capabilities/executors
+  → [{ preconditions: [{field, operator, value}], ... }]
+
+# Blast Radius（v15：ImpactModel）
+POST /api/v1/blast-radius/analyze
+  → { impact_model: {severity, duration, scope}, ... }
+
+# Utility（v15：权重可配置）
+POST /api/v1/policies/utility
+GET  /api/v1/policies/weights  # 当前权重
+PUT  /api/v1/policies/weights  # 更新权重（Config 注入）
+
+# Experience（v15：failure_pattern 维度）
+GET /api/v1/experience/success-rate?pattern=RabbitMQHeartbeatLost&capability=ssh.restart_service&env=prod
+
+# 其余同 v14
+```
+
+---
+
+## 21. 实施阶段
+
+| Phase | 新增/变更内容 |
+|-------|---------------|
+| **0-3** | 同 v14（Foundation → Projection → Interaction → Correlation） |
+| **4** | **WorldView（TopologyQuery / StateQuery / HistoryQuery Facade）** + ContextAPI + CanonicalHasher |
+| **5** | **Goal Tree（desired_state，不含 Workflow 概念）** + **Expression 类型** + Planner + Constraint |
+| **6** | **Capability（Expression Pre/Post + ImpactModel）** + ExecutionPlanner + **Blast Radius Analyzer** + RiskEngine + **Policy（可配置 Utility）** + **DecisionStateMachine + DecisionOrchestrator（分离）** |
+| **7** | **Episode（DecisionStep）** + Feedback + **ExperienceGraphProjection（+ Failure Pattern 维度）** |
+
+---
+
+## 22. 测试策略
+
+```python
+# === WorldView 拆分 ===
+def test_worldview_is_facade():
+    """WorldView 是 Facade，不包含查询实现"""
+    wv = WorldView(topology=TopologyQuery(mock_graph),
+                    state=StateQuery(mock_state, mock_timeline),
+                    history=HistoryQuery(mock_events))
+    assert hasattr(wv, "topology") and hasattr(wv, "state") and hasattr(wv, "history")
+    # WorldView 自身没有任何方法（除了 __init__）
+
+def test_topology_query_independent():
+    """TopologyQuery 可独立使用"""
+    tq = TopologyQuery(graph_projection)
+    deps = tq.get_dependents(ResourceIdentity(ResourceType.SERVICE, "rabbitmq"))
+    assert len(deps) >= 3
+
+def test_state_query_resolve_field():
+    """StateQuery.resolve_field 供 Expression 使用"""
+    sq = StateQuery(mock_state, mock_timeline)
+    value = sq.resolve_field("resource.status",
+                              ResourceIdentity(ResourceType.INSTANCE, "vm-1"))
+    assert value in ("ACTIVE", "ERROR", "SHUTOFF")
+
+# === Goal = 目标状态 ===
+def test_goal_desired_state():
+    """GoalNode 只描述目标状态，不含 action/ordering"""
+    node = GoalNode(goal_id="g1", desired_state="RabbitMQ.healthy",
+                     target=ResourceIdentity(ResourceType.SERVICE, "rabbitmq"))
+    assert not hasattr(node, "action")       # v14 移除
+    assert not hasattr(node, "ordering")     # v14 移除
+    assert node.desired_state == "RabbitMQ.healthy"
+
+def test_intent_generator_matches_desired_state():
+    """IntentGenerator 按目标状态匹配"""
+    gen = RestartIntentGenerator(...)
+    node = GoalNode(goal_id="g1", desired_state="RabbitMQ.healthy", target=...)
+    assert gen.can_handle(mock_finding, node, worldview)
+    node2 = GoalNode(goal_id="g2", desired_state="evidence_collected", target=...)
+    assert not gen.can_handle(mock_finding, node2, worldview)
+
+def test_goal_inferrer_produces_state_tree():
+    """GoalInferrer 产出目标状态树，不是 Workflow 树"""
+    goal = GoalInferrer().infer(finding, context, worldview)
+    assert goal.tree.desired_state is not None
+    assert all("healthy" in node.desired_state or "responding" in node.desired_state
+               for node in goal.tree.children)
+
+# === Expression ===
+def test_expression_evaluate():
+    """Expression 使用 WorldView 自动求值"""
+    worldview = WorldView(topology=..., state=StateQuery(mock_state, ...), ...)
+    expr = Expression("resource.status", "==", "ACTIVE")
+    mock_state.resolve.return_value = "ACTIVE"
+    assert expr.evaluate(worldview, target) == True
+
+    mock_state.resolve.return_value = "ERROR"
+    assert expr.evaluate(worldview, target) == False
+
+def test_expression_exists_operator():
+    expr = Expression("ssh.accessible", "exists")
+    worldview.state.resolve.return_value = True
+    assert expr.evaluate(worldview, target) == True
+
+def test_capability_preconditions_expression():
+    """Capability 使用 Expression，不是字符串"""
+    cap = Capability(capability_id="ssh.restart_service",
+                      preconditions=[
+                          Expression("host.host_status", "==", "alive"),
+                          Expression("service.exists", "==", True),
+                      ])
+    assert all(isinstance(p, Expression) for p in cap.preconditions)
+    assert cap.preconditions[0].field == "host.host_status"
+
+# === DecisionStep ===
+def test_decision_step_record_reason():
+    """DecisionStep 记录候选方案评分和拒绝理由"""
+    step = DecisionStep(
+        candidates_scores={"restart": 85.0, "diagnose": 72.3},
+        selected_candidate_id="restart",
+        reject_reasons=["diagnose: Lower utility"],
+        selected_reason="Highest utility: 85.0",
+    )
+    assert step.candidates_scores["restart"] == 85.0
+    assert len(step.reject_reasons) == 1
+    assert step.selected_candidate_id == "restart"
+
+def test_episode_contains_decision_step():
+    """Episode 包含 DecisionStep"""
+    episode = Episode(episode_id="ep-1", finding_id="f-1")
+    episode.add_step("decision", {
+        "candidates_scores": {"restart": 85.0},
+        "selected_candidate_id": "restart",
+        "reject_reasons": [],
+    })
+    assert episode.steps[-1].step_type == "decision"
+    assert "candidates_scores" in episode.steps[-1].data
+
+# === DecisionOrchestrator（分离） ===
+def test_state_machine_pure_lifecycle():
+    """DecisionStateMachine 只做生命周期"""
+    sm = DecisionStateMachine(bus)
+    d = DecisionRecord(decision_id="d1")
+    d.status = DecisionStatus.CREATED
+    sm.transition(d, DecisionStatus.PLANNING)
+    assert d.status == DecisionStatus.PLANNING
+
+def test_orchestrator_uses_state_machine():
+    """DecisionOrchestrator 编排流程，StateMachine 管理状态"""
+    orchestrator = DecisionOrchestrator(planner, exec_planner, risk, blast,
+                                          policy, state_machine, workflow, episodes)
+    result = orchestrator.execute(finding, context)
+    assert result.decision.status in (
+        DecisionStatus.SUCCEEDED,
+        DecisionStatus.FAILED,
+        DecisionStatus.REJECTED,
+    )
+
+# === Utility 权重可配置 ===
+def test_utility_configurable_weights():
+    """Utility 权重可通过配置调整"""
+    engine = PolicyEngine(..., weights=UtilityWeights(success=0.4, risk=0.4))
+    assert engine.weights.success == 0.4
+    assert engine.weights.risk == 0.4
+
+def test_utility_different_weights_different_ranking():
+    """不同权重产生不同排序"""
+    engine_a = PolicyEngine(..., weights=UtilityWeights(success=0.6, risk=0.1))
+    engine_b = PolicyEngine(..., weights=UtilityWeights(success=0.1, risk=0.6))
+    candidates = [
+        WorkflowCandidate(workflow=wf1, estimated_success_rate=0.95, ...),
+        WorkflowCandidate(workflow=wf2, estimated_success_rate=0.85, ...),
+    ]
+    ranked_a = engine_a._rank(candidates, intent, worldview)
+    ranked_b = engine_b._rank(candidates, intent, worldview)
+    # 不同权重下排序可能不同
+
+# === Blast Radius 含 ImpactModel ===
+def test_blast_radius_uses_impact_model():
+    """Blast Radius 使用 Capability.impact_model"""
+    cap = Capability(capability_id="ssh.restart_service",
+                      impact_model=ImpactModel("temporary", "30s", "service"))
+    analyzer = BlastRadiusAnalyzer(...)
+    report = analyzer.analyze(intent, target, cap, worldview)
+    assert report.risk_level in ("low", "medium", "high", "critical")
+    # temporary 30s 的风险 < permanent
+
+# === ExperienceGraph 含 failure_pattern ===
+def test_experience_stats_with_failure_pattern():
+    """ExperienceStats 按 (failure_pattern, capability, env) 索引"""
+    stats = ExperienceStats(failure_pattern="RabbitMQHeartbeatLost",
+                             capability_id="ssh.restart_service",
+                             env_fingerprint="prod:rabbitmq")
+    assert "RabbitMQHeartbeatLost|ssh.restart_service|prod:rabbitmq" == stats.key
+
+def test_different_pattern_separate_stats():
+    """不同 failure_pattern 的统计不混合"""
+    p1 = ExperienceStats(failure_pattern="RabbitMQHeartbeatLost", ...)
+    p2 = ExperienceStats(failure_pattern="NovaOOM", ...)
+    assert p1.key != p2.key
+
+# === End-to-end ===
+def test_end_to_end_v15():
+    """v15 完整链路"""
+    # 1. Finding（不含 recommended_action）
+    finding = Finding(category="RabbitMQHeartbeatLost",
+                      hypothesis="RabbitMQ network partition",
+                      confidence=0.91)
+
+    # 2. Orchestrator 执行全流程
+    orchestrator = DecisionOrchestrator(...)
+    result = orchestrator.execute(finding, context)
+
+    # 3. Decision 有生命周期
+    assert result.decision.status in (
+        DecisionStatus.SUCCEEDED, DecisionStatus.FAILED,
+        DecisionStatus.REJECTED, DecisionStatus.PENDING_APPROVAL,
+    )
+    assert len(result.decision.status_history) > 1
+
+    # 4. Episode 包含 DecisionStep
+    episode = episode_store.get_by_decision(result.decision.decision_id)
+    assert episode is not None
+    assert any(s.step_type == "decision" for s in episode.steps)
+    decision_step = next(s for s in episode.steps if s.step_type == "decision")
+    assert "candidates_scores" in decision_step.data
+    assert "reject_reasons" in decision_step.data
+```
 
 ---
 
@@ -1128,24 +1398,29 @@ def test_feedback_loop_writes_memory():
 
 | 影响点 | 策略 |
 |--------|------|
-| `context_version` | 存量 Finding.context_version=""，不影响功能 |
-| Policy 迁移（Callable → OPA） | 过渡期双运行（Callable + OPA），Phase 6 切换 |
-| Capability effect/risk | 默认 effect=EXECUTE, risk_score=50，不声明不影响策略 |
-| Planner 多 Candidate | 存量调用 `planner.plan()` 返回单元素列表，接口兼容 |
-| OPA endpoints | 新部署新端点，旧 Policy API 保持（内部转为 OPA） |
+| `WorldView` 拆为 Facade | 旧版代码 `worldview.get_resource_state(x)` → `worldview.state.get_state(x)`；兼容过渡期保持旧方法作为委托 |
+| `GoalNode` 移除 action/ordering | v14 的 `GoalNode` 字段 deprecate 但保留；v16 移除 |
+| `Capability.preconditions` 字符串 → Expression | 旧字符串自动转为 `Expression(field=str, operator="==", value=True)` |
+| `DecisionManager` → `DecisionOrchestrator` | 旧 `DecisionManager` 保留为 Orchestrator 的 alias |
+| `ExperienceStats.key` 增加 failure_pattern | 旧 key 自动补 `failure_pattern=""` |
+| `EpisodeStep.step_type` 增加 "decision" | 不影响已有 step_type |
 
 ---
 
-## 24. v9 → v10 变更对照
+## 24. v14 → v15 变更对照
 
-| 维度 | v9 | v10 |
-|------|----|-----|
-| **Context 版本** | 无 | **context_version**（sha256，可重现） |
-| **Finding** | 无 Context 引用 | **+context_version + context_snapshot_id** |
-| **Policy Engine** | 自定义 DSL（Callable） | **OPA (Open Policy Agent) + Rego** |
-| **Planner** | 单个 Workflow | **List[WorkflowCandidate]**（多候选） |
-| **Capability** | execute() | **+effect (READ/WRITE/RESTART/DELETE) + risk_score** |
-| **Policy + Capability** | 靠名字匹配 | **OPA 直接使用 Capability.effect 决策** |
-| **KnowledgeDocument** | source_type + content | **+provenance（origin, version, trust_level）** |
-| **API** | — | **+policies/rego, policies/evaluate-candidates, capabilities/effect** |
-| **测试** | 30+ | **35+**（context version, planner candidates, OPA, effect model） |
+| 维度 | v14 | v15 |
+|------|-----|-----|
+| **WorldView** | 单体类（10+ 方法） | **Facade + TopologyQuery + StateQuery + HistoryQuery** |
+| **GoalNode** | `action` + `ordering` + `completion` | **`desired_state` + `target`**（目标状态） |
+| **GoalInferrer** | 产出 action 树 | **产出 desired_state 树** |
+| **Capability Precondition** | `List[str]`（字符串） | **`List[Expression]`**（field + operator + value） |
+| **Capability Metadata** | effects + base_risk | **+ `Expression` pre/post + `ImpactModel`** |
+| **Episode** | 6 种 step_type | **+ `decision` 类型（DecisionStep）** |
+| **DecisionManager** | lifecycle + orchestration | **DecisionOrchestrator + DecisionStateMachine** |
+| **Utility 权重** | 硬编码（0.5/0.3/0.1/0.05） | **UtilityWeights 类 + OPA Rego 可配置** |
+| **Blast Radius 输入** | 仅 Dependency Graph | **+ Capability.ImpactModel + Current State** |
+| **ExperienceGraph Key** | `(capability_id, env_fingerprint)` | **`(failure_pattern, capability_id, env_fingerprint)`** |
+| **Expression** | 不存在 | **新增 `Expression` 数据类 + `evaluate()` 方法** |
+| **API 新增** | — | **`/worldview/topology`、`/worldview/state`、`/expressions/evaluate`、`/policies/weights`** |
+| **测试** | 50+ | **55+** |

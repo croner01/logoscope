@@ -1,7 +1,8 @@
 """DecisionRecord — 决策记录。"""
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
+from ..decision.state_machine import DecisionStatus
 
 
 @dataclass
@@ -23,7 +24,9 @@ class DecisionRecord:
     execution_id: str = ""
     approver: str = "auto"
     created_at: datetime = field(default_factory=datetime.utcnow)
-    status: str = "pending"
+    status: DecisionStatus = DecisionStatus.CREATED
+    status_history: List[Tuple[DecisionStatus, datetime]] = field(default_factory=list)
+    completed_at: Optional[datetime] = None
 
 
 class DecisionRecordStore:

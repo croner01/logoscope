@@ -1,9 +1,13 @@
 """DecisionOrchestrator — v15: 纯编排（与 StateMachine 分离）。"""
 import uuid
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from .state_machine import DecisionStateMachine, DecisionStatus
+from ..policy.decision_record import DecisionRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,30 +32,36 @@ class DecisionOrchestrator:
     """
 
     def __init__(self, planner, exec_planner, risk_engine,
-                 blast_analyzer, policy_engine,
+                 policy_engine,
                  state_machine: DecisionStateMachine,
-                 workflow_engine, episode_store):
+                 workflow_engine, episode_store,
+                 blast_analyzer=None):
+        """
+        Args:
+            blast_analyzer: 已废弃——保留仅用于向后兼容，不再使用。
+                            风险分析的 blast radius 部分由 RiskEngine 内部处理。
+        """
         self.planner = planner
         self.exec_planner = exec_planner
         self.risk_engine = risk_engine
-        self.blast_analyzer = blast_analyzer
         self.policy_engine = policy_engine
         self.state_machine = state_machine
         self.workflow_engine = workflow_engine
         self.episode_store = episode_store
+        if blast_analyzer is not None:
+            logger.warning(
+                "blast_analyzer parameter is deprecated and unused "
+                "in DecisionOrchestrator. RiskEngine handles blast radius analysis."
+            )
 
     def execute(self, finding, context, goal=None) -> DecisionResult:
         """完整决策执行流程。"""
         decision_id = uuid.uuid4().hex
-
-        # 模拟 DecisionRecord（简化版——生产用完整 DecisionRecord）
-        decision = type("Decision", (), {
-            "decision_id": decision_id,
-            "finding_id": getattr(finding, "id", "") or getattr(finding, "category", ""),
-            "status": DecisionStatus.CREATED,
-            "status_history": [],
-            "completed_at": None,
-        })()
+        decision = DecisionRecord(
+            decision_id=decision_id,
+            finding_id=getattr(finding, "id", "") or getattr(finding, "category", ""),
+            status=DecisionStatus.CREATED,
+        )
 
         try:
             # === Phase 1: PLAN ===
@@ -111,24 +121,41 @@ class DecisionOrchestrator:
             return DecisionResult(decision=decision, status=outcome)
 
         except Exception as e:
-            try:
-                self.state_machine.transition(decision, DecisionStatus.FAILED)
-            except Exception:
-                pass
+            logger.error(
+                "DecisionOrchestrator.execute failed: %s (decision_id=%s)",
+                str(e), decision_id, exc_info=True,
+            )
+            # 仅在状态机状态允许时 FAILED 转换
+            current_status = DecisionStatus(decision.status) if hasattr(decision, "status") else None
+            if current_status and current_status not in (
+                DecisionStatus.SUCCEEDED, DecisionStatus.FAILED,
+                DecisionStatus.ROLLED_BACK, DecisionStatus.CANCELLED,
+            ):
+                try:
+                    self.state_machine.transition(decision, DecisionStatus.FAILED)
+                except Exception:
+                    pass  # 状态机拒绝转换时不做任何事——记录即可
             return DecisionResult(decision=decision, status="failed")
 
     def _record_episode(self, decision, plan_result, policy_result):
         """记录 Episode。"""
-        episode = type("Episode", (), {
-            "episode_id": uuid.uuid4().hex,
-            "finding_id": getattr(decision, "finding_id", ""),
-            "decision_id": getattr(decision, "decision_id", ""),
-            "steps": [],
-        })()
-        episode.steps.append({"step_type": "observation", "data": {
+        from ..episode.models import Episode, EpisodeStep
+
+        episode = Episode(
+            episode_id=uuid.uuid4().hex,
+            finding_id=getattr(decision, "finding_id", ""),
+            decision_id=getattr(decision, "decision_id", ""),
+        )
+        episode.add_step("observation", {
             "finding_id": decision.finding_id,
-        }})
-        episode.steps.append({"step_type": "decision", "data": {
+            "decision_id": decision.decision_id,
+        })
+        episode.add_step("decision", {
             "candidates_scores": getattr(policy_result, "utility_scores", {}),
-        }})
+            "selected_candidate_id": getattr(
+                getattr(policy_result, "selected_candidate", None),
+                "workflow", None
+            ),
+            "reject_reasons": getattr(decision, "rejected_candidates", []),
+        })
         self.episode_store.save(episode)

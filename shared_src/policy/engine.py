@@ -1,9 +1,12 @@
-"""PolicyEngine — 策略引擎（OPA effects-based + 可配置 Utility 权重）。"""
+"""PolicyEngine — 策略引擎（Utility 权重可配置 + OPA 集成）。"""
 import uuid
+import logging
 from typing import List, Optional, Any
 from dataclasses import dataclass
 from .models import UtilityWeights, PolicyEvaluationResult, PolicyDecision
 from .decision_record import DecisionRecord, DecisionRecordStore
+
+logger = logging.getLogger(__name__)
 
 
 class PolicyEngine:
@@ -15,15 +18,46 @@ class PolicyEngine:
     - 中风险（40-80）需要人工审批
     - 低风险（<40）自动批准
     - 自动创建 DecisionRecord
+    - 支持 OPA 集成（通过 opa_endpoint 配置）
     """
+
+    # Python 内建的风险阈值（与 deploy/policies/high_risk.rego 保持同步）
+    RISK_DENY = 80
+    RISK_PENDING = 40
 
     def __init__(self, weights: UtilityWeights,
                  blast_analyzer=None, risk_engine=None,
-                 decision_store=None):
+                 decision_store=None,
+                 opa_endpoint: Optional[str] = None):
+        """
+        Args:
+            opa_endpoint: OPA 服务地址（可选）。
+                          未配置时使用 Python 内建逻辑，
+                          配置后额外使用 OPA Rego 策略评估。
+        """
         self.weights = weights
         self.blast_analyzer = blast_analyzer
         self.risk_engine = risk_engine
         self.decision_store = decision_store or DecisionRecordStore()
+        self.opa_endpoint = opa_endpoint
+
+        if opa_endpoint:
+            logger.info("OPA integration enabled at %s", opa_endpoint)
+            try:
+                import requests
+                self._opa_session = requests.Session()
+            except ImportError:
+                logger.warning(
+                    "OPA endpoint configured but 'requests' not installed. "
+                    "OPA evaluation disabled. Install with: pip install requests"
+                )
+                self.opa_endpoint = None
+        else:
+            logger.info(
+                "OPA not configured — using Python built-in risk thresholds "
+                "(deny>=%d, pending>=%d). Set opa_endpoint for OPA Rego policies.",
+                self.RISK_DENY, self.RISK_PENDING,
+            )
 
     def evaluate(self, candidates: List, action: str,
                  entity_type: str, entity_name: str,
@@ -39,15 +73,20 @@ class PolicyEngine:
         utility_scores = {c.workflow.name: self._compute_utility(c, entity_type, entity_name)
                           for c in ranked}
 
-        # 3. 决策
-        if best.final_risk >= 80:
+        # 3. OPA 评估（如已配置）
+        opa_match = self._evaluate_opa(candidates, action, entity_type, entity_name)
+
+        # 4. 决策（OPA 结果优先，OPA 未配置时使用 Python 内建逻辑）
+        if opa_match is not None:
+            decision = opa_match
+        elif best.final_risk >= self.RISK_DENY:
             decision = PolicyDecision.DENY
-        elif best.final_risk >= 40:
+        elif best.final_risk >= self.RISK_PENDING:
             decision = PolicyDecision.PENDING_APPROVAL
         else:
             decision = PolicyDecision.CANDIDATE_SELECTED
 
-        # 4. 记录 DecisionRecord
+        # 5. 记录 DecisionRecord
         record = DecisionRecord(
             decision_id=uuid.uuid4().hex,
             finding_id=finding_id,
@@ -94,3 +133,49 @@ class PolicyEngine:
             - duration * self.weights.cost
             - vm_count * self.weights.blast
         )
+
+    def _evaluate_opa(self, candidates, action: str,
+                       entity_type: str, entity_name: str
+                       ) -> Optional[PolicyDecision]:
+        """
+        向 OPA 服务评估策略（需配置 opa_endpoint）。
+
+        未配置 opa_endpoint 时返回 None —— 回退到 Python 内建逻辑。
+        """
+        if not self.opa_endpoint:
+            return None
+
+        try:
+            import requests
+            input_data = {
+                "candidate": {
+                    "estimated_success_rate": candidates[0].estimated_success_rate if candidates else 0,
+                    "risk": {
+                        "final_risk": candidates[0].final_risk if candidates else 0,
+                    },
+                    "estimated_duration_minutes": candidates[0].estimated_duration_minutes if candidates else 0,
+                },
+                "action": action,
+                "resource": {
+                    "type": entity_type,
+                    "id": entity_name,
+                },
+            }
+            resp = self._opa_session.post(
+                f"{self.opa_endpoint}/v1/data/logoscope/policy",
+                json={"input": input_data},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                decision_str = result.get("result", {}).get("decision", "deny")
+                for d in PolicyDecision:
+                    if d.value == decision_str:
+                        return d
+            logger.warning("OPA returned non-200: %s", resp.status_code)
+        except requests.RequestException as e:
+            logger.error("OPA request failed: %s — falling back to built-in", str(e))
+        except Exception:
+            logger.exception("Unexpected OPA error — falling back to built-in")
+
+        return None  # fallback to built-in logic

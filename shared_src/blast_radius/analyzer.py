@@ -15,9 +15,20 @@ class BlastRadiusAnalyzer:
     - Current State → 影响程度调整
     """
 
-    def __init__(self, topology, state):
+    # 默认阈值——可通过 constructor 注入定制
+    DEFAULT_HIGH_DEPENDENTS = 10        # temporary + dependents > N → high
+    DEFAULT_HIGH_ERROR_DEPENDENTS = 5   # ERROR state + dependents > N → high
+    DEFAULT_MEDIUM_DEPENDENTS = 2       # dependents > N → medium else low
+
+    def __init__(self, topology, state,
+                 high_dependents: int = None,
+                 high_error_dependents: int = None,
+                 medium_dependents: int = None):
         self.topology = topology
         self.state = state
+        self.high_dependents = high_dependents or self.DEFAULT_HIGH_DEPENDENTS
+        self.high_error_dependents = high_error_dependents or self.DEFAULT_HIGH_ERROR_DEPENDENTS
+        self.medium_dependents = medium_dependents or self.DEFAULT_MEDIUM_DEPENDENTS
 
     def analyze(self, capability: Capability, entity_type: str,
                 entity_name: str) -> BlastRadiusReport:
@@ -55,11 +66,11 @@ class BlastRadiusAnalyzer:
                             dependents: list) -> str:
         if impact.severity == "permanent":
             return "critical"
-        if impact.severity == "temporary" and len(dependents) > 10:
+        if impact.severity == "temporary" and len(dependents) > self.high_dependents:
             return "high"
-        if current_state == "ERROR" and len(dependents) > 5:
+        if current_state == "ERROR" and len(dependents) > self.high_error_dependents:
             return "high"
-        return "medium" if len(dependents) > 2 else "low"
+        return "medium" if len(dependents) > self.medium_dependents else "low"
 
     def _build_reasoning(self, impact: ImpactModel, current_state: str,
                           risk_level: str, dependents: list) -> str:

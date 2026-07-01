@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
+VALID_OPERATORS = frozenset({
+    "==", "!=", "in", "not_in", "exists", "not_exists", "contains",
+})
+
+
 @dataclass
 class Expression:
     """
@@ -20,6 +25,14 @@ class Expression:
     field: str = ""
     operator: str = "=="
     value: Any = None
+
+    def __post_init__(self):
+        """初始化时验证操作符合法性。"""
+        if self.operator not in VALID_OPERATORS:
+            raise ValueError(
+                f"Unknown operator: '{self.operator}'. "
+                f"Valid operators: {sorted(VALID_OPERATORS)}"
+            )
 
     def evaluate(self, worldview, entity_type: str, entity_name: str) -> bool:
         """使用 WorldView 求值。"""
@@ -39,7 +52,14 @@ class Expression:
         elif self.operator == "not_exists":
             return actual is None
         elif self.operator == "contains":
-            return self.value in actual if isinstance(actual, (list, str)) else False
+            # 支持所有容器类型 (list, str, dict, tuple, set, frozenset)
+            if actual is None:
+                return False
+            try:
+                return self.value in actual
+            except TypeError:
+                return False
+        # 操作符已在 __post_init__ 验证，不会走到这里
         return False
 
     def __str__(self) -> str:

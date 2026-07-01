@@ -91,4 +91,4 @@ class TestExperienceGraphProjection:
         projector = ExperienceGraphProjection(epoch="20260701")
         projector.record_learning("PatternA", "cap.a", "prod", "success")
         status = projector.status()
-        assert status["stats_count"] >= 1
+        assert status.event_count >= 1
