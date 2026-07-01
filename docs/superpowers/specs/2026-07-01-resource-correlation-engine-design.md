@@ -8,6 +8,9 @@
 > - NO hardcoded resource types in Correlation Engine — uses generic `ResourceIdentity` matching
 > - Knowledge Layer is platform-wide, not owned by Topology
 > - Event Store (ClickHouse) stores `NormalizedEvent`, not raw logs
+> - Correlation Engine outputs **Relationship**, not Edge — Topology converts Relationship → Edge
+> - Providers consume **EventRepository** abstract interface, not ClickHouse directly
+> - No `EdgeResult` — use `RelationshipResult` with immutable records (edge_id, version, created_at)
 
 **Status:** Draft v3  
 **Date:** 2026-07-01  
@@ -107,44 +110,57 @@ Data Pipeline
          ▼
   ╔══════════════════════════════════════════════════╗
   ║             Knowledge Layer                       ║
+  ║  (全平台共享的 Knowledge Platform)                ║
   ║                                                  ║
   ║  ┌──────────────────────────────────────────┐   ║
-  ║  │ Relationship Registry (Neo4j)             │   ║
+  ║  │ Resource Registry                        │   ║
+  ║  │  Instance, Volume, Port, Host, Flavor    │   ║
+  ║  │  (Neo4j + 属性完整)                      │   ║
+  ║  ├──────────────────────────────────────────┤   ║
+  ║  │ Relationship Registry                     │   ║
   ║  │  Instance ─→ Port ─→ Network              │   ║
   ║  │  Instance ─→ Host                         │   ║
   ║  │  Volume ─→ Attachment ─→ Instance         │   ║
   ║  │  (同步: 事件驱动为主, API Cold Sync 为辅)  │   ║
+  ║  ├──────────────────────────────────────────┤   ║
+  ║  │ Metadata Registry (future)                │   ║
+  ║  │  NUMA, CPU Policy, Hugepage, PCI, SRIOV │   ║
   ║  └──────────────────────────────────────────┘   ║
-  ║         ↑                                        ║
-  ║  Correlation Engine ←────────────────────────┘  ║
-  ║  Topology Engine ←───────────────────────────┘  ║
-  ║  AI Service ←───────────────────────────────┘   ║
-  ║  Rule Engine ←─────────────────────────────┘    ║
+  ║                                                  ║
+  ║  Consumers (all equal):                          ║
+  ║   Correlation · Topology · AI · Rule            ║
   ╚══════════════════════════════════════════════════╝
          │
          ▼
   ┌──────────────────────────────────────────────────┐
   │          Correlation Engine                       │
-  │  (消费 Event Store + Knowledge Layer)             │
+  │  (消费 EventStore + Knowledge Layer)             │
   │                                                  │
-  │  Providers (pluggable, resource-type-agnostic):  │
-  │   • RequestCorrelator        — request_id 分组   │
-  │   • ResourceCorrelator       — ResourceIdentity  │
-  │   • TimeCorrelator           — host + time_window│
-  │   • HostCorrelator           — host + pid (P2)   │
-  │   • AICorrelator             — AI 推理 (P4)      │
+  │  ┌──────────────────────────────────────────┐   │
+  │  │ Providers (pluggable)                    │   │
+  │  │  • RequestCorrelator  — request_id       │   │
+  │  │  • ResourceCorrelator — ResourceIdentity │   │
+  │  │  • TimeCorrelator     — host+time_window │   │
+  │  │  • HostCorrelator     — host+pid (P2)   │   │
+  │  │  • AICorrelator       — AI 推理 (P4)    │   │
+  │  │                                          │   │
+  │  │  Data: EventRepository (抽象接口)        │   │
+  │  │  (不是直接写 SQL，适配 ClickHouse/S3/...)│   │
+  │  └──────────────────────────────────────────┘   │
   │                                                  │
-  │  ↓ CandidateEdge[] + Observations[] → Evidence   │
-  │     → Inference → EdgeResult                      │
-  │     → 完整证据链（可追溯至原始 Observation）     │
+  │  ↓ Observations → Facts → Evidence → Inference  │
+  │    → RelationshipResult (含完整追溯链)            │
+  │    → 关系不可变，带 version/created_at            │
   └──────────────────────────────────────────────────┘
          │
-         ▼ EdgeResult[]
+         ▼ RelationshipResult[]
   ┌──────────────────────────────────────────────────┐
   │           Topology Engine                         │
-  │  (纯构图: Node → Edge → Layout → Render)          │
-  │  不计算置信度, 不存储证据                          │
-  │  只消费 Correlation Engine 产出的 EdgeResult       │
+  │                                                  │
+  │  RelationshipResult ──→ _to_edges() ──→ Edge[]  │
+  │                                                  │
+  │  纯构图: Node → Edge → Layout → Render            │
+  │  不计算置信度, 不存储证据, 不定义关系              │
   └──────────────────────────────────────────────────┘
          │
          ▼
@@ -162,12 +178,12 @@ Data Pipeline
 Raw Log
    ↓ Semantic Engine
 NormalizedEvent (event.resource+verb, resources[] with roles, request, attributes)
-   ↓ Event Store (ClickHouse)
+   ↓ Event Store (ClickHouse + EventRepository 抽象)
 Indexed columns (instance_uuid, volume_id, ...) + resources_json
-   ↓ Correlation Engine (time_window)
-Observations → Evidence → Inference → EdgeResult (含完整追溯链)
+   ↓ Correlation Engine (via EventRepository, not direct SQL)
+Observations → Facts → Evidence → Inference → RelationshipResult (不可变, 带 version)
    ↓ Topology Engine
-Graph (nodes + edges)  — 不关心置信度如何计算
+RelationshipResult → _to_edges() → Graph (nodes + edges)
    ↓
 API / Frontend / AI
 ```
@@ -178,10 +194,11 @@ API / Frontend / AI
 |----|------|----------|
 | **Semantic Engine** | 日志理解、标准化、输出 NormalizedEvent | 不计算拓扑、不做关联 |
 | **Event Store (ClickHouse)** | 存储 NormalizedEvent、索引、预聚合 | 不做业务逻辑 |
-| **Knowledge Layer** | 已知资源关系存储（Neo4j）、共享事实层 | 不分析日志、不计算置信度 |
-| **Correlation Engine** | 多源观测 → 证据 → 推理 → 候选边 | 不画图、不存储 |
-| **Topology Engine** | 纯构图：Node→Edge→Layout→Render | 不计算置信度、不推理 |
-| **AI Service** | 推理补全不可证明的边 | 不覆盖已有证据的边 |
+| **EventRepository** | 抽象数据访问层，屏蔽 ClickHouse/S3/Kafka 差异 | 不涉及具体查询逻辑 |
+| **Knowledge Layer** | 资源注册 + 关系 + 元数据，共享事实层 | 不分析日志、不计算置信度 |
+| **Correlation Engine** | O→F→E→I→R 链，输出不可变 Relationship | 不画图、不存储、不知 Graph 概念 |
+| **Topology Engine** | Relationship → Edge → Graph → Layout → Render | 不计算置信度、不推理 |
+| **AI Service** | 推理补全不可证明的关系 | 不覆盖已有证据的关系 |
 | **Rule Engine (future)** | 基于 NormalizedEvent 的规则匹配告警 | 不画图、不关联 |
 
 ### 2.4 为什么取消 primary_resource
@@ -221,16 +238,24 @@ ClickHouse 存储的不再是"日志"，而是**标准化事件**（Event）。
 ```python
 @dataclass
 class ResourceRef:
-    """资源引用：type + id + role"""
+    """资源引用：type + id + role + version 信息"""
     type: str           # INSTANCE, VOLUME, PORT, IMAGE, POD, NODE, PVC, ...
     id: str             # 资源 UUID
     role: str = ""      # actor, target, source, destination, ...
+    version: str = ""   # 资源版本 (例如 OpenStack microversion)
+    confidence: float = 1.0  # 此引用的置信度 (1.0 = API 确认, <1.0 = 日志推断)
 
 @dataclass
 class EventType:
-    """事件类型：resource_verb 模型"""
+    """事件类型：domain + resource + verb + phase 四维模型
+
+    Rule Engine 可以直接匹配 domain=compute, resource=INSTANCE, verb=CREATE, phase=end
+    AI 可以问 "哪些 domain=compute 的操作最近失败了？"
+    """
+    domain: str = ""    # compute, network, volume, image, identity, ...
     resource: str       # INSTANCE, VOLUME, PORT, ...
     verb: str           # CREATE, DELETE, ATTACH, DETACH, REBOOT, ...
+    phase: str = ""     # start, end, error (对应 OpenStack notification phases)
 
 @dataclass
 class NormalizedEvent:
@@ -284,7 +309,7 @@ event = NormalizedEvent(
     host="compute-01",
     severity="INFO",
     message="Attaching volume vol-456 to instance abc-123",
-    event=EventType(resource="INSTANCE", verb="ATTACH_VOLUME"),
+    event=EventType(domain="volume", resource="INSTANCE", verb="ATTACH_VOLUME", phase="end"),
     resources=[
         ResourceRef(type="INSTANCE", id="abc-123", role="actor"),
         ResourceRef(type="VOLUME", id="vol-456", role="target"),
@@ -319,29 +344,31 @@ NormalizedEvent
 # semantic-engine/normalize/operation.py
 
 _OPERATION_PATTERNS = {
-    # (event_type_prefix, action_verb) → (resource, verb)
-    ("compute.instance.create", None):   ("INSTANCE", "CREATE"),
-    ("compute.instance.delete", None):   ("INSTANCE", "DELETE"),
-    ("compute.instance.rebuild", None):  ("INSTANCE", "REBUILD"),
-    ("compute.instance.reboot", None):   ("INSTANCE", "REBOOT"),
-    ("compute.instance.power_off", None):("INSTANCE", "POWER_OFF"),
-    ("compute.instance.power_on", None): ("INSTANCE", "POWER_ON"),
-    ("compute.instance.live_migration", None): ("INSTANCE", "LIVE_MIGRATE"),
-    ("compute.instance.resize", None):   ("INSTANCE", "RESIZE"),
-    ("volume.attach", None):             ("INSTANCE", "ATTACH_VOLUME"),
-    ("volume.detach", None):             ("INSTANCE", "DETACH_VOLUME"),
-    ("volume.create", None):             ("VOLUME", "CREATE"),
-    ("volume.delete", None):             ("VOLUME", "DELETE"),
-    ("port.create", None):               ("PORT", "CREATE"),
-    ("port.delete", None):               ("PORT", "DELETE"),
-    ("image.create", None):              ("IMAGE", "CREATE"),
-    ("image.delete", None):              ("IMAGE", "DELETE"),
+    # (event_type_prefix, action_verb) → (domain, resource, verb, phase)
+    ("compute.instance.create.start", None):  ("compute", "INSTANCE", "CREATE", "start"),
+    ("compute.instance.create.end", None):    ("compute", "INSTANCE", "CREATE", "end"),
+    ("compute.instance.create.error", None):  ("compute", "INSTANCE", "CREATE", "error"),
+    ("compute.instance.delete.end", None):    ("compute", "INSTANCE", "DELETE", "end"),
+    ("compute.instance.rebuild.end", None):   ("compute", "INSTANCE", "REBUILD", "end"),
+    ("compute.instance.reboot.end", None):    ("compute", "INSTANCE", "REBOOT", "end"),
+    ("compute.instance.power_off.end", None): ("compute", "INSTANCE", "POWER_OFF", "end"),
+    ("compute.instance.power_on.end", None):  ("compute", "INSTANCE", "POWER_ON", "end"),
+    ("compute.instance.live_migration.end", None): ("compute", "INSTANCE", "LIVE_MIGRATE", "end"),
+    ("compute.instance.resize.end", None):    ("compute", "INSTANCE", "RESIZE", "end"),
+    ("volume.attach.end", None):              ("volume", "INSTANCE", "ATTACH_VOLUME", "end"),
+    ("volume.detach.end", None):              ("volume", "INSTANCE", "DETACH_VOLUME", "end"),
+    ("volume.create.end", None):              ("volume", "VOLUME", "CREATE", "end"),
+    ("volume.delete.end", None):              ("volume", "VOLUME", "DELETE", "end"),
+    ("port.create.end", None):                ("network", "PORT", "CREATE", "end"),
+    ("port.delete.end", None):                ("network", "PORT", "DELETE", "end"),
+    ("image.create.end", None):               ("image", "IMAGE", "CREATE", "end"),
+    ("image.delete.end", None):               ("image", "IMAGE", "DELETE", "end"),
 
-    # Phase 2: message text fallback
-    (None, "attach"):                    ("INSTANCE", "ATTACH_VOLUME"),
-    (None, "detach"):                    ("INSTANCE", "DETACH_VOLUME"),
-    (None, "spawn"):                     ("INSTANCE", "SPAWN"),
-    (None, "create_server"):             ("INSTANCE", "CREATE"),
+    # Phase 2: message text fallback (domain unknown)
+    (None, "attach"):                         ("", "INSTANCE", "ATTACH_VOLUME", ""),
+    (None, "detach"):                         ("", "INSTANCE", "DETACH_VOLUME", ""),
+    (None, "spawn"):                          ("", "INSTANCE", "SPAWN", ""),
+    (None, "create_server"):                  ("", "INSTANCE", "CREATE", ""),
 }
 
 def extract_operation(log_data: Dict[str, Any]) -> EventType:
@@ -349,17 +376,15 @@ def extract_operation(log_data: Dict[str, Any]) -> EventType:
     event_type = _candidate_text(log_data.get("event_type") or ...)
     action = _candidate_text(log_data.get("action") or ...)
 
-    for (ev_prefix, act_verb), (resource, verb) in _OPERATION_PATTERNS.items():
+    for (ev_prefix, act_verb), (domain, resource, verb, phase) in _OPERATION_PATTERNS.items():
         if ev_prefix and event_type.startswith(ev_prefix):
-            return EventType(resource=resource, verb=verb)
+            return EventType(domain=domain, resource=resource, verb=verb, phase=phase)
 
-    for (ev_prefix, act_verb), (resource, verb) in _OPERATION_PATTERNS.items():
+    for (ev_prefix, act_verb), (domain, resource, verb, phase) in _OPERATION_PATTERNS.items():
         if act_verb and action and act_verb in action.lower():
-            return EventType(resource=resource, verb=verb)
+            return EventType(domain=domain, resource=resource, verb=verb, phase=phase)
 
-    return EventType(resource="UNKNOWN", verb="UNKNOWN")
-```
-
+    return EventType(domain="", resource="UNKNOWN", verb="UNKNOWN", phase="")
 ### 4.2 新增 extract_resource_fields()
 
 从 `_raw_attributes` 和 message 中提取所有已知的资源 UUID。输出为 `List[ResourceRef]`。
@@ -559,8 +584,9 @@ correlation-engine/
 ├── __init__.py
 ├── engine.py              # CorrelationEngine 入口（注册 provider + 调度）
 ├── base.py                # CorrelationProvider 抽象基类
-├── models.py              # Observation, Evidence, Inference, EdgeResult
-│                          # 分层模型：Observation → Evidence → Inference → Edge
+├── event_repository.py    # EventRepository 抽象接口（适配 ClickHouse/S3/Iceberg）
+├── models.py              # Observation, Fact, Evidence, Inference, RelationshipResult
+│                          # 分层模型：Observation → Fact → Evidence → Inference → Relationship
 ├── merger.py              # EvidenceMerger 多源证据融合
 │
 ├── providers/
@@ -573,7 +599,7 @@ correlation-engine/
 └── tests/
 ```
 
-### 6.2 分层数据模型（Observation → Evidence → Inference → Edge）
+### 6.2 分层数据模型（Observation → Fact → Evidence → Inference → Relationship）
 
 ```python
 # correlation-engine/models.py
@@ -605,6 +631,22 @@ class Evidence:
     observations: List[Observation] = field(default_factory=list)  # ← 可追溯至原始日志
 
 @dataclass
+class Fact:
+    """
+    事实：从 Observation 提炼的确定性信息。
+    Observation = "device_id=abc" (日志原文)
+    Fact = "device_id 是 instance_uuid，值为 abc" (经过知识层解析)
+    Fact 可以来自日志、API、CMDB、Knowledge Graph、AI，全部统一。
+    """
+    fact_type: str            # "alias_resolution", "resource_relation", "api_known"
+    subject_type: str         # "device_id", "port_id"
+    subject_value: str        # "abc-123"
+    object_type: str          # "instance_uuid", "instance_id"
+    object_value: str         # "abc-123"
+    source: str               # "alias_map", "knowledge_layer", "api"
+    confidence: float = 1.0   # API 确认 = 1.0, 推断 = <1.0
+
+@dataclass
 class Inference:
     """
     推断：根据证据推断两个服务之间存在调用关系。
@@ -616,15 +658,22 @@ class Inference:
     inferred_relationship: str      # "calls", "depends_on", "runs_on"
 
 @dataclass
-class EdgeResult:
+class RelationshipResult:
     """
-    最终边：经过 EvidenceMerger 合并后的结果。
+    最终关系：经过 EvidenceMerger 合并后的结果。
+    Correlation Engine 不知道 Graph 概念，只输出 Relationship。
+    Topology Engine 负责 Relationship → Edge 的转换。
+    
+    不可变记录：edge_id/version/created_at 用于追溯历史。
     """
+    edge_id: str              # 不可变 ID，用于追溯历史
+    version: int = 1          # 版本号，每次重新生成递增
+    created_at: datetime = field(default_factory=datetime.utcnow)
     source: str
     target: str
     confidence: float
     call_count: int
-    inferences: List[Inference]    # 完整推断链（可追溯至 Observation）
+    inferences: List[Inference]   # 完整推断链（可追溯至 Observation → Fact）
     data_sources: List[str]
 ```
 
@@ -643,17 +692,71 @@ class CorrelationProvider(ABC):
         ...
 
     @abstractmethod
-    def correlate(self, time_window: str, **kwargs) -> List[Inference]:
+    def correlate(self, time_window: str, **kwargs) -> Tuple[List[Fact], List[Inference]]:
         """
         在指定时间窗口内发现关联。
 
         Returns:
-            List[Inference] — 每个 Inference 包含完整证据链和 Observations
+            (facts, inferences) — Facts 是提炼后的确定性事实，
+                                  Inferences 是基于 Facts 的关联推断
         """
         ...
 ```
 
-### 6.4 RequestCorrelator
+### 6.4 EventRepository 接口
+
+Providers 不直接写 ClickHouse SQL，通过 `EventRepository` 抽象接口访问数据：
+
+```python
+# correlation-engine/event_repository.py
+
+class EventRepository(ABC):
+    """
+    事件存储抽象接口。
+    Provider 只调用此接口，不直接写 SQL。
+    适配器模式：ClickHouse/S3/Iceberg/Kafka 各有自己的实现。
+    """
+
+    @abstractmethod
+    def query_events(self, time_window: str, filters: Dict[str, str]) -> List[NormalizedEvent]:
+        """
+        查询 NormalizedEvent。
+        Args:
+            time_window: "1 HOUR", "30 MINUTE"
+            filters: {"instance_uuid": "abc", "service_name": "nova-api"}
+        Returns:
+            List[NormalizedEvent]
+        """
+        ...
+
+    @abstractmethod
+    def query_resource_timeline(self, resource_type: str, resource_id: str,
+                                 time_window: str) -> List[NormalizedEvent]:
+        """
+        查询一个资源的时间线（Phase 2 Resource Timeline）。
+        按时间排序的事件序列。
+        """
+        ...
+
+    @abstractmethod
+    def query_resource_pairs(self, time_window: str) -> List[Tuple[str, str, str, str]]:
+        """
+        查询所有 (resource_type, resource_id, service_name, timestamp) 组合。
+        供 ResourceCorrelator 使用。
+        """
+        ...
+
+
+class ClickHouseEventRepository(EventRepository):
+    """ClickHouse 实现，使用独立索引列加速"""
+    ...
+
+class LogEventRepository(EventRepository):
+    """直接解析日志文件（本地调试用）"""
+    ...
+```
+
+### 6.5 RequestCorrelator
 
 ```python
 class RequestCorrelator(CorrelationProvider):
@@ -666,7 +769,7 @@ class RequestCorrelator(CorrelationProvider):
         ...
 ```
 
-### 6.5 ResourceCorrelator（type-agnostic）
+### 6.6 ResourceCorrelator（type-agnostic）
 
 ```python
 class ResourceCorrelator(CorrelationProvider):
@@ -713,12 +816,12 @@ class ResourceCorrelator(CorrelationProvider):
         ...
 ```
 
-### 6.6 EvidenceMerger
+### 6.7 EvidenceMerger
 
 ```python
 class EvidenceMerger:
     """
-    多源证据融合：Observations → Evidence → Inferences → EdgeResults。
+    多源证据融合：Observations → Facts → Evidence → Inferences → RelationshipResults。
     """
 
     EVIDENCE_BASE_WEIGHTS = {
@@ -733,12 +836,13 @@ class EvidenceMerger:
 
     WEIGHT_DECAY_MINUTES = 120
 
-    def merge(self, inferences: List[Inference]) -> Dict[Tuple[str, str], EdgeResult]:
+    def merge(self, inferences: List[Inference], facts: Optional[List[Fact]] = None) -> Dict[Tuple[str, str], RelationshipResult]:
         """
-        合并所有 Inference，输出 EdgeResult。
+        合并所有 Inference + Facts，输出 RelationshipResult。
         
-        EdgeResult 保留完整追溯链：
-        EdgeResult.inferences[i].evidence_list[j].observations[k]
+        RelationshipResult 保留完整追溯链：
+        RelationshipResult.inferences[i].evidence_list[j].observations[k]
+          → Fact 层连接 Observation 和 Evidence
           → 可直接追溯到具体日志行
         
         算法:
@@ -754,11 +858,21 @@ class EvidenceMerger:
 
 ---
 
-## 7. Knowledge Layer（Relationship Registry）
+## 7. Knowledge Layer（Knowledge Platform）
 
 ### 7.1 定位
 
-Relationship Registry 不是 Topology 的一部分，而是整个平台的 **Knowledge Layer**：
+Knowledge Layer 不是 Topology 的附属，而是整个平台的 **共享事实层**。
+
+```
+Knowledge Layer
+├── Resource Registry      # 资源实例 (Instance, Volume, Port, Host … 完整属性)
+├── Relationship Registry  # 资源间关系 (Instance → Host, Port → Network …)
+├── Metadata Registry      # 运行时元数据 (future: NUMA, CPU pinning, Hugepage, PCI)
+└── Schema Registry        # 平台 schema (future: OpenStack API, Kubernetes CRD)
+```
+
+Phase 3 只实现 Resource Registry + Relationship Registry，其余预留目录结构。
 
 ```
                   ┌───────────────────────┐
@@ -889,7 +1003,7 @@ GET /api/v1/knowledge/path?source_type=PORT&source_id=port-xyz&target_type=INSTA
 
 ```
 TopologyEngine (约 300-400 行)
-├── 消费 CorrelationEngine.merge() 的 EdgeResult[]
+├── 消费 CorrelationEngine.merge() 的 RelationshipResult[]
 ├── 可选查询 Knowledge Layer 增强节点属性
 ├── 构建 Nodes (去重、合并)
 ├── 构建 Edges (去重、聚合 confidence)
@@ -909,7 +1023,7 @@ TopologyEngine (约 300-400 行)
 class TopologyEngine:
     """
     拓扑引擎：纯构图。
-    消费 EdgeResult，构建 Node + Edge 结构。
+    消费 RelationshipResult，构建 Node + Edge 结构。
     """
 
     def __init__(self, correlation_engine: CorrelationEngine,
@@ -918,14 +1032,14 @@ class TopologyEngine:
         self.knowledge_layer = knowledge_layer
 
     def build(self, time_window: str) -> TopologyResult:
-        # 1. 获取边结果（含完整置信度 + 推断链）
-        edge_results = self.correlation_engine.correlate_all(time_window)
+        # 1. 获取关系（Correlation 不知道 Graph 概念）
+        relationships = self.correlation_engine.correlate_all(time_window)
 
-        # 2. 构建节点
-        nodes = self._build_nodes(edge_results)
+        # 2. 转换: Relationship → Edge（只转换格式，不重新计算）
+        edges = self._to_edges(relationships)
 
-        # 3. 构建边（直接使用 EdgeResult 的 confidence）
-        edges = self._build_edges(edge_results)
+        # 3. 构建节点
+        nodes = self._build_nodes(edges)
 
         # 4. 可选：增强节点属性
         if self.knowledge_layer:
@@ -933,10 +1047,23 @@ class TopologyEngine:
 
         return TopologyResult(nodes=nodes, edges=edges)
 
-    def _build_nodes(self, edge_results: List[EdgeResult]) -> List[Node]:
+    def _to_edges(self, relationships: List[RelationshipResult]) -> List[Edge]:
+        """Relationship → Edge 转换。纯格式转换，不计算置信度。"""
+        return [
+            Edge(
+                source=r.source,
+                target=r.target,
+                confidence=r.confidence,
+                call_count=r.call_count,
+                data_sources=r.data_sources,
+            )
+            for r in relationships
+        ]
+
+    def _build_nodes(self, edges: List[Edge]) -> List[Node]:
         seen = set()
         nodes = []
-        for edge in edge_results:
+        for edge in edges:
             for service in [edge.source, edge.target]:
                 if service not in seen:
                     seen.add(service)
@@ -1041,14 +1168,28 @@ For each (source, target) pair:
 GET /api/v1/topology/hybrid?time_window=1+HOUR
 → 现有格式保持兼容，新增 inferences 字段
 
-# 证据详情（Correlation Engine 直接输出，AI 可调用）
+# 证据详情（Correlation Engine 直接输出，输出 Relationship 而非 Edge）
 GET /api/v1/evidence?source=Nova&target=Neutron&time_window=1+HOUR
+→ {
+    "relationships": [{
+      "relationship_id": "rel-abc-123",
+      "version": 1,
+      "source": "Nova",
+      "target": "Neutron",
+      "confidence": 0.90,
+      "inferences": [...],     # 完整 O→F→E→I→R 追溯链
+      "call_count": 42
+    }]
+  }
+
+# Topology Engine 消费后转为 Edge（纯转换，不重新计算）
+GET /api/v1/topology/hybrid?time_window=1+HOUR
 → {
     "edges": [{
       "source": "Nova",
       "target": "Neutron",
       "confidence": 0.90,
-      "inferences": [...],    # 完整 O→E→I→E 链
+      "relationship_id": "rel-abc-123",  # 关联回原始 Relationship
       "call_count": 42
     }]
   }
@@ -1080,11 +1221,12 @@ GET /api/v1/correlate/services?source=Nova&time_window=1+HOUR
 | Modify | `semantic-engine/normalize/normalizer.py` | 集成新 extractors，输出 NormalizedEvent |
 | Modify | `shared_src/logoscope_storage/adapter.py` | 新增列 DDL (event_resource, event_verb, resources_json, uuid 列) |
 | **New** | `correlation-engine/__init__.py` | 新建包 |
-| **New** | `correlation-engine/models.py` | Observation, Evidence, Inference, EdgeResult |
+| **New** | `correlation-engine/models.py` | Observation, Fact, Evidence, Inference, RelationshipResult |
 | **New** | `correlation-engine/base.py` | CorrelationProvider 基类 |
+| **New** | `correlation-engine/event_repository.py` | EventRepository 抽象接口 + ClickHouse 实现 |
 | **New** | `correlation-engine/engine.py` | CorrelationEngine（provider 注册 + 调度） |
-| **New** | `correlation-engine/merger.py` | EvidenceMerger |
-| **New** | `correlation-engine/providers/resource_correlator.py` | 通用 ResourceIdentity 匹配 |
+| **New** | `correlation-engine/merger.py` | EvidenceMerger（合并 Facts + Inferences → RelationshipResult） |
+| **New** | `correlation-engine/providers/resource_correlator.py` | 通用 ResourceIdentity 匹配（type-agnostic） |
 | **New** | `correlation-engine/providers/request_correlator.py` | 从 _get_openstack_topology 迁移 |
 | Modify | `topology-service/graph/hybrid_topology.py` | 集成 CorrelationEngine，精简 |
 | **New** | `topology-service/graph/topology_engine.py` | 薄层 TopologyEngine |
@@ -1177,33 +1319,38 @@ def test_resource_correlator_any_type():
     assert results[0].target == "B"
 
 def test_merger_preserves_observation_chain():
-    """合并后保留 O→E→I→E 追溯链"""
+    """合并后保留 O→F→E→I→R 追溯链"""
     obs_a = Observation("log-1", "A", datetime(2026, 1, 1),
                         "instance_uuid", "abc-123")
     obs_b = Observation("log-2", "B", datetime(2026, 1, 1),
                         "instance_uuid", "abc-123")
+    fact = Fact("alias_resolution", "device_id", "abc-123", "instance_uuid", "abc-123",
+                source="alias_map")
     evidence = Evidence("A", "B", "resource_match", "INSTANCE:abc", 0.45,
                         observations=[obs_a, obs_b])
     inference = Inference("A", "B", [evidence], "calls")
 
     merger = EvidenceMerger()
-    result = merger.merge([inference])
+    result = merger.merge([inference], facts=[fact])
     assert ("A", "B") in result
     assert len(result[("A", "B")].inferences) == 1
     assert result[("A", "B")].inferences[0].evidence_list[0].observations[0].log_id == "log-1"
+    assert result[("A", "B")].edge_id != ""  # 不可变 ID
+    assert result[("A", "B")].version >= 1
 ```
 
 ### 12.3 Knowledge Layer 测试
 
 ```python
 def test_registry_integrates_with_correlation():
-    """TopologyEngine 合并 Correlation + Registry 两种边"""
+    """Topology Engine 转换 Relationship → Edge"""
     engine = TopologyEngine(
-        FakeCorrelationEngine([EdgeResult("A", "B", 0.90, ...)]),
+        FakeCorrelationEngine([RelationshipResult("rel-1", source="A", target="B", confidence=0.90)]),
         FakeKnowledgeLayer({"A": [("PORT", "p-1")]}),
     )
     result = engine.build("1 HOUR")
-    assert result.edges[0].confidence == 0.90  # 置信度来自 Correlation
+    assert result.edges[0].confidence == 0.90  # 置信度来自 Correlation，Topology 只转换
+    assert result.edges[0].relationship_id == "rel-1"  # 关联回原始 Relationship
 ```
 
 ---
