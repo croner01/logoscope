@@ -686,6 +686,7 @@ class HybridTopologyBuilder:
                 traces_data=traces_data,
                 logs_data=logs_data,
                 metrics_data=metrics_data,
+                openstack_data=openstack_data,
                 edges=merged_edges,
             )
 
@@ -2093,8 +2094,8 @@ class HybridTopologyBuilder:
     def _get_openstack_topology(
         self,
         time_window: str,
-        namespace: str = None,
-        source_cluster: str = None,
+        namespace: Optional[str] = None,
+        source_cluster: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         从 logs 表通过 openstack_global_request_id 重建跨服务调用链。
@@ -2335,6 +2336,7 @@ class HybridTopologyBuilder:
         traces_data: Dict[str, Any],
         logs_data: Dict[str, Any],
         metrics_data: Dict[str, Any],
+        openstack_data: Dict[str, Any],
         edges: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """计算当前拓扑的数据源可用性和各维度状态。
@@ -2345,6 +2347,7 @@ class HybridTopologyBuilder:
         traces_available = bool(traces_data.get("nodes") or traces_data.get("edges"))
         logs_available = bool(logs_data.get("nodes"))
         metrics_available = bool(metrics_data.get("nodes"))
+        openstack_available = bool(openstack_data.get("nodes") or openstack_data.get("edges"))
 
         # 判断是否有来自 traces 的延迟数据
         has_traces_duration = False
@@ -2382,11 +2385,14 @@ class HybridTopologyBuilder:
             call_volume_status = "missing"
 
         quality_mode = "full" if latency_status == "available" else "logs_only"
+        if quality_mode == "logs_only" and openstack_available:
+            quality_mode = "openstack_augmented"
 
         return {
             "traces_available": traces_available,
             "logs_available": logs_available,
             "metrics_available": metrics_available,
+            "openstack_available": openstack_available,
             "dimension_status": {
                 "latency": latency_status,
                 "error_rate_edge": error_rate_edge_status,
@@ -2458,7 +2464,7 @@ class HybridTopologyBuilder:
         traces_data: Dict,
         logs_data: Dict,
         metrics_data: Dict,
-        openstack_data: Dict = None,
+        openstack_data: Optional[Dict] = None,
     ) -> List[str]:
         """获取实际使用的数据源列表"""
         return hybrid_utils.get_data_sources(

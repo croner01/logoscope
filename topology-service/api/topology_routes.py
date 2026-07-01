@@ -3,13 +3,14 @@ Topology Service API 路由 - 统一的拓扑查询接口
 """
 import asyncio
 import logging
-import re
 from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime
 
 from storage.adapter import StorageAdapter
 from graph.hybrid_topology import HybridTopologyBuilder
+from graph import hybrid_topology_utils as hybrid_utils
+from graph.hybrid_topology_utils import sanitize_interval as _sanitize_interval
 from graph.enhanced_topology import EnhancedTopologyBuilder
 from api.topology_build_coordinator import build_hybrid_topology_coalesced
 
@@ -71,30 +72,6 @@ def _to_risk_level(issue_score: float) -> str:
     if issue_score >= 35:
         return "中风险"
     return "低风险"
-
-
-def _sanitize_interval(time_window: str, default_value: str = "1 HOUR") -> str:
-    """规范化 INTERVAL 参数，避免 SQL 注入。"""
-    pattern = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)\s*$")
-    match = pattern.match(str(time_window or ""))
-    if not match:
-        return default_value
-
-    amount = int(match.group(1))
-    unit_raw = match.group(2).upper()
-    valid_units = {
-        "MINUTE": "MINUTE",
-        "MINUTES": "MINUTE",
-        "HOUR": "HOUR",
-        "HOURS": "HOUR",
-        "DAY": "DAY",
-        "DAYS": "DAY",
-        "WEEK": "WEEK",
-        "WEEKS": "WEEK",
-    }
-    if amount <= 0 or unit_raw not in valid_units:
-        return default_value
-    return f"{amount} {valid_units[unit_raw]}"
 
 
 def _build_edge_problem_summary(edge: Dict[str, Any]) -> Dict[str, Any]:
@@ -500,10 +477,10 @@ async def get_openstack_chain(
         conditions.append("openstack_global_request_id != ''")
 
         if global_request_id:
-            safe_rid = str(global_request_id or "").replace("'", "''")
+            safe_rid = hybrid_utils.escape_sql_literal(global_request_id)
             conditions.append(f"openstack_global_request_id = '{safe_rid}'")
         if namespace:
-            safe_ns = str(namespace or "").replace("'", "''")
+            safe_ns = hybrid_utils.escape_sql_literal(namespace)
             conditions.append(f"namespace = '{safe_ns}'")
 
         prewhere_clause = "PREWHERE " + " AND ".join(conditions)
@@ -528,18 +505,20 @@ async def get_openstack_chain(
         # 分组并构建 chains
         groups: Dict[str, List[Dict]] = {}
         for row in result:
-            if isinstance(row, dict):
-                rid = str(row.get("openstack_global_request_id", "") or "").strip()
-                svc = str(row.get("service_name", "") or "").strip()
-                ts = row.get("timestamp")
-                req_id = str(row.get("openstack_request_id", "") or "").strip()
-                if not rid or not svc:
-                    continue
-                groups.setdefault(rid, []).append({
-                    "service": svc,
-                    "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts or ""),
-                    "request_id": req_id,
-                })
+            if not isinstance(row, dict):
+                logger.warning("openstack-chain: skipping non-dict row type=%s", type(row).__name__)
+                continue
+            rid = str(row.get("openstack_global_request_id", "") or "").strip()
+            svc = str(row.get("service_name", "") or "").strip()
+            ts = row.get("timestamp")
+            req_id = str(row.get("openstack_request_id", "") or "").strip()
+            if not rid or not svc:
+                continue
+            groups.setdefault(rid, []).append({
+                "service": svc,
+                "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts or ""),
+                "request_id": req_id,
+            })
 
         chains = []
         for rid, hops in sorted(groups.items(), key=lambda x: -len(x[1])):
@@ -547,10 +526,7 @@ async def get_openstack_chain(
             hops.sort(key=lambda h: h["timestamp"])
 
             # 压缩连续相同服务
-            deduped = [hops[0]]
-            for hop in hops[1:]:
-                if hop["service"] != deduped[-1]["service"]:
-                    deduped.append(hop)
+            deduped = hybrid_utils.dedup_service_sequence(hops, key="service")
 
             time_span_ms = 0
             if len(deduped) >= 2:
@@ -559,7 +535,7 @@ async def get_openstack_chain(
                     t1 = datetime.fromisoformat(deduped[-1]["timestamp"].replace("Z", "+00:00"))
                     time_span_ms = int((t1 - t0).total_seconds() * 1000)
                 except Exception:
-                    pass
+                    logger.warning("openstack-chain: failed to parse timestamp for time_span_ms", exc_info=True)
 
             chains.append({
                 "global_request_id": rid,

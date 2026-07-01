@@ -1,12 +1,11 @@
 """
 Tests for GET /api/v1/topology/openstack-chain endpoint
 """
-import json
 import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -98,8 +97,8 @@ class TestOpenstackChainEndpoint:
 class TestOpenstackChainEndpointIntegration:
     """测试 /api/v1/topology/openstack-chain 端点的数据组装逻辑"""
 
-    def test_chain_hops_ordering(self):
-        """测试调用链按时间排序正确"""
+    def test_sanitize_interval_validates_and_defaults(self):
+        """测试 _sanitize_interval 正确规范化时间窗口参数"""
         from api.topology_routes import _sanitize_interval
 
         # 测试 sanitize 函数

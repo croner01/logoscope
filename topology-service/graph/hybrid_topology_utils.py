@@ -241,12 +241,15 @@ def timestamp_to_datetime(value: Any) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def dedup_service_sequence(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def dedup_service_sequence(
+    records: List[Dict[str, Any]],
+    key: str = "service_name",
+) -> List[Dict[str, Any]]:
     if not records:
         return []
     sequence = [records[0]]
     for record in records[1:]:
-        if record.get("service_name") != sequence[-1].get("service_name"):
+        if record.get(key) != sequence[-1].get(key):
             sequence.append(record)
     return sequence
 
@@ -893,7 +896,7 @@ def get_data_sources(
     traces_data: Dict[str, Any],
     logs_data: Dict[str, Any],
     metrics_data: Dict[str, Any],
-    openstack_data: Dict[str, Any] = None,
+    openstack_data: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Get enabled data sources list from non-empty node/edge payloads."""
     sources: List[str] = []

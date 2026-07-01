@@ -1872,7 +1872,7 @@ export class APIClient {
    * OpenStack req- UUID 追踪调用链
    */
   async getOpenstackTraceChain(globalRequestId: string): Promise<Record<string, unknown>> {
-    const response = await this.client.get(
+    const response = await this.getWithInflightDedupe(
       `${API_PREFIX}/topology/openstack-chain?global_request_id=${encodeURIComponent(globalRequestId)}`
     );
     return response.data;

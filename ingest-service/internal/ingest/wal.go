@@ -31,6 +31,22 @@ func openQueueWAL(cfg Config) (*queueWAL, []queueItem, uint64, int, error) {
 	}
 
 	path := filepath.Join(cfg.WALDir, cfg.WALFileName)
+
+	// Truncate if WAL exceeds the configured max size to prevent unbounded
+	// growth from blocking startup when Kafka is unavailable for extended periods.
+	if info, err := os.Stat(path); err == nil {
+		maxBytes := int64(cfg.WALMaxSizeMB) * 1024 * 1024
+		if info.Size() > maxBytes {
+			log.Printf(
+				"[ingest-go] wal: size %d bytes exceeds max %d MB, discarding",
+				info.Size(), cfg.WALMaxSizeMB,
+			)
+			if err := os.Remove(path); err != nil {
+				return nil, nil, 0, 0, fmt.Errorf("remove oversized wal failed: %w", err)
+			}
+		}
+	}
+
 	pendingItems, maxItemID, truncated, err := readPendingFromWAL(path)
 	if err != nil {
 		return nil, nil, 0, 0, err

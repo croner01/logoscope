@@ -5270,16 +5270,22 @@ const TopologyPage: React.FC = () => {
                       {/* OpenStack 跨服务追踪 badge */}
                       {(() => {
                         const detailMetrics = (selectedEdge?.metrics || {}) as Record<string, unknown>;
-                        const detailDataSource = String(selectedEdge?.metrics?.data_source || '').toLowerCase() === 'openstack'
-                          || (Array.isArray(detailMetrics.data_sources) && (detailMetrics.data_sources as string[]).includes('openstack'));
-                        const detailConfidence = Number(detailMetrics.confidence ?? 0);
+                        const isOpenstackSource = String(selectedEdge?.metrics?.data_source || '').toLowerCase() === 'openstack';
+                        const hasOpenstackInSources = Array.isArray(detailMetrics.data_sources) && (detailMetrics.data_sources as string[]).includes('openstack');
+                        const detailDataSource = isOpenstackSource || hasOpenstackInSources;
+                        const rawConfidence = detailMetrics.confidence;
+                        const detailConfidence = typeof rawConfidence === 'number' && Number.isFinite(rawConfidence)
+                          ? rawConfidence : 0;
+                        const confidencePct = detailConfidence > 0
+                          ? `${(detailConfidence * 100).toFixed(0)}%` : '—';
                         return detailDataSource ? (
                           <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
                             <div className="flex items-center gap-1 text-blue-700 dark:text-blue-300 text-xs font-medium">
                               <span>☁ OpenStack 跨服务追踪</span>
                             </div>
                             <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                              基于 openstack_global_request_id 检测的跨服务调用链（置信度 {(detailConfidence * 100).toFixed(0)}%）
+                              基于 openstack_global_request_id 检测的跨服务调用链
+                              {isOpenstackSource ? `（置信度 ${confidencePct}）` : '（openstack 辅助数据源）'}
                             </div>
                           </div>
                         ) : null;

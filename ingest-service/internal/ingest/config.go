@@ -49,6 +49,7 @@ type Config struct {
 	WALDir                    string
 	WALFileName               string
 	WALSyncEvery              int
+	WALMaxSizeMB              int
 
 	LogLevel string
 }
@@ -96,6 +97,7 @@ func LoadConfig() Config {
 		WALDir:                    getEnv("WAL_DIR", "/var/lib/ingest/wal"),
 		WALFileName:               getEnv("WAL_FILE_NAME", "queue.wal"),
 		WALSyncEvery:              maxInt(1, getEnvInt("WAL_SYNC_EVERY", 1)),
+			WALMaxSizeMB:              maxInt(1, getEnvInt("WAL_MAX_SIZE_MB", 500)),
 
 		LogLevel: strings.ToLower(getEnv("LOG_LEVEL", "info")),
 	}

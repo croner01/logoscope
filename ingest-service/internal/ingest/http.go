@@ -281,10 +281,6 @@ func writeJSONError(writer http.ResponseWriter, statusCode int, detail string) {
 
 func Run(ctx context.Context, cfg Config) error {
 	queue := NewQueueWriter(cfg)
-	if err := queue.Init(); err != nil {
-		return err
-	}
-
 	server := NewServer(cfg, queue)
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),
@@ -305,6 +301,13 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		errCh <- nil
 	}()
+
+	// Initialize queue writers — WAL replay happens in the background so the
+	// HTTP server is already accepting requests and passing probes even when
+	// recovering a large WAL backlog.
+	if err := queue.Init(); err != nil {
+		return err
+	}
 
 	select {
 	case <-ctx.Done():
