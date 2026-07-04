@@ -16,7 +16,7 @@ from typing import Dict, List, Any, Optional, Literal
 import logging
 from datetime import datetime, timedelta, timezone
 
-from graph.enhanced_topology import get_enhanced_topology_builder
+from graph.hybrid_topology import get_hybrid_topology_builder
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,22 @@ SERVICE_LAYER_RULES = {
     "business": ["service", "api", "backend", "worker", "processor", "handler", "controller"],
     "infrastructure": ["database", "db", "cache", "redis", "mysql", "postgres", "mongodb", "clickhouse", "kafka", "rabbitmq", "nats", "collector", "gateway"]
 }
+
+# OpenStack 服务前缀（基础设施层）
+OPENSTACK_SERVICE_PREFIXES = (
+    "nova-", "cinder-", "neutron-", "glance-", "keystone",
+    "swift-", "heat-", "ceilometer", "designate-", "barbican-",
+    "magnum-", "octavia-", "placement", "ironic-", "horizon",
+    "aodh", "gnocchi", "manila-", "trove-", "sahara-", "mistral-",
+    "senlin-", "vitrage", "zaqar", "panko", "rally", "tacker-",
+)
+
+# 基础设施组件关键词
+INFRA_COMPONENT_KEYWORDS = (
+    "mariadb", "galera", "keepalived", "dnsmasq",
+    "libvirt", "openvswitch", "ovs-", "memcached",
+    "etcd", "haproxy",
+)
 
 # 健康状态阈值
 HEALTH_THRESHOLDS = {
@@ -60,29 +76,61 @@ def set_storage_adapter(storage_adapter):
     storage = storage_adapter
 
 
-def _classify_service_layer(service_name: str) -> str:
+def _classify_service_layer(service_name: str, node: Optional[Dict[str, Any]] = None) -> str:
     """
     将服务分类到三层架构
 
     Args:
         service_name: 服务名称
+        node: 完整节点数据（可选），用于根据 data_source 辅助分类
 
     Returns:
         "client" | "business" | "infrastructure"
     """
     name_lower = service_name.lower()
 
-    # 优先检查基础设施层
-    for keyword in SERVICE_LAYER_RULES["infrastructure"]:
-        if keyword in name_lower:
-            return "infrastructure"
+    # 去除 namespace 前缀（如 "islap::semantic-engine" → "semantic-engine"）
+    if "::" in name_lower:
+        name_lower = name_lower.split("::", 1)[-1]
 
-    # 检查客户端层
+    # 1. 检查客户端层
     for keyword in SERVICE_LAYER_RULES["client"]:
         if keyword in name_lower:
             return "client"
 
-    # 默认业务层
+    # 2. 检查现有基础设施层关键词
+    for keyword in SERVICE_LAYER_RULES["infrastructure"]:
+        if keyword in name_lower:
+            return "infrastructure"
+
+    # 3. 检查 OpenStack 服务前缀
+    for prefix in OPENSTACK_SERVICE_PREFIXES:
+        if prefix in name_lower:
+            return "infrastructure"
+
+    # 4. 检查基础设施组件关键词
+    for keyword in INFRA_COMPONENT_KEYWORDS:
+        if keyword in name_lower:
+            return "infrastructure"
+
+    # 5. 根据节点 data_source 辅助判断
+    if node:
+        metrics = node.get("metrics", {}) if isinstance(node, dict) else {}
+        data_source = str(metrics.get("data_source") or "").strip().lower()
+        data_sources = metrics.get("data_sources", [])
+        if not isinstance(data_sources, list):
+            data_sources = []
+
+        # openstack 数据源 → 基础设施
+        if data_source == "openstack":
+            return "infrastructure"
+
+        # interactions/openstack 来源且无业务关键词匹配 → 基础设施
+        if data_source in ("interactions",) or "interactions" in data_sources:
+            if not any(kw in name_lower for kw in SERVICE_LAYER_RULES["business"]):
+                return "infrastructure"
+
+    # 6. 默认业务层
     return "business"
 
 
@@ -97,9 +145,9 @@ def _calculate_node_health(node: Dict[str, Any]) -> str:
         "healthy" | "warning" | "error" | "unknown"
     """
     metrics = node.get("metrics", {})
-    error_rate = metrics.get("error_rate", 0)
-    total_instances = metrics.get("instance_count", 1)
-    healthy_instances = metrics.get("healthy_instance_count", total_instances)
+    error_rate = metrics.get("error_rate") or 0
+    total_instances = metrics.get("instance_count") or 1
+    healthy_instances = metrics.get("healthy_instance_count") or total_instances
 
     # 检查是否有任何实例运行
     if healthy_instances == 0:
@@ -125,8 +173,8 @@ def _calculate_edge_health(edge: Dict[str, Any]) -> str:
         "healthy" | "warning" | "error" | "unknown"
     """
     metrics = edge.get("metrics", {})
-    error_rate = metrics.get("error_rate", 0)
-    p99_latency = metrics.get("p99_latency_ms", 0)
+    error_rate = metrics.get("error_rate") or 0
+    p99_latency = metrics.get("p99_latency_ms") or 0
 
     # 综合错误率和延迟判断
     if error_rate < 0.01 and p99_latency < 1000:
@@ -148,8 +196,8 @@ def _calculate_edge_width(edge: Dict[str, Any]) -> float:
         宽度 (0.5 - 4.0 px)
     """
     metrics = edge.get("metrics", {})
-    call_count = metrics.get("call_count", 0)
-    qps = metrics.get("qps", call_count / 60)  # 假设1分钟窗口
+    call_count = metrics.get("call_count") or 0
+    qps = metrics.get("qps") or (call_count / 60)  # 假设1分钟窗口
 
     # 使用对数缩放，避免高QPS导致线条过粗
     if qps <= 0:
@@ -288,8 +336,8 @@ async def get_monitor_topology(
         if not storage:
             raise HTTPException(status_code=500, detail="Storage adapter not initialized")
 
-        # 构建拓扑数据
-        builder = get_enhanced_topology_builder(storage)
+        # 构建拓扑数据（使用混合数据源构建器，含 interactions/openstack 数据）
+        builder = get_hybrid_topology_builder(storage)
         if not builder:
             raise HTTPException(status_code=500, detail="Topology builder not initialized")
 
@@ -311,7 +359,7 @@ async def get_monitor_topology(
         }
 
         for node in raw_nodes:
-            layer = _classify_service_layer(node["id"])
+            layer = _classify_service_layer(node["id"], node)
             layers[layer].append(node)
 
         # 构建格式化的节点数据
@@ -348,10 +396,11 @@ async def get_monitor_topology(
 
                 # 可选：包含更多详细指标
                 if include_metrics:
+                    n_metrics = node.get("metrics", {}) or {}
                     formatted_node["metrics"].update({
-                        "log_count": node.get("metrics", {}).get("log_count", 0),
-                        "trace_count": node.get("metrics", {}).get("trace_count", 0),
-                        "span_count": node.get("metrics", {}).get("span_count", 0)
+                        "log_count": n_metrics.get("log_count") or 0,
+                        "trace_count": n_metrics.get("trace_count") or 0,
+                        "span_count": n_metrics.get("span_count") or 0
                     })
 
                 formatted_nodes.append(formatted_node)
@@ -372,7 +421,7 @@ async def get_monitor_topology(
 
             # 根据 P99 延迟调整颜色
             metrics = edge.get("metrics", {})
-            p99_latency = metrics.get("p99_latency_ms", 0)
+            p99_latency = metrics.get("p99_latency_ms") or 0
             if p99_latency > 2000:
                 edge_color = "#ff4d4f"  # 高延迟红色
                 animated = True
@@ -387,14 +436,14 @@ async def get_monitor_topology(
                 "id": edge.get("id", f"{edge['source']}-{edge['target']}"),
                 "source": edge["source"],
                 "target": edge["target"],
-                "label": f"{metrics.get('call_count', 0)} calls",
+                "label": f"{metrics.get('call_count') or 0} calls",
                 "type": edge.get("type", "calls"),
                 "width": edge_width,
                 "color": edge_color,
                 "style": "solid" if not animated else "dashed",
                 "animated": animated,
                 "metrics": {
-                    "qps": metrics.get("call_count", 0) / 60,  # 粗略估算QPS
+                    "qps": (metrics.get("call_count") or 0) / 60,  # 粗略估算QPS
                     "avg_latency_ms": metrics.get("avg_duration", 0),
                     "p99_latency_ms": p99_latency,
                     "error_rate": metrics.get("error_rate", 0)
@@ -439,7 +488,7 @@ async def get_monitor_topology(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error generating monitor topology: {e}")
+        logger.error(f"Error generating monitor topology: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -553,8 +602,8 @@ async def search_topology_nodes(
         if not storage:
             raise HTTPException(status_code=500, detail="Storage adapter not initialized")
 
-        # 获取完整拓扑
-        builder = get_enhanced_topology_builder(storage)
+        # 获取完整拓扑（使用混合数据源构建器）
+        builder = get_hybrid_topology_builder(storage)
         if not builder:
             raise HTTPException(500, detail="Topology builder not initialized")
 
@@ -568,7 +617,7 @@ async def search_topology_nodes(
 
         for idx, node in enumerate(raw_nodes):
             if query_lower in node["id"].lower():
-                layer = _classify_service_layer(node["id"])
+                layer = _classify_service_layer(node["id"], node)
                 health = _calculate_node_health(node)
 
                 matches.append({
@@ -667,7 +716,7 @@ async def get_aggregated_topology(
         if not storage:
             raise HTTPException(status_code=500, detail="Storage adapter not initialized")
 
-        builder = get_enhanced_topology_builder(storage)
+        builder = get_hybrid_topology_builder(storage)
         if not builder:
             raise HTTPException(500, detail="Topology builder not initialized")
 
