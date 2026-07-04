@@ -39,6 +39,15 @@ from config import config
 from platform_kernel.fastapi_kernel import install_common_fastapi_handlers
 from utils.logging_config import get_logger, setup_logging
 
+# Workflow Engine
+from semantic_engine.workflow import WorkflowEngine
+
+# v15 组件路由（WorldView / Episode / Experience API）
+from shared_src.api.worldview_routes import create_worldview_router
+from shared_src.api.episode_routes import create_episode_router
+from shared_src.api.experience_routes import create_experience_router
+from shared_src.episode.store import EpisodeStore
+
 setup_logging(
     service_name=config.app_name,
     level=getattr(logging, str(config.log_level).upper(), logging.INFO),
@@ -54,6 +63,10 @@ def _utc_now_iso() -> str:
 # 全局 storage 实例
 storage = None
 alert_evaluation_task: Optional[asyncio.Task] = None
+
+# Workflow Engine
+workflow_engine: Optional[WorkflowEngine] = None
+workflow_build_task: Optional[asyncio.Task] = None
 AI_SERVICE_BASE_URL = os.getenv("AI_SERVICE_BASE_URL", "http://ai-service:8090").rstrip("/")
 EXEC_SERVICE_BASE_URL = os.getenv("EXEC_SERVICE_BASE_URL", "http://exec-service:8095").rstrip("/")
 
@@ -88,6 +101,35 @@ async def _run_alert_evaluation_loop():
             break
         except Exception as e:
             log_format("ERROR", "alerts", f"Periodic alert evaluation failed: {e}")
+
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            break
+
+
+def _workflow_build_interval_seconds() -> int:
+    """获取 Workflow 构建间隔（秒），默认 6 小时。"""
+    raw = os.getenv("WORKFLOW_BUILD_INTERVAL_SECONDS", "21600")
+    try:
+        return max(300, int(raw))
+    except (TypeError, ValueError):
+        return 21600
+
+
+async def _run_workflow_build_loop():
+    """后台周期性构建 Workflow Execution。"""
+    interval_seconds = _workflow_build_interval_seconds()
+    while True:
+        try:
+            result = await asyncio.to_thread(workflow_engine.build_workflows, since_hours=12)
+            built = int(result.get("built", 0))
+            if built > 0 or int(result.get("errors", 0)) > 0:
+                log_format("INFO", "workflow", "Periodic workflow build finished", **result)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log_format("ERROR", "workflow", f"Workflow build failed: {e}")
 
         try:
             await asyncio.sleep(interval_seconds)
@@ -143,6 +185,21 @@ http_exception_handler = _common_handlers["http_exception_handler"]
 validation_exception_handler = _common_handlers["validation_exception_handler"]
 unhandled_exception_handler = _common_handlers["unhandled_exception_handler"]
 
+# ── v15 API 路由注册 ──────────────────────────────────────────────────────
+# WorldView 路由：依赖在 startup 时注入，路由层有 None-guard 安全降级
+_worldview_router = create_worldview_router()
+app.include_router(_worldview_router, prefix="/api/v1")
+
+# Episode 路由：独立 in-memory store，启动即可用
+_episode_store = EpisodeStore()
+_episode_router = create_episode_router(episode_store=_episode_store)
+app.include_router(_episode_router, prefix="/api/v1")
+
+# Experience 路由：依赖 ExperienceGraphProjection，startup 时通过 mutable ref 注入
+_experience_graph_ref = [None]  # 单元素列表作为可变引用容器
+_experience_router = create_experience_router(experience_graph_ref=_experience_graph_ref)
+app.include_router(_experience_router, prefix="/api/v1")
+
 try:
     from otel_init import init_otel
 
@@ -182,6 +239,30 @@ async def startup_event():
 
     logger.info("Semantic Engine started successfully")
 
+    # ⭐ 初始化 v15 ExperienceGraphProjection（通过 mutable ref 注入已注册 router）
+    global _experience_graph_ref
+    try:
+        from semantic_engine.projections.experience_graph import ExperienceGraphProjection
+        _experience_graph_ref[0] = ExperienceGraphProjection(epoch=_utc_now_iso())
+        logger.info("ExperienceGraphProjection initialized")
+    except Exception as e:
+        logger.warning("Failed to initialize ExperienceGraphProjection: %s", e)
+        _experience_graph_ref[0] = None
+
+    # ⭐ 初始化 WorkflowEngine
+    global workflow_engine, workflow_build_task
+    try:
+        workflow_engine = WorkflowEngine(storage)
+        logger.info("WorkflowEngine initialized")
+    except Exception as e:
+        logger.warning("Failed to initialize WorkflowEngine: %s", e)
+
+    # 启动后台 Workflow 构建任务
+    if workflow_engine and hasattr(workflow_engine, '_ch_available') and workflow_engine._ch_available:
+        workflow_build_task = asyncio.create_task(_run_workflow_build_loop())
+        log_format("INFO", "workflow", "Started periodic workflow build task",
+                   interval_seconds=_workflow_build_interval_seconds())
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -197,6 +278,16 @@ async def shutdown_event():
             pass
         finally:
             alert_evaluation_task = None
+
+    global workflow_build_task
+    if workflow_build_task:
+        workflow_build_task.cancel()
+        try:
+            await workflow_build_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            workflow_build_task = None
 
     logger.info("Shutting down Semantic Engine...")
 
@@ -704,6 +795,90 @@ async def get_label_categories_api():
         "categories": LABEL_CATEGORIES,
         "description": "标签按功能和用途分类，便于管理和过滤"
     }
+
+
+# ==================== Workflow Execution API ====================
+
+
+@app.post("/api/v1/workflows/build")
+async def build_workflows_api(since_hours: int = 6):
+    """
+    手动触发 Workflow 构建
+
+    Args:
+        since_hours: 回溯小时数
+
+    Returns:
+        Dict[str, Any]: 构建结果
+    """
+    global workflow_engine
+    if not workflow_engine:
+        raise HTTPException(status_code=503, detail="WorkflowEngine not available")
+    try:
+        result = await asyncio.to_thread(workflow_engine.build_workflows, since_hours=since_hours)
+        return {"status": "ok", **result}
+    except Exception as e:
+        log_format("ERROR", "workflow", f"Manual workflow build failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/workflows")
+async def list_workflows_api(
+    operation_type: str = None,
+    since_hours: int = 24,
+    limit: int = 50,
+):
+    """
+    查询 Workflow 列表
+
+    Args:
+        operation_type: 过滤操作类型（如 CreateVM）
+        since_hours: 回溯小时数
+        limit: 最大返回条数
+
+    Returns:
+        List[Dict]: Workflow 列表
+    """
+    global workflow_engine
+    if not workflow_engine:
+        raise HTTPException(status_code=503, detail="WorkflowEngine not available")
+    try:
+        workflows = await asyncio.to_thread(
+            workflow_engine.list_workflows,
+            operation_type=operation_type,
+            since_hours=since_hours,
+            limit=limit,
+        )
+        return {"workflows": workflows, "count": len(workflows)}
+    except Exception as e:
+        log_format("ERROR", "workflow", f"Failed to list workflows: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/workflows/{execution_id}")
+async def get_workflow_detail_api(execution_id: str):
+    """
+    查询单个 Workflow 详情（含步骤）
+
+    Args:
+        execution_id: Workflow 执行 ID
+
+    Returns:
+        Dict: Workflow 详情
+    """
+    global workflow_engine
+    if not workflow_engine:
+        raise HTTPException(status_code=503, detail="WorkflowEngine not available")
+    try:
+        detail = await asyncio.to_thread(workflow_engine.get_workflow_detail, execution_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        return detail
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_format("ERROR", "workflow", f"Failed to get workflow detail: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
