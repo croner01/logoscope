@@ -68,7 +68,7 @@ INSERT INTO {_TABLE_NAME} (
 _EXISTS_SQL = f"""
 SELECT count() AS cnt
 FROM {_TABLE_NAME}
-WHERE execution_id = %(execution_id)s
+WHERE execution_id = {{execution_id}}
 FINAL
 """
 
@@ -243,7 +243,8 @@ class WorkflowEngine:
         FROM logs.logs
         WHERE openstack_global_request_id != ''
           AND timestamp > now() - INTERVAL {since_hours} HOUR
-        ORDER BY openstack_global_request_id, timestamp
+        ORDER BY timestamp
+        LIMIT 300000
         """
         return self.storage.execute_query(query) or []
 
@@ -659,7 +660,7 @@ class WorkflowEngine:
             steps.started_at, steps.duration_ms,
             steps.status, steps.level
         FROM {_TABLE_NAME}
-        WHERE execution_id = %(execution_id)s
+        WHERE execution_id = {{execution_id}}
         LIMIT 1
         """
         rows = self.storage.execute_query(query, {"execution_id": execution_id})
