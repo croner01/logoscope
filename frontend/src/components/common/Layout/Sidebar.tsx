@@ -52,6 +52,7 @@ const navGroups: NavGroup[] = [
       { path: '/logs',     label: '日志浏览器', icon: <FileText size={16} />,  shortcut: 'L' },
       { path: '/traces',   label: '链路追踪',   icon: <GitBranch size={16} />, shortcut: 'T' },
       { path: '/topology', label: '服务拓扑',   icon: <Network size={16} />,   shortcut: 'N' },
+      { path: '/workflows', label: 'Workflow 时间线', icon: <Activity size={16} /> },
       { path: '/labels',   label: '标签发现',   icon: <Tags size={16} /> },
     ],
   },

@@ -378,11 +378,11 @@ class WorkflowEngine:
                 existing_lvl = str(existing.get("level", "") or "").upper()
                 if _level_severity(lvl) > _level_severity(existing_lvl):
                     existing["level"] = record.get("level", "")
-                # 累积 message
+                # 累积 message（上限 100000 字符，确保 eventlet 格式的 HTTP 行不被截断）
                 msg = str(record.get("message", "") or "")
                 existing_msg = str(existing.get("message", "") or "")
                 if msg and msg not in existing_msg:
-                    existing["message"] = existing_msg + "\n" + msg if existing_msg and len(existing_msg) < 500 else existing_msg
+                    existing["message"] = existing_msg + "\n" + msg if existing_msg and len(existing_msg) < 100000 else existing_msg
         return sequence
 
     # ── 操作类型检测 ────────────────────────────────────────────────────────
@@ -391,25 +391,24 @@ class WorkflowEngine:
     def _detect_operation_type(sequence: List[Dict]) -> str:
         """从步骤序列中推断操作类型。
 
-        策略：从首个匹配 HTTP 请求模式的日志判断。
+        策略：遍历步骤的所有 HTTP 请求，优先匹配已知操作模式。
+        使用 finditer 确保同一 record（含合并的多条日志）中的所有 HTTP 请求都被检查。
         """
         for record in sequence:
             message = str(record.get("message", "") or "")
-            http_match = _HTTP_RE.search(message)
-            if not http_match:
-                continue
-            method = http_match.group(1)
-            path = http_match.group(2)
+            for http_match in _HTTP_RE.finditer(message):
+                method = http_match.group(1)
+                path = http_match.group(2)
 
-            # 按模式匹配
-            for pattern_fn, op_type in _OPERATION_PATTERNS:
-                if pattern_fn(method, path):
-                    # 如果是 ServerAction，进一步从 message 关键词区分
-                    if op_type == "ServerAction":
-                        sub_type = _detect_action_from_keywords(message)
-                        if sub_type:
-                            return sub_type
-                    return op_type
+                # 按模式匹配
+                for pattern_fn, op_type in _OPERATION_PATTERNS:
+                    if pattern_fn(method, path):
+                        # 如果是 ServerAction，进一步从 message 关键词区分
+                        if op_type == "ServerAction":
+                            sub_type = _detect_action_from_keywords(message)
+                            if sub_type:
+                                return sub_type
+                        return op_type
 
         # Fallback: 从 message 关键词检测
         for record in sequence:
@@ -427,11 +426,11 @@ class WorkflowEngine:
         策略：
         1. 从 HTTP 路径中提取 UUID（instance / volume）
         2. 从日志消息的 [instance: uuid] / [volume: uuid] 段中提取
+        使用 finditer 确保合并日志中的所有 HTTP 路径都被检查。
         """
         for record in sequence:
             message = str(record.get("message", "") or "")
-            http_match = _HTTP_RE.search(message)
-            if http_match:
+            for http_match in _HTTP_RE.finditer(message):
                 path = http_match.group(2)
                 # 从路径中提取 UUID
                 uuids = _UUID36_RE.findall(path) or _UUID32_RE.findall(path)
@@ -538,9 +537,8 @@ class WorkflowEngine:
     @staticmethod
     def _extract_action(message: str) -> str:
         """从日志消息中提取动作词。"""
-        # 优先 HTTP 方法
-        http_match = _HTTP_RE.search(message)
-        if http_match:
+        # 遍历所有 HTTP 匹配，返回第一个非平凡路径的动作
+        for http_match in _HTTP_RE.finditer(message):
             method = http_match.group(1)
             path = http_match.group(2)
             # 从路径最后一段提取动作
@@ -548,11 +546,12 @@ class WorkflowEngine:
             last_part = path_parts[-1] if path_parts else ""
             if last_part in ("action", ""):
                 return f"HTTP {method}"
-            # POST /v2.1/{tenant}/servers → "POST servers"
+            # 跳过只含 UUID 的路径段（tenant ID），找资源路径段
             for p in reversed(path_parts):
                 if p not in ("v2.1", "v2", "v1") and not re.match(r'^[a-f0-9]{32}$', p) and not re.match(r'^[a-f0-9-]{36}$', p):
                     return f"{method} {p}"
             return f"HTTP {method}"
+        # Fallback: 非 HTTP 行的消息首词
         return message.split()[0] if message else ""
 
     @staticmethod

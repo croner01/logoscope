@@ -775,6 +775,43 @@ class HybridTopologyBuilder:
                 data_quality=data_quality,
             )
 
+            # 4.3 标准化边端点：确保边的 source/target 与合并后的节点 ID 一致
+            # 修复 OpenStack、logs_heuristic 等数据源产生裸服务名边的问题
+            if merged_nodes and merged_edges:
+                _svc_map = {}
+                for _node in merged_nodes:
+                    _name = str(_node.get("name") or _node.get("label") or "").strip().lower().replace("_", "-")
+                    _nid = str(_node.get("id") or "").strip()
+                    if _name and _nid and _name not in _svc_map:
+                        _svc_map[_name] = _nid
+                _node_ids = {str(n.get("id") or "") for n in merged_nodes}
+                for _edge in merged_edges:
+                    _src = str(_edge.get("source") or "").strip()
+                    _tgt = str(_edge.get("target") or "").strip()
+                    if _src and _src not in _node_ids:
+                        _mapped = _svc_map.get(_src.lower().replace("_", "-"))
+                        if _mapped:
+                            _edge["source"] = _mapped
+                    if _tgt and _tgt not in _node_ids:
+                        _mapped = _svc_map.get(_tgt.lower().replace("_", "-"))
+                        if _mapped:
+                            _edge["target"] = _mapped
+
+                    # 同时标准化 source_node_key / target_node_key（前端 transformTopologyGraph 优先使用它们）
+                    _metrics = _edge.get("metrics")
+                    for _nk_key in ("source_node_key", "target_node_key"):
+                        _nk_val = str(_edge.get(_nk_key) or "").strip()
+                        if _nk_val and _nk_val not in _node_ids:
+                            # node_key 格式通常是 "namespace:service:env"，提取 service 段
+                            _nk_parts = _nk_val.split(":")
+                            _nk_svc = _nk_parts[1].lower().replace("_", "-") if len(_nk_parts) >= 2 else _nk_val.lower().replace("_", "-")
+                            _mapped_nk = _svc_map.get(_nk_svc)
+                            if _mapped_nk:
+                                _edge[_nk_key] = _mapped_nk
+                                # 同步更新 metrics 中的对应字段
+                                if _metrics and isinstance(_metrics, dict) and _metrics.get(_nk_key) == _nk_val:
+                                    _metrics[_nk_key] = _mapped_nk
+
             # 5. 过滤低置信度的边
             filtered_edges = [
                 edge for edge in merged_edges

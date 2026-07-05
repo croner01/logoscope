@@ -122,7 +122,7 @@ spec:
           value: "false"
         # Correlation 分析配置
         - name: ENABLE_CORRELATION
-          value: "true"
+          value: "false"
         - name: CORRELATION_FREQUENCY_THRESHOLD
           value: "5"
         - name: CORRELATION_MIN_CONFIDENCE

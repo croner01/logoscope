@@ -1829,26 +1829,8 @@ export class APIClient {
     message_target_min_support?: number;
     message_target_max_per_log?: number;
   }): Promise<TopologyGraph> {
-    try {
-      const response = await this.getWithInflightDedupe(`${API_PREFIX}/topology/hybrid`, { params });
-      return transformTopologyGraph(response.data);
-    } catch (error: LooseAny) {
-      // 如果拓扑 API 失败，返回空数据而不是抛出错误
-      console.warn('Topology API error, returning empty data:', error?.response?.data || error?.message);
-      return {
-        nodes: [],
-        edges: [],
-        metadata: {
-          data_sources: [],
-          time_window: params?.time_window || '1 HOUR',
-          node_count: 0,
-          edge_count: 0,
-          avg_confidence: 0,
-          source_breakdown: {},
-          generated_at: new Date().toISOString(),
-        },
-      };
-    }
+    const response = await this.getWithInflightDedupe(`${API_PREFIX}/topology/hybrid`, { params });
+    return transformTopologyGraph(response.data);
   }
 
   /**

@@ -17,6 +17,7 @@ const LabelsDiscovery = lazy(() => import('./pages/LabelsDiscovery'));
 const Settings = lazy(() => import('./pages/Settings'));
 const SSHHosts = lazy(() => import('./pages/SSHHostsPage'));
 const SkillManager = lazy(() => import('./pages/SkillManager'));
+const WorkflowPage = lazy(() => import('./pages/WorkflowPage'));
 
 const RouteFallback: React.FC = () => (
   <div className="flex h-full min-h-[280px] items-center justify-center px-6">
@@ -50,6 +51,7 @@ const App: React.FC = () => {
           <Route path="/settings" element={renderRoute(<Settings />)} />
           <Route path="/ssh-hosts" element={renderRoute(<SSHHosts />)} />
           <Route path="/skills" element={renderRoute(<SkillManager />)} />
+          <Route path="/workflows" element={renderRoute(<WorkflowPage />)} />
         </Route>
       </Routes>
     </BrowserRouter>

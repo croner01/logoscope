@@ -14,6 +14,7 @@ const ROUTE_META: Record<string, { label: string; section: string }> = {
   '/logs':            { label: '日志浏览器',     section: '数据探索' },
   '/traces':          { label: '链路追踪',       section: '数据探索' },
   '/topology':        { label: '服务拓扑',       section: '数据探索' },
+  '/workflows':       { label: 'Workflow 时间线', section: '数据探索' },
   '/labels':          { label: '标签发现',       section: '数据探索' },
   '/ai-analysis':     { label: 'AI 智能分析',    section: 'AI 智能' },
   '/ai-runtime-lab':  { label: 'AI Runtime Lab', section: 'AI 智能' },
