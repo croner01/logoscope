@@ -128,6 +128,10 @@ _OPERATION_PATTERNS = [
     (lambda m, p: m == "POST" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/volumes$', p), "CreateVolume"),
     # DeleteVolume: DELETE /v2.1/{tenant}/volumes/{id}
     (lambda m, p: m == "DELETE" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/volumes/', p), "DeleteVolume"),
+    # AttachVolume: POST /v2.1/{tenant}/attachments (创建 attachment 即挂载)
+    (lambda m, p: m == "POST" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/attachments$', p), "AttachVolume"),
+    # DetachVolume: DELETE /v2.1/{tenant}/attachments/{id}
+    (lambda m, p: m == "DELETE" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/attachments/', p), "DetachVolume"),
     # ServerAction: POST /v2.1/{tenant}/servers/{id}/action
     (lambda m, p: m == "POST" and '/action' in p and '/servers/' in p, "ServerAction"),
     # VolumeAction: POST /v2.1/{tenant}/volumes/{id}/action
