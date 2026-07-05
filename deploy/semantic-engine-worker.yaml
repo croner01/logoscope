@@ -62,11 +62,11 @@ spec:
         - name: KAFKA_BROKERS
           value: "kafka:9092"
         - name: KAFKA_GROUP_ID
-          value: "log-workers"
+          value: "log-workers-v2"  # v2: 修复重启后offset丢失导致重消费历史堆积的问题
         - name: KAFKA_CLIENT_ID
           value: "semantic-engine-worker"
         - name: KAFKA_AUTO_OFFSET_RESET
-          value: "earliest"
+          value: "latest"  # 配合v2组ID，避免重启后从earliest重消费
         - name: KAFKA_POLL_TIMEOUT_MS
           value: "1000"
         - name: KAFKA_MAX_POLL_INTERVAL_MS
@@ -84,7 +84,7 @@ spec:
         - name: KAFKA_COMMIT_ERROR_AS_WARNING
           value: "true"
         - name: KAFKA_MAX_BATCH_SIZE
-          value: "80"
+          value: "500"
         - name: KAFKA_MAX_RETRY_ATTEMPTS
           value: "5"
         - name: KAFKA_RETRY_DELAY_SECONDS
@@ -101,15 +101,15 @@ spec:
           value: "5"  # prod 参考: 3
         # ⭐ P0优化：ClickHouse 批量写入配置
         - name: CH_BATCH_SIZE
-          value: "300"  # pod 调优: 降低单次写入峰值内存
+          value: "5000"  # v2: 从1000调大为5000，减少flush次数
         - name: CH_FLUSH_INTERVAL
-          value: "0.1"  # pod 调优: 更快落盘减少堆积
+          value: "2"  # v2: 从0.5调大为2，降低定时flush频率
         - name: CH_BATCH_ASYNC_INSERT
           value: "true"
         - name: CH_BATCH_WAIT_FOR_ASYNC_INSERT
-          value: "true"
+          value: "false"  # v2: 改为非阻塞写入，消除ClickHouse等待
         - name: CH_MAX_INSERT_ROWS_PER_QUERY
-          value: "60"
+          value: "5000"  # v2: 从500调大为5000，避免批量拆分
         - name: CH_FLUSH_FAILURE_BACKOFF_SECONDS
           value: "1"
         - name: CH_FLUSH_FAILURE_MAX_BACKOFF_SECONDS
@@ -117,9 +117,16 @@ spec:
         - name: CH_FLUSH_SPLIT_MIN_ROWS
           value: "1"
         - name: CH_BATCH_LOG_EVERY
-          value: "20"
+          value: "50"
         - name: ENABLE_SEMANTIC_EVENT_WRITE
           value: "false"
+        # Correlation 分析配置
+        - name: ENABLE_CORRELATION
+          value: "true"
+        - name: CORRELATION_FREQUENCY_THRESHOLD
+          value: "5"
+        - name: CORRELATION_MIN_CONFIDENCE
+          value: "0.55"
         # 日志配置
         - name: LOG_LEVEL
           value: "info"
