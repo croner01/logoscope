@@ -116,26 +116,26 @@ def _calc_duration_ms(start: Any, end: Any) -> int:
 # ── 操作类型检测模式 ─────────────────────────────────────────────────────────
 
 # 正则匹配 OPENSTACK API 请求路径，判断操作类型
-# 路径格式: /v2.1/{tenant_id}/{resource} 或 /v2.1/{tenant_id}/{resource}/{id}/action
-_OPENSTACK_API_PATH = re.compile(r'/v2\.\d+/([^/]+)/(\w+)(?:/([^/\s]+))?(?:/(action))?')
+# 路径格式: /v2.1/{tenant_id}/{resource} 或 /v3/{tenant_id}/{resource} 或 .../{id}/action
+_OPENSTACK_API_PATH = re.compile(r'/v(?:2\.\d+|3)/([^/]+)/(\w+)(?:/([^/\s]+))?(?:/(action))?')
 
 _OPERATION_PATTERNS = [
     # CreateVM: POST /v2.1/{tenant}/servers (servers 是最后一段)
-    (lambda m, p: m == "POST" and re.match(r'/v2\.\d+/[^/\s]+/servers$', p), "CreateVM"),
+    (lambda m, p: m == "POST" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/servers$', p), "CreateVM"),
     # DeleteVM: DELETE /v2.1/{tenant}/servers/{id}
-    (lambda m, p: m == "DELETE" and re.match(r'/v2\.\d+/[^/\s]+/servers/', p), "DeleteVM"),
+    (lambda m, p: m == "DELETE" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/servers/', p), "DeleteVM"),
     # CreateVolume: POST /v2.1/{tenant}/volumes (volumes 是最后一段)
-    (lambda m, p: m == "POST" and re.match(r'/v2\.\d+/[^/\s]+/volumes$', p), "CreateVolume"),
+    (lambda m, p: m == "POST" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/volumes$', p), "CreateVolume"),
     # DeleteVolume: DELETE /v2.1/{tenant}/volumes/{id}
-    (lambda m, p: m == "DELETE" and re.match(r'/v2\.\d+/[^/\s]+/volumes/', p), "DeleteVolume"),
+    (lambda m, p: m == "DELETE" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/volumes/', p), "DeleteVolume"),
     # ServerAction: POST /v2.1/{tenant}/servers/{id}/action
     (lambda m, p: m == "POST" and '/action' in p and '/servers/' in p, "ServerAction"),
     # VolumeAction: POST /v2.1/{tenant}/volumes/{id}/action
     (lambda m, p: m == "POST" and '/action' in p and '/volumes/' in p, "VolumeAction"),
     # CreateImage: POST /v2.1/{tenant}/images (images 是最后一段)
-    (lambda m, p: m == "POST" and re.match(r'/v2\.\d+/[^/\s]+/images$', p), "CreateImage"),
+    (lambda m, p: m == "POST" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/images$', p), "CreateImage"),
     # CreateSnapshot: POST /v2.1/{tenant}/snapshots
-    (lambda m, p: m == "POST" and re.match(r'/v2\.\d+/[^/\s]+/snapshots', p), "CreateSnapshot"),
+    (lambda m, p: m == "POST" and re.match(r'/v(?:2\.\d+|3)/[^/\s]+/snapshots', p), "CreateSnapshot"),
 ]
 
 # 对其他操作类型的 message 关键词检测

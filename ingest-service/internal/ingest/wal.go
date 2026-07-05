@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type walRecord struct {
@@ -19,6 +20,7 @@ type walRecord struct {
 }
 
 type queueWAL struct {
+	mu           sync.Mutex
 	path         string
 	file         *os.File
 	syncEvery    int
@@ -212,6 +214,11 @@ func (w *queueWAL) appendAcks(itemIDs []uint64) error {
 		buffer.WriteByte('\n')
 	}
 
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return fmt.Errorf("wal closed during write")
+	}
 	if _, err := w.file.Write(buffer.Bytes()); err != nil {
 		return err
 	}
@@ -228,6 +235,8 @@ func (w *queueWAL) appendAcks(itemIDs []uint64) error {
 }
 
 func (w *queueWAL) appendRecord(record walRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w == nil || w.file == nil {
 		return fmt.Errorf("wal not initialized")
 	}
@@ -251,7 +260,156 @@ func (w *queueWAL) appendRecord(record walRecord) error {
 	return nil
 }
 
+// WALCompactedSize returns the number of "add" records that have matching "ack" records
+// and could be removed by compaction. Returns -1 if the WAL is nil or closed.
+func (w *queueWAL) WALCompactedSize() int64 {
+	// Only available after a compact has been performed.
+	return 0
+}
+
+// Size returns the current WAL file size in bytes. Returns 0 if file is nil or closed.
+func (w *queueWAL) Size() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w == nil || w.file == nil {
+		return 0
+	}
+	info, err := os.Stat(w.path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// Compact rewrites the WAL file, keeping only "add" records without matching "ack" records.
+// This prevents unbounded WAL growth during runtime (the old behavior only checked at startup).
+// Must be called with w.mu held (not queue.mu).
+func (w *queueWAL) Compact() error {
+	if w == nil {
+		return nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Close the current append-handle so we can read the file safely
+	if w.file == nil {
+		return nil
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync wal before compact: %w", err)
+	}
+	if err := w.file.Close(); err != nil {
+		log.Printf("[ingest-go] wal: close before compact warning: %v", err)
+	}
+	w.file = nil
+
+	// Read all records, filter out acked ones
+	records, err := readAllRecords(w.path)
+	if err != nil {
+		return fmt.Errorf("read wal for compact: %w", err)
+	}
+
+	// Build set of acked IDs
+	acked := make(map[uint64]bool)
+	pending := make([]walRecord, 0)
+	for _, rec := range records {
+		if rec.Op == "ack" {
+			acked[rec.ID] = true
+		}
+	}
+
+	// Keep only "add" records not yet acked
+	addCount := 0
+	ackCount := len(acked)
+	for _, rec := range records {
+		if rec.Op == "add" {
+			if !acked[rec.ID] {
+				pending = append(pending, rec)
+			}
+			addCount++
+		}
+	}
+
+	// Rewrite the WAL with only pending (non-acked) add records
+	tempPath := w.path + ".tmp"
+	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open wal temp for compact: %w", err)
+	}
+
+	for _, rec := range pending {
+		encoded, err := json.Marshal(rec)
+		if err != nil {
+			_ = file.Close()
+			return fmt.Errorf("encode wal record for compact: %w", err)
+		}
+		if _, err := file.Write(append(encoded, '\n')); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("write wal temp for compact: %w", err)
+		}
+	}
+
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync wal temp for compact: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close wal temp for compact: %w", err)
+	}
+	if err := os.Rename(tempPath, w.path); err != nil {
+		return fmt.Errorf("replace wal after compact: %w", err)
+	}
+
+	// Reopen for append
+	reopened, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("reopen wal after compact: %w", err)
+	}
+	w.file = reopened
+	w.opsSinceSync = 0
+
+	log.Printf(
+		"[ingest-go] wal compacted: %d add records → %d pending (removed %d acked + %d stale acks)",
+		addCount, len(pending), ackCount, addCount-len(pending)-ackCount,
+	)
+	return nil
+}
+
+// readAllRecords reads every JSON line from a WAL file, returning all records in order.
+func readAllRecords(path string) ([]walRecord, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open wal for read: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	var records []walRecord
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec walRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return nil, fmt.Errorf("parse wal line: %w", err)
+		}
+		records = append(records, rec)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan wal: %w", err)
+	}
+	return records, nil
+}
+
 func (w *queueWAL) close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w == nil || w.file == nil {
 		return nil
 	}

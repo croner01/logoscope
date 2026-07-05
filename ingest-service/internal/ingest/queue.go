@@ -619,17 +619,11 @@ func (w *QueueWriter) kafkaWriterForTopicLocked(topic string) *kafka.Writer {
 
 func (w *QueueWriter) writeToKafka(ctx context.Context, stream string, dataType string, payload string) (map[string]any, error) {
 	w.mu.Lock()
-	writer := w.kafkaWriterForTopicLocked(w.cfg.KafkaTopicPlatformRaw)
+	writer := w.kafkaWriterForTopicLocked(stream)
 	w.mu.Unlock()
 
 	if writer == nil {
 		return nil, errors.New("kafka writer not initialized")
-	}
-
-	eventType := strings.TrimSuffix(dataType, "s") + ".raw"
-	envelopeBytes, err := newEventEnvelope(eventType, "ingest-service", json.RawMessage(payload))
-	if err != nil {
-		return nil, err
 	}
 
 	writeCtx, cancel := context.WithTimeout(ctx, time.Duration(w.cfg.KafkaWriteTimeout)*time.Second)
@@ -637,19 +631,19 @@ func (w *QueueWriter) writeToKafka(ctx context.Context, stream string, dataType 
 
 	now := time.Now().UTC()
 	messageID := fmt.Sprintf("kafka-%d", now.UnixNano())
-	err = writer.WriteMessages(
+	if err := writer.WriteMessages(
 		writeCtx,
 		kafka.Message{
 			Key:   []byte(messageID),
-			Value: envelopeBytes,
+			Value: []byte(payload),
 			Time:  now,
 			Headers: []kafka.Header{
 				{Key: "data_type", Value: []byte(dataType)},
 				{Key: "ingest_time", Value: []byte(now.Format(time.RFC3339Nano))},
+				{Key: "stream", Value: []byte(stream)},
 			},
 		},
-	)
-	if err != nil {
+	); err != nil {
 		return nil, err
 	}
 
@@ -670,7 +664,7 @@ func (w *QueueWriter) writeToKafka(ctx context.Context, stream string, dataType 
 
 func (w *QueueWriter) writeBatchToKafka(ctx context.Context, stream string, dataType string, payloads []string) ([]string, error) {
 	w.mu.Lock()
-	writer := w.kafkaWriterForTopicLocked(w.cfg.KafkaTopicPlatformRaw)
+	writer := w.kafkaWriterForTopicLocked(stream)
 	w.mu.Unlock()
 	if writer == nil {
 		return nil, errors.New("kafka writer not initialized")
@@ -679,24 +673,20 @@ func (w *QueueWriter) writeBatchToKafka(ctx context.Context, stream string, data
 	writeCtx, cancel := context.WithTimeout(ctx, time.Duration(w.cfg.KafkaWriteTimeout)*time.Second)
 	defer cancel()
 
-	eventType := strings.TrimSuffix(dataType, "s") + ".raw"
 	now := time.Now().UTC()
 	messages := make([]kafka.Message, 0, len(payloads))
 	messageIDs := make([]string, 0, len(payloads))
 	for _, payload := range payloads {
-		envelopeBytes, err := newEventEnvelope(eventType, "ingest-service", json.RawMessage(payload))
-		if err != nil {
-			return nil, err
-		}
 		messageID := fmt.Sprintf("kafka-%d", now.UnixNano()+int64(len(messageIDs)))
 		messageIDs = append(messageIDs, messageID)
 		messages = append(messages, kafka.Message{
 			Key:   []byte(messageID),
-			Value: envelopeBytes,
+			Value: []byte(payload),
 			Time:  now,
 			Headers: []kafka.Header{
 				{Key: "data_type", Value: []byte(dataType)},
 				{Key: "ingest_time", Value: []byte(now.Format(time.RFC3339Nano))},
+				{Key: "stream", Value: []byte(stream)},
 			},
 		})
 	}
@@ -831,6 +821,28 @@ func (w *QueueWriter) startReconnectLoop() {
 
 			if w.ensurePrimaryConnection(context.Background()) {
 				w.flushMemoryQueue(context.Background())
+				// ⭐ 运行时 WAL 压缩：flush 成功后检查 WAL 大小，超过阈值则 compact。
+				// 需在锁外调用 wal.Compact() 避免死锁。
+				w.mu.Lock()
+				walSize := int64(0)
+				if w.wal != nil {
+					walSize = w.wal.Size()
+				}
+				compactThresholdBytes := int64(w.cfg.WALCompactThresholdMB) * 1024 * 1024
+				needsCompact := walSize > compactThresholdBytes
+				w.mu.Unlock()
+
+				if needsCompact && w.wal != nil {
+					log.Printf(
+						"[ingest-go] wal size %d bytes exceeds compact threshold %d MB, triggering compact",
+						walSize, w.cfg.WALCompactThresholdMB,
+					)
+					if err := w.wal.Compact(); err != nil {
+						log.Printf("[ingest-go] wal compact failed: %v", err)
+					} else {
+						log.Printf("[ingest-go] wal compact complete, new size: %d bytes", w.wal.Size())
+					}
+				}
 			}
 		}
 	}(loopID)

@@ -268,8 +268,8 @@ async def test_monitor_topology_contract_fields(monkeypatch: pytest.MonkeyPatch)
     monitor_topology.set_storage_adapter(object())
     monkeypatch.setattr(
         monitor_topology,
-        "get_enhanced_topology_builder",
-        lambda _storage: FakeEnhancedBuilder(),
+        "get_hybrid_topology_builder",
+        lambda _storage: FakeHybridBuilder(),
     )
 
     result = await monitor_topology.get_monitor_topology(

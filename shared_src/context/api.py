@@ -128,4 +128,8 @@ class ContextAPI:
                 impact_set=self.topology.get_impact_set(entity_type, entity_name),
                 estimated_vm_count=self.topology.estimate_vm_count(entity_type, entity_name),
             )
-        return IncidentContext(summary=f"Context for {entity_type}:{entity_name}")
+        elif context_type == ContextType.WORKFLOW:
+            return WorkflowContext()
+        elif context_type == ContextType.RULE:
+            return RuleContext()
+        return IncidentContext(summary=f"Unknown context type {context_type} for {entity_type}:{entity_name}")

@@ -2,6 +2,8 @@
 
 v2: 支持 ClickHouse 持久化。当 storage.ch_client 可用时写入 ClickHouse，
      否则回退到内存模式（向后兼容）。
+v3: record_interaction 增加上下文参数：request_id, global_request_id, host, namespace, pod_name, instance。
+     logs.interactions 表增加对应列，保留 topology-service 兼容性。
 """
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -16,7 +18,13 @@ CREATE TABLE IF NOT EXISTS {_INTERACTIONS_TABLE} (
     target String,
     timestamp DateTime64(3, 'UTC'),
     interaction_id String DEFAULT generateUUIDv4(),
-    failure_pattern String DEFAULT ''
+    failure_pattern String DEFAULT '',
+    request_id String DEFAULT '',
+    global_request_id String DEFAULT '',
+    host String DEFAULT '',
+    namespace String DEFAULT '',
+    pod_name String DEFAULT '',
+    instance String DEFAULT ''
 ) ENGINE = MergeTree()
 PARTITION BY toDate(timestamp)
 ORDER BY (source, target, timestamp)
@@ -24,7 +32,8 @@ TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
 SETTINGS index_granularity = 8192
 """
 
-_INSERT_SQL = f"""INSERT INTO {_INTERACTIONS_TABLE} (source, target, timestamp, failure_pattern) VALUES"""
+_INSERT_COLUMNS = "(source, target, timestamp, failure_pattern, request_id, global_request_id, host, namespace, pod_name, instance)"
+_INSERT_SQL = f"""INSERT INTO {_INTERACTIONS_TABLE} {_INSERT_COLUMNS} VALUES"""
 
 # 不带 failure_pattern 过滤的基础查询（向下兼容）
 _COUNT_IN_WINDOW_SQL = f"""
@@ -86,7 +95,7 @@ class DynamicRelProjection:
     """
 
     def __init__(self, storage: Optional[Any] = None):
-        self._interactions: List[Tuple[str, str, datetime, str]] = []
+        self._interactions: List[Tuple[str, str, datetime, str, str, str, str, str, str, str]] = []
         self._storage = storage
         self._ch_client = None
         self._clickhouse_available = False
@@ -100,16 +109,32 @@ class DynamicRelProjection:
 
     def record_interaction(self, source: str, target: str,
                            timestamp: Optional[datetime] = None,
-                           failure_pattern: str = "") -> None:
-        """记录一次交互，可用 failure_pattern 标记所属故障场景。"""
+                           failure_pattern: str = "",
+                           request_id: str = "",
+                           global_request_id: str = "",
+                           host: str = "",
+                           namespace: str = "",
+                           pod_name: str = "",
+                           instance: str = "") -> None:
+        """记录一次交互，可用 failure_pattern 标记所属故障场景。
+
+        上下文参数（request_id, global_request_id, host, namespace, pod_name, instance）
+        记录关联的 OpenStack 请求信息，供后续拓扑分析使用。
+        """
         ts = timestamp or datetime.utcnow()
         if self._clickhouse_available:
             self._ch_client.execute(
                 _INSERT_SQL,
-                [(source, target, ts, failure_pattern)],
+                [(source, target, ts, failure_pattern,
+                  request_id, global_request_id, host,
+                  namespace, pod_name, instance)],
             )
         else:
-            self._interactions.append((source, target, ts, failure_pattern))
+            self._interactions.append(
+                (source, target, ts, failure_pattern,
+                 request_id, global_request_id, host,
+                 namespace, pod_name, instance)
+            )
 
     def query_trend(self, source: str, target: str,
                      windows: List[str],
@@ -186,7 +211,7 @@ class DynamicRelProjection:
             seconds = self._parse_window(window_str)
             cutoff = now - timedelta(seconds=seconds)
             count = sum(
-                1 for s, t, ts, fp in self._interactions
+                1 for (s, t, ts, fp, *_) in self._interactions
                 if s == source and t == target
                 and ts >= cutoff
                 and (failure_pattern is None or fp == failure_pattern)
@@ -201,7 +226,7 @@ class DynamicRelProjection:
         cutoff = now - timedelta(hours=hours)
         hourly = defaultdict(int)
 
-        for s, t, ts, fp in self._interactions:
+        for (s, t, ts, fp, *_) in self._interactions:
             if s == source and t == target and ts >= cutoff:
                 if failure_pattern is not None and fp != failure_pattern:
                     continue

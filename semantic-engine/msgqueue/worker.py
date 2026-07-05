@@ -11,6 +11,7 @@ import sys
 import os
 import logging
 import re
+import uuid
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -417,6 +418,13 @@ class LogWorker:
         self._stop_lock = asyncio.Lock()
         # 默认保持与原行为一致，可通过环境变量关闭语义事件写入降低写放大
         self.enable_semantic_event_write = _read_bool_env("ENABLE_SEMANTIC_EVENT_WRITE", True)
+        # Correlation 分析（默认关闭，通过 ENABLE_CORRELATION=true 开启）
+        self._correlation_enabled = _read_bool_env("ENABLE_CORRELATION", False)
+        self._interaction_projector = None
+        self._correlation_engine = None
+        self._dynamic_rel_projection = None
+        self._correlation_findings_cnt = 0
+        self._last_interaction_idx = 0
         try:
             self.log_message_max_chars = int(os.getenv("LOG_MESSAGE_MAX_CHARS", "25000"))
         except (TypeError, ValueError):
@@ -494,6 +502,10 @@ class LogWorker:
                     async_insert_settings["async_insert"],
                     async_insert_settings["wait_for_async_insert"],
                 )
+
+            # 初始化 Correlation 分析组件
+            if self._correlation_enabled:
+                self._setup_correlation()
 
             # 在mock模式下不需要连接数据库
             # StorageAdapter会自动处理mock模式
@@ -617,6 +629,8 @@ class LogWorker:
                 self.error_count += 1
                 skipped_records += 1
                 continue
+            if self._correlation_enabled:
+                self._run_correlation(normalized)
             normalized_events.append(normalized)
 
         if not normalized_events:
@@ -708,6 +722,10 @@ class LogWorker:
             logger.warning("Failed to normalize log payload")
             self.error_count += 1
             return False
+
+        # Correlation 分析
+        if self._correlation_enabled:
+            self._run_correlation(normalized)
 
         if self.log_writer:
             success = self._save_event_batch(normalized)
@@ -919,6 +937,89 @@ class LogWorker:
         logger.warning("Failed to save traces count=%s", len(traces))
         self.error_count += 1
         return False
+
+    def _setup_correlation(self) -> None:
+        """初始化 Correlation 分析组件（InteractionProjector → DynamicRelProjection → CorrelationEngine）。"""
+        try:
+            from shared_src.event.envelope import EventEnvelope
+            from shared_src.event.bus import InMemoryEventBus
+            from shared_src.event.schema_registry import SchemaRegistry
+            from semantic_engine.projectors import InteractionProjector
+            from semantic_engine.correlate import CorrelationEngine, DynamicRelProjection
+
+            bus = InMemoryEventBus()
+            sr = SchemaRegistry()
+
+            self._interaction_projector = InteractionProjector(
+                schema_registry=sr, bus=bus,
+            )
+            # DynamicRelProjection 会复用 storage 的 ClickHouse 连接（如果可用）
+            self._dynamic_rel_projection = DynamicRelProjection(
+                storage=self.storage,
+            )
+            self._correlation_engine = CorrelationEngine(
+                rel_projection=self._dynamic_rel_projection,
+                bus=bus,
+                frequency_threshold=int(os.getenv("CORRELATION_FREQUENCY_THRESHOLD", "5")),
+                min_confidence=float(os.getenv("CORRELATION_MIN_CONFIDENCE", "0.55")),
+            )
+            logger.info(
+                "Correlation pipeline initialized (threshold=%s, min_confidence=%s)",
+                self._correlation_engine.frequency_threshold,
+                self._correlation_engine.min_confidence,
+            )
+        except ImportError as e:
+            logger.warning("Correlation modules not available, disabled: %s", e)
+            self._correlation_enabled = False
+        except Exception as e:
+            logger.exception("Failed to initialize correlation pipeline: %s", e)
+            self._correlation_enabled = False
+
+    def _run_correlation(self, normalized: Dict[str, Any]) -> None:
+        """
+        对一条标准化日志运行 correlation pipeline：
+          NormalizedEvent → InteractionProjector → interaction.observed → CorrelationEngine → findings
+        """
+        if not self._correlation_enabled or not self._interaction_projector:
+            return
+        try:
+            from shared_src.event.envelope import EventEnvelope
+
+            # 包装为 normalized EventEnvelope
+            env = EventEnvelope(
+                event_type="normalized.event",
+                producer="semantic-engine",
+                event_id=uuid.uuid4().hex,
+                timestamp=datetime.utcnow(),
+                payload=json.dumps(normalized).encode(),
+            )
+
+            # Step 1: InteractionProjector 检查是否包含交互关系
+            #         如果有，会 publish interaction.observed 到 InMemoryEventBus
+            self._interaction_projector.process(env)
+
+            # Step 2: 处理新产生的 interaction.observed 事件（跳过已处理的）
+            bus = getattr(self._interaction_projector, "bus", None)
+            if bus and hasattr(bus, "_history"):
+                interactions = bus._history.get("platform.interaction", [])
+                while self._last_interaction_idx < len(interactions):
+                    interaction_env = interactions[self._last_interaction_idx]
+                    self._last_interaction_idx += 1
+                    findings = self._correlation_engine.process(interaction_env)
+                    for f in findings:
+                        self._correlation_findings_cnt += 1
+                        logger.info(
+                            "[CORRELATION] %s | confidence=%.2f | entities=%s "
+                            "| pattern=%s | total_findings=%s",
+                            f.get("hypothesis", ""),
+                            f.get("confidence", 0.0),
+                            f.get("affected_entities", []),
+                            f.get("failure_pattern", ""),
+                            self._correlation_findings_cnt,
+                        )
+
+        except Exception as e:
+            logger.debug("Correlation processing error: %s", e)
 
     async def start(self) -> None:
         """启动 Worker"""

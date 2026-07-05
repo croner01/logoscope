@@ -51,6 +51,7 @@ type Config struct {
 	WALFileName               string
 	WALSyncEvery              int
 	WALMaxSizeMB              int
+	WALCompactThresholdMB     int
 
 	LogLevel string
 }
@@ -100,6 +101,7 @@ func LoadConfig() Config {
 		WALFileName:               getEnv("WAL_FILE_NAME", "queue.wal"),
 		WALSyncEvery:              maxInt(1, getEnvInt("WAL_SYNC_EVERY", 1)),
 			WALMaxSizeMB:              maxInt(1, getEnvInt("WAL_MAX_SIZE_MB", 500)),
+			WALCompactThresholdMB:     maxInt(1, getEnvInt("WAL_COMPACT_THRESHOLD_MB", 1024)),
 
 		LogLevel: strings.ToLower(getEnv("LOG_LEVEL", "info")),
 	}

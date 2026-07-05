@@ -107,6 +107,8 @@ spec:
           value: "queue.wal"
         - name: WAL_SYNC_EVERY
           value: "1"
+        - name: WAL_MAX_SIZE_MB
+          value: "2000"
         - name: QUEUE_LOG_RECORD_BATCH_SIZE
           value: "80"
         # 处理配置
@@ -129,10 +131,10 @@ spec:
         resources:
           limits:
             cpu: "1"
-            memory: 1Gi
+            memory: 2Gi
           requests:
             cpu: 500m
-            memory: 512Mi
+            memory: 1Gi
         livenessProbe:
           httpGet:
             path: /health

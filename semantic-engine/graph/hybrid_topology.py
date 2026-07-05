@@ -73,6 +73,7 @@ class HybridTopologyBuilder:
 
         # 置信度权重
         self.WEIGHT_TRACES = 1.0
+        self.WEIGHT_INTERACTIONS = 0.75
         self.WEIGHT_LOGS = 0.3
         self.WEIGHT_METRICS = 0.2
 
@@ -81,6 +82,7 @@ class HybridTopologyBuilder:
         self.TRACES_SCAN_LIMIT = _read_positive_int_env("HYBRID_TOPOLOGY_TRACES_SCAN_LIMIT", 200000)
         self.LOGS_SCAN_LIMIT = _read_positive_int_env("HYBRID_TOPOLOGY_LOGS_SCAN_LIMIT", 300000)
         self.METRICS_SCAN_LIMIT = _read_positive_int_env("HYBRID_TOPOLOGY_METRICS_SCAN_LIMIT", 100000)
+        self.INTERACTIONS_SCAN_LIMIT = _read_positive_int_env("HYBRID_TOPOLOGY_INTERACTIONS_SCAN_LIMIT", 200000)
 
     def build_topology(
         self,
@@ -117,7 +119,7 @@ class HybridTopologyBuilder:
             effective_time_window = requested_time_window
             logger.info("Building hybrid topology with time_window=%s", requested_time_window)
 
-            # 1. 从三个数据源收集数据
+            # 1. 从四个数据源收集数据
             try:
                 traces_data = self._get_traces_topology(effective_time_window, namespace)
                 logger.debug("traces_data nodes=%s", len(traces_data.get("nodes", [])))
@@ -139,11 +141,19 @@ class HybridTopologyBuilder:
                 logger.exception(f"Error in _get_metrics_topology: {e}")
                 metrics_data = {"nodes": [], "edges": []}
 
+            try:
+                interactions_data = self._get_interactions_topology(effective_time_window, namespace)
+                logger.debug("interactions_data nodes=%s", len(interactions_data.get("nodes", [])))
+            except Exception as e:
+                logger.exception(f"Error in _get_interactions_topology: {e}")
+                interactions_data = {"nodes": [], "edges": []}
+
             # ⚠️ 自适应时间窗口：如果所有数据源都为空，扩大到 24 小时
             total_nodes = (
                 len(traces_data.get("nodes", [])) +
                 len(logs_data.get("nodes", [])) +
-                len(metrics_data.get("nodes", []))
+                len(metrics_data.get("nodes", [])) +
+                len(interactions_data.get("nodes", []))
             )
 
             if total_nodes == 0 and effective_time_window != "24 HOUR":
@@ -167,13 +177,20 @@ class HybridTopologyBuilder:
                     logger.error(f"Error in _get_metrics_topology (24H): {e}")
                     metrics_data = {"nodes": [], "edges": []}
 
+                try:
+                    interactions_data = self._get_interactions_topology(effective_time_window, namespace)
+                except Exception as e:
+                    logger.error(f"Error in _get_interactions_topology (24H): {e}")
+                    interactions_data = {"nodes": [], "edges": []}
+
             # 2. 合并节点
             logger.debug(f"Merging nodes: traces={len(traces_data.get('nodes', []))}, logs={len(logs_data.get('nodes', []))}, metrics={len(metrics_data.get('nodes', []))}")
             try:
                 merged_nodes = self._merge_nodes(
                     traces_data.get("nodes", []),
                     logs_data.get("nodes", []),
-                    metrics_data.get("nodes", [])
+                    metrics_data.get("nodes", []),
+                    interactions_data.get("nodes", [])
                 )
             except Exception as e:
                 logger.exception(f"Error in _merge_nodes: {e}")
@@ -185,7 +202,7 @@ class HybridTopologyBuilder:
             try:
                 merged_edges = self._merge_edges(
                     traces_data.get("edges", []),
-                    logs_data.get("edges", []),
+                    interactions_data.get("edges", []),
                     metrics_data.get("edges", [])
                 )
             except Exception as e:
@@ -221,7 +238,7 @@ class HybridTopologyBuilder:
             )
 
             metadata = {
-                "data_sources": self._get_data_sources(traces_data, logs_data, metrics_data),
+                "data_sources": self._get_data_sources(traces_data, logs_data, metrics_data, interactions_data),
                 "time_window": requested_time_window,
                 "effective_time_window": effective_time_window,
                 "namespace": namespace,
@@ -241,6 +258,10 @@ class HybridTopologyBuilder:
                     "metrics": {
                         "nodes": len(metrics_data.get("nodes", [])),
                         "edges": len(metrics_data.get("edges", []))
+                    },
+                    "interactions": {
+                        "nodes": len(interactions_data.get("nodes", [])),
+                        "edges": len(interactions_data.get("edges", []))
                     }
                 }
             }
@@ -518,36 +539,10 @@ class HybridTopologyBuilder:
                         }
                     })
 
-            # 使用启发式规则构建边
-            edges = []
-            service_names = [node["id"] for node in nodes]
-
-            for i, source in enumerate(service_names):
-                for target in service_names[i+1:]:
-                    if self._is_service_pair_related(source, target):
-                        # 推断调用方向
-                        if self._should_call(source, target):
-                            caller, callee = source, target
-                        else:
-                            caller, callee = target, source
-
-                        edges.append({
-                            "id": f"{caller}-{callee}",
-                            "source": caller,
-                            "target": callee,
-                            "label": "potential-calls",
-                            "type": "calls",
-                            "metrics": {
-                                "call_count": None,  # logs 无法提供准确调用次数
-                                "confidence": 0.3,  # 启发式规则，低置信度
-                                "data_source": "logs_heuristic",
-                                "reason": self._get_relation_reason(caller, callee)
-                            }
-                        })
-
+            # v2: 不再使用启发式规则构建边——由 _get_interactions_topology 替代
             return {
                 "nodes": nodes,
-                "edges": edges
+                "edges": []  # 日志只提供节点，不提供调用关系
             }
 
         except Exception as e:
@@ -634,11 +629,94 @@ class HybridTopologyBuilder:
             logger.error(f"Error getting metrics topology: {e}")
             return {"nodes": [], "edges": []}
 
+    def _get_interactions_topology(
+        self,
+        time_window: str,
+        namespace: str = None
+    ) -> Dict[str, Any]:
+        """
+        从 logs.interactions 表获取精确的交互关系（第4数据源）
+
+        DynamicRelProjection 记录的 actual observed interactions，
+        置信度 0.75——高于启发式规则（已移除），低于 traces（1.0）。
+        """
+        try:
+            if not self.storage.ch_client:
+                return {"nodes": [], "edges": []}
+            safe_time_window = _sanitize_interval(time_window, default_value="1 HOUR")
+
+            prewhere = f"PREWHERE timestamp > now() - INTERVAL {safe_time_window}"
+
+            query = f"""
+            SELECT
+                source,
+                target,
+                count() AS interaction_count,
+                countDistinct(failure_pattern) AS pattern_count
+            FROM logs.interactions
+            {prewhere}
+            GROUP BY source, target
+            ORDER BY interaction_count DESC
+            LIMIT {int(self.INTERACTIONS_SCAN_LIMIT)}
+            """
+
+            result = self.storage.execute_query(query)
+
+            nodes = {}
+            edges = []
+
+            for row in result:
+                if len(row) >= 4:
+                    source, target, interaction_count, pattern_count = row
+                    interaction_count = int(interaction_count or 0)
+                    pattern_count = int(pattern_count or 0)
+
+                    # 确保节点存在
+                    for svc in (source, target):
+                        if svc not in nodes:
+                            nodes[svc] = {
+                                "id": svc,
+                                "label": svc,
+                                "type": "service",
+                                "name": svc,
+                                "metrics": {
+                                    "interaction_count": 0,
+                                    "data_source": "interactions",
+                                    "confidence": self.WEIGHT_INTERACTIONS,
+                                }
+                            }
+                        nodes[svc]["metrics"]["interaction_count"] += interaction_count
+
+                    edges.append({
+                        "id": f"{source}-{target}",
+                        "source": source,
+                        "target": target,
+                        "label": "calls",
+                        "type": "calls",
+                        "metrics": {
+                            "interaction_count": interaction_count,
+                            "pattern_count": pattern_count,
+                            "data_source": "interactions",
+                            "confidence": self.WEIGHT_INTERACTIONS,
+                        }
+                    })
+
+            logger.info(
+                "Interactions topology: %d nodes, %d edges",
+                len(nodes), len(edges),
+            )
+            return {"nodes": list(nodes.values()), "edges": edges}
+
+        except Exception as e:
+            logger.error(f"Error getting interactions topology: {e}")
+            return {"nodes": [], "edges": []}
+
     def _merge_nodes(
         self,
         traces_nodes: List[Dict],
         logs_nodes: List[Dict],
-        metrics_nodes: List[Dict]
+        metrics_nodes: List[Dict],
+        interactions_nodes: List[Dict] = None
     ) -> List[Dict]:
         """
         合并来自不同数据源的节点
@@ -647,6 +725,7 @@ class HybridTopologyBuilder:
         1. traces 数据优先（最准确）
         2. logs 数据补充（服务节点）
         3. metrics 数据验证（服务活跃度）
+        4. interactions 数据补充（实际观测到的交互）
         """
         merged = {}  # {service_name: merged_node}
 
@@ -691,12 +770,32 @@ class HybridTopologyBuilder:
             else:
                 merged[service_name] = node.copy()
 
+        # 4. 合并 interactions 节点（补充）
+        for node in (interactions_nodes or []):
+            service_name = node["id"]
+            if service_name in merged:
+                existing = merged[service_name]
+                inter_metrics = node.get("metrics", {})
+                # 补充 interaction_count
+                if "interaction_count" in inter_metrics:
+                    existing.setdefault("metrics", {})
+                    existing["metrics"]["interaction_count"] = (
+                        existing["metrics"].get("interaction_count", 0)
+                        + inter_metrics["interaction_count"]
+                    )
+                # 标记数据源
+                existing["metrics"].setdefault("data_sources", [])
+                if "interactions" not in existing["metrics"]["data_sources"]:
+                    existing["metrics"]["data_sources"].append("interactions")
+            else:
+                merged[service_name] = node.copy()
+
         return list(merged.values())
 
     def _merge_edges(
         self,
         traces_edges: List[Dict],
-        logs_edges: List[Dict],
+        interactions_edges: List[Dict],
         metrics_edges: List[Dict]
     ) -> List[Dict]:
         """
@@ -704,8 +803,11 @@ class HybridTopologyBuilder:
 
         策略：
         1. traces 边：置信度 1.0（精确）
-        2. logs 边：置信度 0.3（启发式）
+        2. interactions 边：置信度 0.75（实际观测的交互）
         3. 如果多个数据源都支持同一关系，提升置信度
+        4. metrics 边加分（验证）
+
+        注：v2 移除了启发式规则（logs_heuristic），由 interactions 替代。
         """
         merged = {}  # {(source, target): merged_edge}
 
@@ -713,96 +815,45 @@ class HybridTopologyBuilder:
         for edge in traces_edges:
             key = (edge["source"], edge["target"])
             merged[key] = edge.copy()
+            merged[key]["metrics"]["confidence"] = self.WEIGHT_TRACES
 
-        # 2. 合并 logs 边
-        for edge in logs_edges:
+        # 2. 合并 interactions 边（实际观测，高可信）
+        for edge in interactions_edges:
             key = (edge["source"], edge["target"])
             if key in merged:
-                # 边已存在，可能是 traces 的精确数据
-                # 不需要合并，保留 traces 的数据
-                pass
+                # 边已存在——有 traces + interactions 双重证据，提升置信度
+                existing = merged[key]
+                existing.setdefault("metrics", {})
+                data_sources = existing["metrics"].get("data_sources", ["traces"])
+                if "interactions" not in data_sources:
+                    data_sources.append("interactions")
+                existing["metrics"]["data_sources"] = data_sources
+                existing["metrics"]["confidence"] = min(
+                    1.0, existing["metrics"].get("confidence", 0) + 0.1
+                )
             else:
-                # 新边，使用 logs 的数据
                 merged[key] = edge.copy()
+                merged[key]["metrics"]["confidence"] = self.WEIGHT_INTERACTIONS
 
-        # 3. 合并 metrics 边（如果有）
+        # 3. 合并 metrics 边（验证提升）
         for edge in metrics_edges:
             key = (edge["source"], edge["target"])
             if key in merged:
-                # 提升 confidence
                 existing = merged[key]
-                existing_conf = existing.get("metrics", {}).get("confidence", 0)
-                boost = 0.1  # metrics 验证加分
-                existing["metrics"]["confidence"] = min(1.0, existing_conf + boost)
+                existing.setdefault("metrics", {})
+                existing_conf = existing["metrics"].get("confidence", 0)
+                existing["metrics"]["confidence"] = min(1.0, existing_conf + 0.1)
             else:
                 merged[key] = edge.copy()
 
         return list(merged.values())
 
-    def _is_service_pair_related(self, service1: str, service2: str) -> bool:
-        """判断两个服务是否可能存在调用关系（启发式规则）"""
-        # 规则1: frontend -> backend 模式
-        if "frontend" in service1.lower() and "backend" in service2.lower():
-            return True
-        if "frontend" in service2.lower() and "backend" in service1.lower():
-            return True
-
-        # 规则2: 服务 -> 数据库模式
-        db_keywords = ["database", "db", "mysql", "postgres", "mongodb", "clickhouse"]
-        if any(keyword in service2.lower() for keyword in db_keywords):
-            return True
-
-        # 规则3: 服务 -> 缓存模式
-        cache_keywords = ["cache", "redis", "memcached"]
-        if any(keyword in service2.lower() for keyword in cache_keywords):
-            return True
-
-        # 规则4: registry 常被调用
-        if "registry" in service2.lower() and "registry" not in service1.lower():
-            return True
-
-        return False
-
-    def _should_call(self, service1: str, service2: str) -> bool:
-        """判断 service1 是否应该调用 service2"""
-        # frontend/backend 通常调用其他服务
-        if "frontend" in service1.lower() or "backend" in service1.lower():
-            return True
-
-        # 数据库/缓存通常不主动调用其他服务
-        db_keywords = ["database", "db", "mysql", "postgres", "mongodb", "redis", "cache"]
-        if any(keyword in service1.lower() for keyword in db_keywords):
-            return False
-
-        # registry 通常不主动调用
-        if "registry" in service1.lower():
-            return False
-
-        return True
-
-    def _get_relation_reason(self, caller: str, callee: str) -> str:
-        """获取调用关系的理由"""
-        reasons = []
-
-        if "frontend" in caller.lower():
-            reasons.append("frontend_pattern")
-        elif "backend" in caller.lower():
-            reasons.append("backend_pattern")
-
-        db_keywords = ["database", "db", "mysql", "postgres", "redis", "cache"]
-        if any(keyword in callee.lower() for keyword in db_keywords):
-            reasons.append("data_access_pattern")
-
-        if "registry" in callee.lower():
-            reasons.append("image_pull_pattern")
-
-        return ", ".join(reasons) if reasons else "heuristic_pattern"
-
     def _get_data_sources(
         self,
         traces_data: Dict,
         logs_data: Dict,
-        metrics_data: Dict
+        metrics_data: Dict,
+        interactions_data: Dict = None
     ) -> List[str]:
         """获取实际使用的数据源列表"""
         sources = []
@@ -815,6 +866,9 @@ class HybridTopologyBuilder:
 
         if metrics_data.get("nodes") or metrics_data.get("edges"):
             sources.append("metrics")
+
+        if interactions_data and (interactions_data.get("nodes") or interactions_data.get("edges")):
+            sources.append("interactions")
 
         return sources
 

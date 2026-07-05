@@ -115,10 +115,15 @@ class DecisionOrchestrator:
 
             # === Phase 4: EXECUTE ===
             self.state_machine.transition(decision, DecisionStatus.EXECUTING)
+            exec_duration_ms = 0
             if result.selected_candidate and result.selected_candidate.workflow:
+                _exec_start = datetime.now(timezone.utc)
                 exec_result = self.workflow_engine.execute(
                     result.selected_candidate.workflow,
-                    type("Ctx", (), {"trigger": "orchestrator"})(),
+                    {"trigger": "orchestrator"},
+                )
+                exec_duration_ms = int(
+                    (datetime.now(timezone.utc) - _exec_start).total_seconds() * 1000
                 )
                 self.state_machine.transition(decision, DecisionStatus.VERIFYING)
                 outcome = "success" if exec_result.outcome == "success" else "failed"
@@ -131,7 +136,8 @@ class DecisionOrchestrator:
                 self.state_machine.transition(decision, DecisionStatus.FAILED)
 
             # === Phase 5: LEARN ===
-            self._record_episode(decision, plan_result, result, finding, outcome)
+            self._record_episode(decision, plan_result, result, finding, outcome,
+                                 duration_ms=exec_duration_ms)
 
             return DecisionResult(decision=decision, status=outcome)
 
@@ -148,13 +154,16 @@ class DecisionOrchestrator:
             ):
                 try:
                     self.state_machine.transition(decision, DecisionStatus.FAILED)
-                except Exception:
-                    pass  # 状态机拒绝转换时不做任何事——记录即可
+                except Exception as e_sm:
+                    logger.warning(
+                        "State machine rejected FAILED transition (decision=%s): %s",
+                        decision_id, e_sm,
+                    )
             return DecisionResult(decision=decision, status="failed")
 
     def _record_episode(self, decision, plan_result, policy_result,
-                         finding=None, outcome="unknown"):
-        """记录 Episode 并通知 FeedbackLoop（传递 failure_pattern）。"""
+                         finding=None, outcome="unknown", duration_ms=0):
+        """记录 Episode 并通知 FeedbackLoop（传递 failure_pattern 和执行耗时）。"""
         from ..episode.models import Episode, EpisodeStep
 
         episode = Episode(
@@ -174,6 +183,10 @@ class DecisionOrchestrator:
             ),
             "reject_reasons": getattr(decision, "rejected_candidates", []),
         })
+        episode.add_step("execution", {
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+        })
         self.episode_store.save(episode)
 
         # 通过 FeedbackLoop 将 failure_pattern 传递到 ExperienceGraphProjection
@@ -188,6 +201,6 @@ class DecisionOrchestrator:
                 episode_id=episode.episode_id,
                 capability_id=capability_id,
                 outcome=outcome,
-                duration_ms=0,
+                duration_ms=duration_ms,
                 failure_pattern=failure_pattern,
             )

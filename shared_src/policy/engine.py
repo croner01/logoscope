@@ -125,7 +125,8 @@ class PolicyEngine:
                     None, entity_type, entity_name)
                 vm_count = getattr(report, "estimated_vm_count", 0)
             except Exception:
-                pass
+                logger.exception("Blast radius analysis failed in utility "
+                                 "computation for %s/%s", entity_type, entity_name)
 
         return (
             success * self.weights.success

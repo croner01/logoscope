@@ -1,4 +1,4 @@
-"""InteractionProjector — 从 NormalizedEvent 提取交互关系。"""
+"""InteractionProjector — 从 NormalizedEvent 提取交互关系并补全上下文。"""
 import json
 import uuid
 from datetime import datetime
@@ -22,6 +22,9 @@ class InteractionProjector:
     - 主实体（service/instance）
     - host 上下文（作为交互目标）
     - 事件名称中的交互目标
+    - 上下文字段：request_id, host, namespace, pod_name, instance 等
+
+    产出 interaction.observed 事件，携带完整上下文供 CorrelationEngine 使用。
     """
 
     def __init__(self, schema_registry: SchemaRegistry, bus: EventBus):
@@ -70,12 +73,24 @@ class InteractionProjector:
             else:
                 return  # 无法推断交互
 
+        # 从 normalized event 中提取 K8s 上下文（安全取值）
+        k8s_ctx = context.get("k8s", {}) or {}
+
+        # 构建完整交互事件，携带丰富的上下文
         interaction_payload = {
             "source": source,
             "target": target,
             "event_name": event_name,
             "timestamp": envelope.timestamp.isoformat() if hasattr(envelope.timestamp, "isoformat") else str(envelope.timestamp),
             "source_event_id": envelope.event_id,
+
+            # 从 normalized event 提取的上下文（参考值：request_id, global_request_id, host, instance, namespace, pod_name）
+            "request_id": payload.get("openstack_request_id", ""),
+            "global_request_id": payload.get("openstack_global_request_id", ""),
+            "host": host,
+            "instance": entity_instance,
+            "namespace": k8s_ctx.get("namespace", ""),
+            "pod_name": k8s_ctx.get("pod", ""),
         }
 
         interaction_env = EventEnvelope(

@@ -81,6 +81,8 @@ class FeedbackLoop:
                     stats.avg_recovery_time_ms = (
                         stats.avg_recovery_time_ms * (stats.failure_count - 1) + duration_ms
                     ) / stats.failure_count
+            # ⭐ 持久化统计更新（v15 bug fix: 之前 save() 调用缺失导致更新静默丢失）
+            self.capability_stats_store.save(stats)
 
     def _publish_event(self, event_type: str, event) -> None:
         """将事件发布到 platform.system topic。"""

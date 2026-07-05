@@ -436,8 +436,9 @@ def merge_nodes(
     logs_nodes: List[Dict[str, Any]],
     metrics_nodes: List[Dict[str, Any]],
     openstack_nodes: Optional[List[Dict[str, Any]]] = None,
+    interactions_nodes: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Merge nodes from traces/logs/openstack/metrics sources."""
+    """Merge nodes from traces/logs/openstack/interactions/metrics sources."""
     def _normalize_namespace(value: Any) -> str:
         return str(value or "").strip()
 
@@ -515,67 +516,188 @@ def merge_nodes(
 
         _set_namespace(existing_node, incoming_ns)
 
+    def _get_node_service_name(node: Dict[str, Any]) -> str:
+        """提取节点的规范服务名（不包含命名空间）。"""
+        return (node.get("name") or node.get("label") or node.get("id") or "").strip()
+
+    def _service_name_key(name: str) -> str:
+        """规范化服务名用作查找键。"""
+        return name.lower().replace("_", "-")
+
+    def _node_id_ns_quality(node_id: str) -> int:
+        """
+        评估节点 ID 的命名空间质量。
+        2 = 有真实命名空间, 1 = unknown/无命名空间, 0 = 空。
+        """
+        ns = ""
+        if "::" in node_id:
+            ns = node_id.split("::", 1)[0].strip()
+        elif node_id.count(":") >= 2:
+            ns = node_id.split(":")[0].strip()
+        if not ns:
+            return 0
+        if ns.lower() in {"unknown", "none", "null", ""}:
+            return 1
+        return 2
+
+    def _extract_namespace_from_id(node_id: str) -> str:
+        """从节点 ID 提取命名空间部分。"""
+        if "::" in node_id:
+            return node_id.split("::", 1)[0].strip()
+        if node_id.count(":") >= 2:
+            return node_id.split(":", 1)[0].strip()
+        return ""
+
+    def _resolve_merge_key(
+        node: Dict[str, Any],
+        merged: Dict[str, Dict[str, Any]],
+        name_to_id: Dict[str, str],
+    ) -> Optional[str]:
+        """
+        根据节点名和 ID 解析 merged 中的目标 key。
+        仅当一方命名空间为 unknown、另一方有真实命名空间时合并；
+        双方都有不同真实命名空间的同名服务保持分离。
+        """
+        node_id = node.get("id", "")
+        if not node_id:
+            return None
+
+        # 如果 ID 直接命中，直接返回
+        if node_id in merged:
+            return node_id
+
+        # 尝试按服务名查找
+        name = _get_node_service_name(node)
+        name_key = _service_name_key(name)
+        if name_key not in name_to_id:
+            return None
+
+        known_id = name_to_id[name_key]
+
+        # 如果已知节点已被移除，清理 name_to_id
+        if known_id not in merged:
+            del name_to_id[name_key]
+            return None
+
+        # 提取双方的命名空间
+        incoming_ns = _extract_namespace_from_id(node_id)
+        known_ns = _extract_namespace_from_id(known_id)
+
+        # 双方都有真实命名空间且不同 → 不同环境/命名空间部署，不合并
+        incoming_real = _node_id_ns_quality(node_id) >= 2
+        known_real = _node_id_ns_quality(known_id) >= 2
+        if incoming_real and known_real and incoming_ns != known_ns:
+            return None
+
+        # 当前节点有更优的命名空间时迁移
+        if _node_id_ns_quality(node_id) > _node_id_ns_quality(known_id):
+            merged[node_id] = merged.pop(known_id)
+            merged[node_id]["id"] = node_id
+            name_to_id[name_key] = node_id
+            return node_id
+
+        return known_id
+
+    def _merge_node_into(
+        existing: Dict[str, Any],
+        incoming: Dict[str, Any],
+        *,
+        source_name: str,
+    ) -> None:
+        """将 incoming 节点的指标合并到 existing 节点。"""
+        in_metrics = incoming.get("metrics", {}) if isinstance(incoming.get("metrics"), dict) else {}
+        ex_metrics = existing.setdefault("metrics", {})
+        for key, value in in_metrics.items():
+            if key not in ex_metrics:
+                ex_metrics[key] = value
+        _merge_namespace_if_better(existing, incoming)
+        data_sources = ex_metrics.setdefault("data_sources", [])
+        if source_name not in data_sources:
+            data_sources.append(source_name)
+
     merged: Dict[str, Dict[str, Any]] = {}
+    name_to_id: Dict[str, str] = {}  # normalized service name → best node id
 
     for node in traces_nodes:
-        service_name = node["id"]
-        merged[service_name] = copy.deepcopy(node)
-        metrics = merged[service_name].setdefault("metrics", {})
+        node_id = node["id"]
+        merged[node_id] = copy.deepcopy(node)
+        name = _get_node_service_name(node)
+        name_key = _service_name_key(name)
+        if name_key not in name_to_id:
+            name_to_id[name_key] = node_id
+        metrics = merged[node_id].setdefault("metrics", {})
         metrics.setdefault("data_source", "traces")
         metrics.setdefault("data_sources", ["traces"])
 
     for node in logs_nodes:
-        service_name = node["id"]
-        if service_name in merged:
-            existing = merged[service_name]
-            logs_metrics = node.get("metrics", {})
-            for key, value in logs_metrics.items():
-                if key not in existing["metrics"]:
-                    existing["metrics"][key] = value
-            _merge_namespace_if_better(existing, node)
-            data_sources = existing["metrics"].setdefault("data_sources", [])
-            if "logs" not in data_sources:
-                data_sources.append("logs")
+        target_key = _resolve_merge_key(node, merged, name_to_id)
+        name = _get_node_service_name(node)
+        name_key = _service_name_key(name)
+        if target_key and target_key in merged:
+            _merge_node_into(merged[target_key], node, source_name="logs")
         else:
-            merged[service_name] = copy.deepcopy(node)
-            metrics = merged[service_name].setdefault("metrics", {})
+            node_id = node["id"]
+            merged[node_id] = copy.deepcopy(node)
+            if name_key not in name_to_id:
+                name_to_id[name_key] = node_id
+            metrics = merged[node_id].setdefault("metrics", {})
             metrics.setdefault("data_source", "logs")
             metrics.setdefault("data_sources", ["logs"])
 
     # 3.5 合并 openstack 节点（同 logs 路径）
     for node in (openstack_nodes or []):
-        service_name = node["id"]
-        if service_name in merged:
-            existing = merged[service_name]
-            openstack_metrics = node.get("metrics", {})
-            for key, value in openstack_metrics.items():
-                if key not in existing["metrics"]:
-                    existing["metrics"][key] = value
-            _merge_namespace_if_better(existing, node)
-            data_sources = existing["metrics"].setdefault("data_sources", [])
-            if "openstack" not in data_sources:
-                data_sources.append("openstack")
+        target_key = _resolve_merge_key(node, merged, name_to_id)
+        name = _get_node_service_name(node)
+        name_key = _service_name_key(name)
+        if target_key and target_key in merged:
+            _merge_node_into(merged[target_key], node, source_name="openstack")
         else:
-            merged[service_name] = copy.deepcopy(node)
-            metrics = merged[service_name].setdefault("metrics", {})
+            node_id = node["id"]
+            merged[node_id] = copy.deepcopy(node)
+            if name_key not in name_to_id:
+                name_to_id[name_key] = node_id
+            metrics = merged[node_id].setdefault("metrics", {})
             metrics.setdefault("data_source", "openstack")
             metrics.setdefault("data_sources", ["openstack"])
 
-    for node in metrics_nodes:
-        service_name = node["id"]
-        if service_name in merged:
-            existing = merged[service_name]
-            metrics_data = node.get("metrics", {})
-            for key, value in metrics_data.items():
-                if key not in existing["metrics"]:
-                    existing["metrics"][key] = value
+    # 3.6 合并 interactions 节点（实际观测交互）
+    for node in (interactions_nodes or []):
+        target_key = _resolve_merge_key(node, merged, name_to_id)
+        name = _get_node_service_name(node)
+        name_key = _service_name_key(name)
+        if target_key and target_key in merged:
+            existing = merged[target_key]
+            in_metrics = node.get("metrics", {}) if isinstance(node.get("metrics"), dict) else {}
+            if "interaction_count" in in_metrics:
+                existing.setdefault("metrics", {})["interaction_count"] = (
+                    existing.get("metrics", {}).get("interaction_count", 0)
+                    + in_metrics["interaction_count"]
+                )
             _merge_namespace_if_better(existing, node)
-            data_sources = existing.get("metrics", {}).setdefault("data_sources", [])
-            if "metrics" not in data_sources:
-                data_sources.append("metrics")
+            data_sources = existing.setdefault("metrics", {}).setdefault("data_sources", [])
+            if "interactions" not in data_sources:
+                data_sources.append("interactions")
         else:
-            merged[service_name] = copy.deepcopy(node)
-            metrics = merged[service_name].setdefault("metrics", {})
+            node_id = node["id"]
+            merged[node_id] = copy.deepcopy(node)
+            if name_key not in name_to_id:
+                name_to_id[name_key] = node_id
+            metrics = merged[node_id].setdefault("metrics", {})
+            metrics.setdefault("data_source", "interactions")
+            metrics.setdefault("data_sources", ["interactions"])
+
+    for node in metrics_nodes:
+        target_key = _resolve_merge_key(node, merged, name_to_id)
+        name = _get_node_service_name(node)
+        name_key = _service_name_key(name)
+        if target_key and target_key in merged:
+            _merge_node_into(merged[target_key], node, source_name="metrics")
+        else:
+            node_id = node["id"]
+            merged[node_id] = copy.deepcopy(node)
+            if name_key not in name_to_id:
+                name_to_id[name_key] = node_id
+            metrics = merged[node_id].setdefault("metrics", {})
             metrics.setdefault("data_source", "metrics")
             metrics.setdefault("data_sources", ["metrics"])
 
@@ -587,9 +709,10 @@ def merge_edges(
     logs_edges: List[Dict[str, Any]],
     metrics_edges: List[Dict[str, Any]],
     openstack_edges: Optional[List[Dict[str, Any]]] = None,
+    interactions_edges: Optional[List[Dict[str, Any]]] = None,
     metrics_boost: float = 0.1,
 ) -> List[Dict[str, Any]]:
-    """Merge edges from traces/openstack/logs/metrics sources."""
+    """Merge edges from traces/interactions/openstack/logs/metrics sources."""
     merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # Phase 1: traces (highest priority)
@@ -615,6 +738,24 @@ def merge_edges(
             metrics = merged[key].setdefault("metrics", {})
             metrics.setdefault("data_source", "openstack")
             metrics.setdefault("data_sources", ["openstack"])
+
+    # Phase 2.5: interactions (traces > interactions > openstack > logs > metrics)
+    for edge in (interactions_edges or []):
+        key = (edge["source"], edge["target"])
+        if key in merged:
+            existing = merged[key]
+            existing_metrics = existing.setdefault("metrics", {})
+            data_sources = existing_metrics.setdefault("data_sources", [])
+            if "interactions" not in data_sources:
+                data_sources.append("interactions")
+            # 提升置信度
+            existing_conf = existing_metrics.get("confidence", 0)
+            existing_metrics["confidence"] = min(1.0, float(existing_conf) + 0.1)
+        else:
+            merged[key] = copy.deepcopy(edge)
+            metrics = merged[key].setdefault("metrics", {})
+            metrics.setdefault("data_source", "interactions")
+            metrics.setdefault("data_sources", ["interactions"])
 
     # Phase 3: logs
     for edge in logs_edges:
@@ -897,6 +1038,7 @@ def get_data_sources(
     logs_data: Dict[str, Any],
     metrics_data: Dict[str, Any],
     openstack_data: Optional[Dict[str, Any]] = None,
+    interactions_data: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Get enabled data sources list from non-empty node/edge payloads."""
     sources: List[str] = []
@@ -907,6 +1049,8 @@ def get_data_sources(
         sources.append("logs")
     if openstack_data and (openstack_data.get("nodes") or openstack_data.get("edges")):
         sources.append("openstack")
+    if interactions_data and (interactions_data.get("nodes") or interactions_data.get("edges")):
+        sources.append("interactions")
     if metrics_data.get("nodes") or metrics_data.get("edges"):
         sources.append("metrics")
 

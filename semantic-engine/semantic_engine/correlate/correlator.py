@@ -11,7 +11,7 @@ class CorrelationEngine:
     Correlation Engine——基于交互模式推断服务间相关性。
 
     - 监听 interaction.observed 事件
-    - 更新 DynamicRelProjection
+    - 更新 DynamicRelProjection（含 request_id, host 等上下文）
     - 基于交互频率产出相关性 Finding
     """
 
@@ -46,9 +46,23 @@ class CorrelationEngine:
         if not source_name or not target_name:
             return []
 
-        # 记录交互（带 failure_pattern 标记）
+        # 从 payload 提取上下文（由 InteractionProjector 补充）
+        request_id = payload.get("request_id", "")
+        global_request_id = payload.get("global_request_id", "")
+        host = payload.get("host", "")
+        namespace = payload.get("namespace", "")
+        pod_name = payload.get("pod_name", "")
+        instance = payload.get("instance", "")
+
+        # 记录交互（带 failure_pattern 标记 + 上下文）
         self.rel_projection.record_interaction(
-            source_name, target_name, failure_pattern=self.failure_pattern
+            source_name, target_name, failure_pattern=self.failure_pattern,
+            request_id=request_id,
+            global_request_id=global_request_id,
+            host=host,
+            namespace=namespace,
+            pod_name=pod_name,
+            instance=instance,
         )
 
         # 检查交互频率是否超过阈值（按当前 failure_pattern 过滤）
@@ -81,6 +95,14 @@ class CorrelationEngine:
                         f"failure_pattern={self.failure_pattern}",
                     ],
                     "affected_entities": [source_name, target_name],
+                    "context": {
+                        "request_id": request_id,
+                        "global_request_id": global_request_id,
+                        "host": host,
+                        "namespace": namespace,
+                        "pod_name": pod_name,
+                        "instance": instance,
+                    },
                 }
             ]
 

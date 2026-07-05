@@ -1,4 +1,5 @@
 """RiskEngine — 三层风险评估引擎。"""
+import logging
 from typing import Optional, List, Dict, Any
 from .models import RiskProfile
 from ..expression.impact_model import ImpactModel
@@ -6,6 +7,8 @@ from ..capability.models import Capability
 from ..knowledge.constraint import Constraint
 from ..blast_radius.analyzer import BlastRadiusAnalyzer
 from ..blast_radius.models import BlastRadiusReport
+
+logger = logging.getLogger(__name__)
 
 
 class RiskEngine:
@@ -86,8 +89,9 @@ class RiskEngine:
             report = self.blast_analyzer.analyze(cap, entity_type, entity_name)
             if report.risk_level in ("critical", "high"):
                 risk += 30 if report.risk_level == "critical" else 15
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Blast radius analysis failed for %s/%s: %s",
+                             entity_type, entity_name, str(e))
 
         # Constraint 检查
         constraints = self.knowledge_store.get_constraints(action) if hasattr(

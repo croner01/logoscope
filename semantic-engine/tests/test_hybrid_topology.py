@@ -34,6 +34,7 @@ class TestHybridTopologyBuilderInit:
 
         assert builder.storage == mock_storage
         assert builder.WEIGHT_TRACES == 1.0
+        assert builder.WEIGHT_INTERACTIONS == 0.75
         assert builder.WEIGHT_LOGS == 0.3
         assert builder.WEIGHT_METRICS == 0.2
         assert builder.time_window == "1 HOUR"
@@ -223,9 +224,8 @@ class TestGetLogsTopology:
         assert node_a["metrics"]["error_count"] == 10
         assert node_a["metrics"]["error_rate"] == 0.01
 
-    def test_logs_topology_heuristic_edges(self, builder, mock_storage):
-        """测试启发式边生成"""
-        # frontend 和 backend 服务
+    def test_logs_topology_no_heuristic_edges(self, builder, mock_storage):
+        """测试 logs 不再生成启发式边——由 interactions 替代"""
         mock_storage.execute_query = Mock(return_value=[
             ("frontend-service", 100, 1, 0, datetime(2026, 2, 9, 12, 0, 0)),
             ("backend-service", 50, 1, 0, datetime(2026, 2, 9, 12, 0, 0))
@@ -233,30 +233,8 @@ class TestGetLogsTopology:
 
         result = builder._get_logs_topology("1 HOUR")
 
-        # 应该生成启发式边
-        edges = result["edges"]
-        if edges:
-            # 如果生成了边，验证其属性
-            edge = edges[0]
-            assert "source" in edge
-            assert "target" in edge
-            assert edge["metrics"]["confidence"] == 0.3  # 启发式规则低置信度
-
-    def test_logs_topology_database_pattern(self, builder, mock_storage):
-        """测试数据库模式识别"""
-        mock_storage.execute_query = Mock(return_value=[
-            ("api-service", 100, 1, 0, datetime(2026, 2, 9, 12, 0, 0)),
-            ("database", 50, 1, 0, datetime(2026, 2, 9, 12, 0, 0))
-        ])
-
-        result = builder._get_logs_topology("1 HOUR")
-
-        # 应该识别 api-service -> database 的调用关系
-        edges = result["edges"]
-        if edges:
-            edge = edges[0]
-            # database 通常是被调用方
-            assert edge["target"] == "database"
+        # 不再基于名称猜测生成边
+        assert result["edges"] == []
 
     def test_logs_topology_no_database(self):
         """测试没有数据库连接"""
@@ -413,35 +391,57 @@ class TestMergeEdges:
                 "metrics": {"call_count": 100, "confidence": 1.0, "data_source": "traces"}
             }
         ]
-        logs_edges = [
+        interactions_edges = [
             {
                 "source": "service-a",
                 "target": "service-b",
-                "metrics": {"confidence": 0.3, "data_source": "logs"}
+                "metrics": {"confidence": 0.75, "data_source": "interactions"}
             }
         ]
 
-        merged = builder._merge_edges(traces_edges, logs_edges, [])
+        merged = builder._merge_edges(traces_edges, interactions_edges, [])
 
         # 应该保留 traces 的数据
         assert len(merged) == 1
         assert merged[0]["metrics"]["confidence"] == 1.0
         assert merged[0]["metrics"]["call_count"] == 100
 
-    def test_merge_edges_logs_only(self, builder):
-        """测试只有 logs 边的情况"""
-        logs_edges = [
+    def test_merge_edges_interactions_only(self, builder):
+        """测试只有 interactions 边的情况"""
+        interactions_edges = [
             {
                 "source": "service-a",
                 "target": "service-b",
-                "metrics": {"confidence": 0.3, "data_source": "logs"}
+                "metrics": {"confidence": 0.75, "data_source": "interactions"}
             }
         ]
 
-        merged = builder._merge_edges([], logs_edges, [])
+        merged = builder._merge_edges([], interactions_edges, [])
 
         assert len(merged) == 1
-        assert merged[0]["metrics"]["confidence"] == 0.3
+        assert merged[0]["metrics"]["confidence"] == 0.75
+
+    def test_merge_edges_interactions_boost_traces(self, builder):
+        """interactions 和 traces 同时存在时提升置信度"""
+        traces_edges = [
+            {
+                "source": "service-a",
+                "target": "service-b",
+                "metrics": {"confidence": 0.8, "data_source": "traces"}
+            }
+        ]
+        interactions_edges = [
+            {
+                "source": "service-a",
+                "target": "service-b",
+                "metrics": {"data_source": "interactions"}
+            }
+        ]
+
+        merged = builder._merge_edges(traces_edges, interactions_edges, [])
+
+        # confidence 应该被提升
+        assert merged[0]["metrics"]["confidence"] > 0.8
 
     def test_merge_edges_metrics_boost(self, builder):
         """测试 metrics 提升置信度"""
@@ -466,48 +466,74 @@ class TestMergeEdges:
         assert merged[0]["metrics"]["confidence"] > 0.5
 
 
-class TestHeuristicRules:
-    """测试启发式规则"""
+class TestGetInteractionsTopology:
+    """测试 Interactions 拓扑提取（第4数据源）"""
 
     @pytest.fixture
     def mock_storage(self):
-        return Mock(spec=StorageAdapter)
+        storage = Mock(spec=StorageAdapter)
+        storage.ch_client = Mock()
+        return storage
 
     @pytest.fixture
     def builder(self, mock_storage):
         return HybridTopologyBuilder(mock_storage)
 
-    def test_is_service_pair_related_frontend_backend(self, builder):
-        """测试 frontend-backend 模式"""
-        assert builder._is_service_pair_related("frontend-service", "backend-api")
-        assert builder._is_service_pair_related("web-frontend", "backend-service")
+    def test_interactions_topology_basic(self, builder, mock_storage):
+        """基本 interactions 拓扑"""
+        mock_storage.execute_query = Mock(return_value=[
+            ("service-a", "service-b", 150, 2),
+            ("service-b", "redis", 80, 1),
+        ])
 
-    def test_is_service_pair_related_database(self, builder):
-        """测试数据库模式"""
-        assert builder._is_service_pair_related("api-service", "mysql-db")
-        assert builder._is_service_pair_related("app", "redis-cache")
-        assert builder._is_service_pair_related("service", "postgres")
+        result = builder._get_interactions_topology("1 HOUR")
 
-    def test_is_service_pair_related_registry(self, builder):
-        """测试 registry 模式"""
-        assert builder._is_service_pair_related("app", "docker-registry")
+        assert len(result["nodes"]) == 3  # service-a, service-b, redis
+        assert len(result["edges"]) == 2
+        # 置信度应为 0.75
+        for edge in result["edges"]:
+            assert edge["metrics"]["confidence"] == 0.75
 
-    def test_should_call(self, builder):
-        """测试调用方向判断"""
-        # frontend 应该调用其他服务
-        assert builder._should_call("frontend", "backend")
+    def test_interactions_topology_confidence(self, builder, mock_storage):
+        """interactions 置信度 = 0.75"""
+        mock_storage.execute_query = Mock(return_value=[
+            ("svc-a", "svc-b", 50, 1),
+        ])
+        result = builder._get_interactions_topology("1 HOUR")
+        assert result["edges"][0]["metrics"]["confidence"] == 0.75
+        assert result["nodes"][0]["metrics"]["confidence"] == 0.75
 
-        # database 不应该主动调用
-        assert not builder._should_call("mysql", "api")
+    def test_interactions_topology_no_database(self):
+        """没有数据库连接时返回空"""
+        storage = Mock(spec=StorageAdapter)
+        storage.ch_client = None
+        builder = HybridTopologyBuilder(storage)
+        result = builder._get_interactions_topology("1 HOUR")
+        assert result["nodes"] == []
+        assert result["edges"] == []
 
-        # registry 不应该主动调用
-        assert not builder._should_call("registry", "app")
+    def test_interactions_gets_merged_into_topology(self, builder, mock_storage):
+        """interactions 数据被 build_topology 合并到最终输出"""
+        # Mock: traces 空, logs 有节点, interactions 有边
+        def exec_side_effect(query):
+            q = query.lower()
+            if "logs.interactions" in q:
+                return [("frontend", "backend", 100, 2)]
+            if "logs.logs" in q:
+                return [("frontend", 500, 2, 0, datetime(2026, 2, 9, 12, 0, 0)),
+                        ("backend", 300, 1, 0, datetime(2026, 2, 9, 12, 0, 0))]
+            return []
+        mock_storage.execute_query = Mock(side_effect=exec_side_effect)
+        result = builder.build_topology()
 
-    def test_get_relation_reason(self, builder):
-        """测试调用关系理由"""
-        reason = builder._get_relation_reason("frontend", "mysql-db")
-
-        assert "frontend_pattern" in reason or "data_access_pattern" in reason
+        assert len(result["edges"]) >= 1
+        edge = next((e for e in result["edges"]
+                     if e["source"] == "frontend" and e["target"] == "backend"), None)
+        assert edge is not None
+        # interaction_count 应保留
+        assert edge["metrics"].get("interaction_count") == 100
+        # 置信度应在 0.75 以上
+        assert edge["metrics"]["confidence"] >= 0.75
 
 
 class TestConvenienceFunction:
@@ -558,6 +584,7 @@ class TestMetadataGeneration:
         assert "traces" in metadata["source_breakdown"]
         assert "logs" in metadata["source_breakdown"]
         assert "metrics" in metadata["source_breakdown"]
+        assert "interactions" in metadata["source_breakdown"]
 
     def test_metadata_generated_at(self, builder, mock_storage):
         """测试生成时间"""

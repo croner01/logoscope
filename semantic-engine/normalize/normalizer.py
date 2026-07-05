@@ -304,6 +304,8 @@ _OPENSTACK_BRACKET_RE = re.compile(
 _OPENSTACK_REQ_ID_RE = re.compile(
     r'(req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
 )
+# 32-hex 字符串（oslo.log 中 global_request_id / user_id / project_id 的格式）
+_OPENSTACK_32HEX_RE = re.compile(r'\b([0-9a-fA-F]{32})\b')
 
 
 def _extract_trace_span_from_log_text(log_data: Dict[str, Any]) -> Dict[str, str]:
@@ -349,10 +351,11 @@ def extract_openstack_request_ids(log_data: Dict[str, Any]) -> Dict[str, str]:
     """
     从 OpenStack 日志消息中提取 request_id 和 global_request_id。
 
-    支持两种 oslo.log format：
+    支持三种 oslo.log format：
       旧格式: [req-<UUID> <project_id> <user_id> ...] → request_id 有值, global 为空
       新格式: [req-<UUID> req-<UUID> <project_id> ...] → global=第一个, request_id=第二个
-    0 个 req-id: 不是 OpenStack 请求上下文 → 返回空字典
+      生产格式: [req-<UUID> <32hex_global_id> <32hex_user_id> ...] →
+               request_id=req-uuid, global_request_id=第一个 32hex
 
     Args:
         log_data: 原始日志数据字典
@@ -368,17 +371,24 @@ def extract_openstack_request_ids(log_data: Dict[str, Any]) -> Dict[str, str]:
     if not bracket_match:
         return {}
 
-    req_ids = _OPENSTACK_REQ_ID_RE.findall(bracket_match.group(1))
+    bracket_content = bracket_match.group(1)
+    req_ids = _OPENSTACK_REQ_ID_RE.findall(bracket_content)
+    hex32_ids = _OPENSTACK_32HEX_RE.findall(bracket_content)
 
     if len(req_ids) >= 2:
+        # 新 oslo.log 格式: [req-global req-request_id ...]
         return {
             "openstack_request_id": req_ids[1],
             "openstack_global_request_id": req_ids[0],
         }
     elif len(req_ids) == 1:
+        # 单 req-id 格式，检查 bracket 内是否有 32hex
+        # oslo.log: [req-request_id <32hex_global_id> <32hex_user_id> ...]
+        #        或 [req-request_id <user_id> <project_id> - default default]
+        global_id = hex32_ids[0] if hex32_ids else ""
         return {
             "openstack_request_id": req_ids[0],
-            "openstack_global_request_id": "",
+            "openstack_global_request_id": global_id,
         }
     return {}
 
