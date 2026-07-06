@@ -318,6 +318,31 @@ export function formatDateRange(start: string, end: string): string {
 }
 
 /**
+ * 格式化日期 — 简短格式 (MM/DD HH:mm)
+ */
+export function formatDate(iso: string): string {
+  if (!iso) return '';
+  const d = parseTimestamp(iso);
+  if (!d) return '';
+  return d.toLocaleDateString('zh-CN', {
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+/**
+ * 格式化时间 — 仅时间 (HH:mm:ss)
+ */
+export function formatTimeShort(iso: string): string {
+  if (!iso) return '';
+  const d = parseTimestamp(iso);
+  if (!d) return '';
+  return d.toLocaleTimeString('zh-CN', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}
+
+/**
  * 格式化时间窗口
  */
 export function formatTimeWindow(window: string): string {

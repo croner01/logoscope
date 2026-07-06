@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
+  Activity,
   AlertCircle,
   BrainCircuit,
   Download,
@@ -16,6 +17,7 @@ import {
   PinOff,
   RefreshCw,
   X,
+  XCircle,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -45,7 +47,7 @@ import {
   isTopologyDegraded,
   computeDegradedEdgeIssueScore,
 } from '../utils/topologyProblemSummary';
-import { formatTime, formatTimeWindow, parseTimestamp } from '../utils/formatters';
+import { formatDate, formatDuration, formatTime, formatTimeShort, formatTimeWindow, parseTimestamp } from '../utils/formatters';
 import { resolveCanonicalServiceName } from '../utils/serviceName';
 
 type LayoutMode = 'swimlane' | 'grid' | 'free';
@@ -147,7 +149,7 @@ type TopProblemEdge = TopologyEdgeEntity & {
 };
 
 type EdgeSortMode = 'anomaly' | 'error_rate' | 'timeout_rate' | 'p99';
-type PanelKey = 'control' | 'issues' | 'detail';
+type PanelKey = 'control' | 'issues' | 'detail' | 'workflow';
 type PathDirection = 'upstream' | 'downstream';
 type PathViewMode = 'all' | PathDirection;
 
@@ -282,6 +284,16 @@ const PANEL_DEFAULTS: Record<PanelKey, PanelPos> = {
   control: { x: 20, y: 18 },
   issues: { x: 20, y: 290 },
   detail: { x: 0, y: 18 },
+};
+
+const getPanelDefaults = (): Record<PanelKey, PanelPos> => {
+  const rightX = typeof window !== 'undefined' ? Math.max(1040, window.innerWidth - 400) : 1040;
+  return {
+    control: { x: rightX, y: 100 },
+    issues: { x: rightX, y: 320 },
+    detail: { x: rightX, y: 540 },
+    workflow: { x: 20, y: 100 },
+  };
 };
 
 const LANE_COLORS = ['#22d3ee', '#a78bfa', '#34d399', '#fb923c', '#fb7185', '#60a5fa'];
@@ -1113,7 +1125,7 @@ const TopologyPage: React.FC = () => {
   const [nodePositions, setNodePositions] = useState<Record<string, NodePosition>>({});
 
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [panelPositions, setPanelPositions] = useState<Record<PanelKey, PanelPos>>(PANEL_DEFAULTS);
+  const [panelPositions, setPanelPositions] = useState<Record<PanelKey, PanelPos>>(getPanelDefaults);
   const [draggingPanel, setDraggingPanel] = useState<DraggingPanel | null>(null);
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
   const [savedFreeLayoutPositions, setSavedFreeLayoutPositions] = useState<Record<string, FreeLayoutPoint>>({});
