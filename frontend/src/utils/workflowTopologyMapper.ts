@@ -83,7 +83,7 @@ export function findBestMatch(
   if (match) return match;
 
   // 反向包含匹配（拓扑名较短但包含在步骤服务名中）
-  match = nodes.find(n => name.includes(n.service_name?.toLowerCase() ?? ''));
+  match = nodes.find(n => n.service_name && name.includes(n.service_name.toLowerCase()));
   return match ?? null;
 }
 
