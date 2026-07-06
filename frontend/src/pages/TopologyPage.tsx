@@ -1177,6 +1177,8 @@ const TopologyPage: React.FC = () => {
   const [selectedWorkflowDetail, setSelectedWorkflowDetail] = useState<WorkflowDetail | null>(null);
   const [selectedWorkflowLoading, setSelectedWorkflowLoading] = useState(false);
   const [workflowHighlight, setWorkflowHighlight] = useState<WorkflowHighlightResult | null>(null);
+  const [highlightPulseNodeId, setHighlightPulseNodeId] = useState<string | null>(null);
+  const [workflowHighlightFixed, setWorkflowHighlightFixed] = useState(false);
 
   // ── Workflow 数据加载 ──────────────────────────────────────
   const fetchWorkflows = useCallback(async () => {
@@ -1726,10 +1728,6 @@ const TopologyPage: React.FC = () => {
     setSelectedWorkflowId(executionId);
     await fetchWorkflowDetail(executionId);
   }, [selectedWorkflowId, fetchWorkflowDetail]);
-
-  // 保留引用，供后续 Workflow 详情展示和拓扑高亮（Task 3）
-  void selectedWorkflowDetail;
-  void selectedWorkflowLoading;
 
   useEffect(() => {
     if (isFrozen) return;
@@ -4402,7 +4400,11 @@ const TopologyPage: React.FC = () => {
                       fill="rgba(15,23,42,0.9)"
                       stroke={statusColor}
                       strokeWidth={2}
-                    />
+                    >
+                      {highlightPulseNodeId === step.nodeId && (
+                        <animate attributeName="opacity" values="1;0.4;1" dur="0.8s" repeatCount="1" />
+                      )}
+                    </circle>
                     <text
                       x={cx - 18} y={cy - 14}
                       textAnchor="middle"
@@ -5768,6 +5770,118 @@ const TopologyPage: React.FC = () => {
                   </div>
                 );
               })}
+
+              {/* ════════════════ 时间线浮层（选中 Workflow 后展开） ════════════════ */}
+              {selectedWorkflowDetail && (
+                <div className="mt-2 rounded-lg border border-cyan-700/40 bg-slate-950/70 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="text-[11px] font-medium text-slate-300">
+                      执行时间线 — {getOperationLabel(selectedWorkflowDetail.operation_type)}
+                    </h4>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setWorkflowHighlightFixed(!workflowHighlightFixed)}
+                        className={`rounded px-1.5 py-0.5 text-[9px] ${
+                          workflowHighlightFixed ? 'bg-cyan-600/30 text-cyan-200' : 'text-slate-500 hover:text-slate-300'
+                        }`}
+                      >
+                        {workflowHighlightFixed ? '已固定' : '固定路径'}
+                      </button>
+                      <button
+                        onClick={() => setLayoutMode('swimlane')}
+                        className="rounded px-1.5 py-0.5 text-[9px] text-slate-500 hover:text-slate-300"
+                      >
+                        泳道布局
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 步骤时间线 */}
+                  {selectedWorkflowLoading ? (
+                    <div className="space-y-2 py-4">
+                      {[1,2,3].map(i => (
+                        <div key={i} className="h-6 animate-pulse rounded bg-slate-800/60" />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {workflowHighlight?.stepSequence.map((step) => {
+                        const pct = step.durationMs > 0 && selectedWorkflowDetail.duration_ms > 0
+                          ? Math.max(1, Math.min(100, (step.durationMs / selectedWorkflowDetail.duration_ms) * 100))
+                          : 0;
+                        const barColor = step.status === 'failed' ? 'bg-red-500/60'
+                          : step.status === 'warning' ? 'bg-amber-500/60'
+                          : 'bg-cyan-500/40';
+                        const stepMatched = step.nodeId !== null;
+
+                        return (
+                          <div
+                            key={step.index}
+                            className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-slate-800/60 cursor-pointer transition-colors"
+                            onMouseEnter={() => {
+                              setHighlightPulseNodeId(step.nodeId);
+                            }}
+                            onMouseLeave={() => setHighlightPulseNodeId(null)}
+                            onClick={() => {
+                              if (step.nodeId && nodePositions[step.nodeId]) {
+                                setPan({ x: -nodePositions[step.nodeId].x + window.innerWidth / 2, y: -nodePositions[step.nodeId].y + 100 });
+                                setZoom(1);
+                              }
+                            }}
+                          >
+                            {/* 步骤序号 */}
+                            <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold font-mono ${
+                              step.status === 'failed' ? 'text-red-400 bg-red-500/15' :
+                              step.status === 'warning' ? 'text-amber-400 bg-amber-500/15' :
+                              'text-cyan-300 bg-cyan-500/10'
+                            }`}>
+                              {step.index}
+                            </span>
+
+                            {/* 服务名 */}
+                            <span className={`min-w-[80px] text-[11px] truncate ${
+                              stepMatched ? 'text-slate-200' : 'text-slate-600 italic'
+                            }`}>
+                              {step.serviceName}
+                              {!stepMatched && ' (未匹配)'}
+                            </span>
+
+                            {/* 进度条 */}
+                            <div className="flex-1 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                              <div
+                                className={`h-full rounded-full transition-all duration-200 ${barColor}`}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+
+                            {/* 耗时 */}
+                            <span className="w-12 text-right text-[10px] text-slate-500 font-mono tabular-nums">
+                              {formatDuration(step.durationMs)}
+                            </span>
+
+                            {/* 状态 */}
+                            {step.status === 'failed' && <XCircle size={10} className="text-red-400" />}
+                            {step.status === 'warning' && <AlertCircle size={10} className="text-amber-400" />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* 概要行 */}
+                  {!selectedWorkflowLoading && selectedWorkflowDetail && (
+                    <div className="mt-2 flex items-center gap-3 border-t border-slate-700/40 pt-2 text-[10px] text-slate-500">
+                      <span>总耗时: {formatDuration(selectedWorkflowDetail.duration_ms)}</span>
+                      <span>步骤: {selectedWorkflowDetail.step_count}</span>
+                      {selectedWorkflowDetail.error_message && (
+                        <span className="truncate text-red-400" title={selectedWorkflowDetail.error_message}>
+                          ⚠ {selectedWorkflowDetail.error_message.slice(0, 40)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
