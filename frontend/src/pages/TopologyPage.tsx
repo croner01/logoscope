@@ -48,7 +48,7 @@ import {
   isTopologyDegraded,
   computeDegradedEdgeIssueScore,
 } from '../utils/topologyProblemSummary';
-import { formatDate, formatDuration, formatTime, formatTimeShort, formatTimeWindow, parseTimestamp } from '../utils/formatters';
+import { formatDate, formatDuration, formatTime, formatTimeWindow, parseTimestamp } from '../utils/formatters';
 import { resolveCanonicalServiceName } from '../utils/serviceName';
 import { mapWorkflowToTopology, type WorkflowHighlightResult, type WorkflowDetail } from '../utils/workflowTopologyMapper';
 
@@ -293,13 +293,6 @@ const LAYOUT = {
   laneRowPaddingTop: 54,
   laneRowPaddingBottom: 42,
   laneBlockGapY: 58,
-};
-
-const PANEL_DEFAULTS: Record<PanelKey, PanelPos> = {
-  control: { x: 20, y: 18 },
-  issues: { x: 20, y: 290 },
-  detail: { x: 0, y: 18 },
-  workflow: { x: 20, y: 100 },
 };
 
 const getPanelDefaults = (): Record<PanelKey, PanelPos> => {
