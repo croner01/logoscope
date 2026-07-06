@@ -1182,11 +1182,12 @@ const TopologyPage: React.FC = () => {
   const [workflowHighlightFixed, setWorkflowHighlightFixed] = useState(false);
 
   const clearWorkflowSelection = useCallback(() => {
+    if (workflowHighlightFixed) return;
     setSelectedWorkflowId(null);
     setSelectedWorkflowDetail(null);
     setWorkflowHighlight(null);
     setSelectedWorkflowIds(new Set());
-  }, []);
+  }, [workflowHighlightFixed]);
 
   // ── Workflow 数据加载 ──────────────────────────────────────
   const fetchWorkflows = useCallback(async () => {
@@ -1203,7 +1204,7 @@ const TopologyPage: React.FC = () => {
     } finally {
       setWorkflowsLoading(false);
     }
-  }, [workflowTimeWindow, clearWorkflowSelection]);
+  }, [workflowTimeWindow, workflowHighlightFixed, clearWorkflowSelection]);
 
   const filteredWorkflows = useMemo(() => {
     if (!workflowFilterOp) return workflows;
@@ -1716,8 +1717,23 @@ const TopologyPage: React.FC = () => {
     [filteredTopology.nodes, topologyData?.nodes, workflowHighlight],
   );
   const visibleEdges = useMemo<TopologyEdgeEntity[]>(
-    () => (filteredTopology.edges || []) as TopologyEdgeEntity[],
-    [filteredTopology.edges],
+    () => {
+      let result = (filteredTopology.edges || []) as TopologyEdgeEntity[];
+      // Ensure workflow-highlighted edges are always visible
+      if (workflowHighlight?.edgeIds.length) {
+        const existingIds = new Set(result.map(e => e.id ?? e.edge_key ?? ''));
+        const allEdges = (topologyData?.edges || []) as TopologyEdgeEntity[];
+        const missingEdges = allEdges.filter(e => {
+          const eid = e.id ?? e.edge_key ?? '';
+          return workflowHighlight.edgeIds.includes(eid) && !existingIds.has(eid);
+        });
+        if (missingEdges.length > 0) {
+          result = [...result, ...missingEdges];
+        }
+      }
+      return result;
+    },
+    [filteredTopology.edges, topologyData?.edges, workflowHighlight],
   );
 
   // ── Layout change → re-map workflow highlight ──
@@ -1743,11 +1759,12 @@ const TopologyPage: React.FC = () => {
       }
     } catch (err: unknown) {
       console.error('Failed to load workflow detail:', err);
+      clearWorkflowSelection();
       setWorkflowsError(err instanceof Error ? err.message : '加载详情失败');
     } finally {
       setSelectedWorkflowLoading(false);
     }
-  }, [visibleNodes, visibleEdges]);
+  }, [visibleNodes, visibleEdges, clearWorkflowSelection]);
 
   const handleWorkflowSelect = useCallback(async (executionId: string) => {
     if (selectedWorkflowId === executionId) {
@@ -5710,12 +5727,7 @@ const TopologyPage: React.FC = () => {
             <div className="flex items-center gap-2 border-b border-slate-700/50 px-3 py-1.5">
               <select
                 value={workflowTimeWindow}
-                onChange={(e) => {
-                  setWorkflowTimeWindow(Number(e.target.value));
-                  setSelectedWorkflowId(null);
-                  setSelectedWorkflowDetail(null);
-                  setWorkflowHighlight(null);
-                }}
+                onChange={(e) => setWorkflowTimeWindow(Number(e.target.value))}
                 className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-[10px] text-slate-200"
               >
                 <option value={1}>近 1 小时</option>
