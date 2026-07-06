@@ -1730,7 +1730,6 @@ const TopologyPage: React.FC = () => {
   // 保留引用，供后续 Workflow 详情展示和拓扑高亮（Task 3）
   void selectedWorkflowDetail;
   void selectedWorkflowLoading;
-  void workflowHighlight;
 
   useEffect(() => {
     if (isFrozen) return;
@@ -3468,6 +3467,7 @@ const TopologyPage: React.FC = () => {
       const isSelectedEdge = selectedEdgeUid === uid || selectedEdgeUid === safeText(edge.id);
       const isFocusEdge = activeFocusNodeId ? edge.source === activeFocusNodeId || edge.target === activeFocusNodeId : false;
       const hasActiveHighlight = !!selectedPathId || !!selectedEdgeUid || !!activeFocusNodeId;
+      const isWorkflowEdge = workflowHighlight ? (workflowHighlight.edgeIds.includes(uid) || workflowHighlight.edgeIds.includes(safeText(edge.id))) : false;
       const bundleCollapsed = meta.size > 1 && !meta.expanded;
 
       let edgeOpacity = isPathEdge || isSelectedEdge ? 0.98 : isFocusEdge ? 0.86 : hasActiveHighlight ? 0.18 : 0.72;
@@ -3475,7 +3475,16 @@ const TopologyPage: React.FC = () => {
         edgeOpacity = Math.min(edgeOpacity, meta.index === Math.floor((meta.size - 1) / 2) ? 0.6 : 0.48);
       }
 
-      const edgeWidth = isPathEdge || isSelectedEdge ? baseWidth + 1.8 : isFocusEdge ? baseWidth + 0.9 : baseWidth;
+      // Workflow 高亮：路径边提亮，非路径边降透明度
+      if (workflowHighlight) {
+        if (isWorkflowEdge) {
+          edgeOpacity = 0.98;
+        } else {
+          edgeOpacity = 0.08;
+        }
+      }
+
+      const edgeWidth = isPathEdge || isSelectedEdge ? baseWidth + 1.8 : isWorkflowEdge ? baseWidth + 2 : isFocusEdge ? baseWidth + 0.9 : baseWidth;
       const labelTextColor = color.severity === 'danger' ? '#fecdd3' : color.severity === 'warning' ? '#fde68a' : '#bae6fd';
       const labelStroke = isPathEdge || isSelectedEdge ? '#e2e8f0' : color.stroke;
       const isLabelOwner = meta.size <= 1 || meta.expanded || meta.index === Math.floor((meta.size - 1) / 2);
@@ -3585,6 +3594,7 @@ const TopologyPage: React.FC = () => {
     isFrozen,
     showGhostZone,
     topologyData,
+    workflowHighlight,
   ]);
 
   const interactiveEdgeData = useMemo(() => {
@@ -4374,6 +4384,67 @@ const TopologyPage: React.FC = () => {
                     </g>
                   );
                 })}
+
+              {/* Workflow 路径序号标记 */}
+              {workflowHighlight?.stepSequence.map((step) => {
+                if (!step.nodeId) return null;
+                const pos = nodePositions[step.nodeId];
+                if (!pos) return null;
+                const statusColor = step.status === 'failed' ? '#f87171'
+                  : step.status === 'warning' ? '#fbbf24'
+                  : '#22d3ee';
+                const cx = pos.x + LAYOUT.nodeWidth / 2;
+                const cy = pos.y + LAYOUT.nodeHeight / 2;
+                return (
+                  <g key={`wf-step-${step.index}`}>
+                    <circle
+                      cx={cx - 18} cy={cy - 18} r={12}
+                      fill="rgba(15,23,42,0.9)"
+                      stroke={statusColor}
+                      strokeWidth={2}
+                    />
+                    <text
+                      x={cx - 18} y={cy - 14}
+                      textAnchor="middle"
+                      fill={statusColor}
+                      fontSize={11}
+                      fontWeight="bold"
+                      fontFamily="monospace"
+                    >
+                      {step.index}
+                    </text>
+                    <text
+                      x={cx - 18} y={cy - 32}
+                      textAnchor="middle"
+                      fill="#94a3b8"
+                      fontSize={9}
+                      fontFamily="monospace"
+                    >
+                      {formatDuration(step.durationMs)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* Workflow 临时边（拓扑无对应） */}
+              {workflowHighlight?.tempEdges.map((te, idx) => {
+                const sourcePos = nodePositions[te.source];
+                const targetPos = nodePositions[te.target];
+                if (!sourcePos || !targetPos) return null;
+                return (
+                  <line
+                    key={`wf-temp-${idx}`}
+                    x1={sourcePos.x + LAYOUT.nodeWidth / 2}
+                    y1={sourcePos.y + LAYOUT.nodeHeight / 2}
+                    x2={targetPos.x + LAYOUT.nodeWidth / 2}
+                    y2={targetPos.y + LAYOUT.nodeHeight / 2}
+                    stroke="#f87171"
+                    strokeWidth={1.5}
+                    strokeDasharray="6 4"
+                    opacity={0.7}
+                  />
+                );
+              })}
               </svg>
 
               <svg className="absolute inset-0" style={{ width: canvasSize.width, height: canvasSize.height }}>
@@ -4470,6 +4541,11 @@ const TopologyPage: React.FC = () => {
                   } else if (lifecycleState === 'ghost') {
                     nodeOpacity = 0.15;
                     extraRing = 'ring-1 ring-slate-500/30';
+                  }
+
+                  // Workflow 高亮：非路径节点降透明度
+                  if (workflowHighlight && !workflowHighlight.nodeIds.includes(node.id)) {
+                    nodeOpacity = 0.15;
                   }
 
                   const isInteractive = lifecycleState === 'active' || lifecycleState === 'entering';
