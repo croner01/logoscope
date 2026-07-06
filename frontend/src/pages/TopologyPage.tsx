@@ -1174,14 +1174,23 @@ const TopologyPage: React.FC = () => {
   const [workflowTimeWindow, setWorkflowTimeWindow] = useState<number>(1);
   const [workflowFilterOp, setWorkflowFilterOp] = useState('');
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  const [_selectedWorkflowIds, setSelectedWorkflowIds] = useState<Set<string>>(new Set());
   const [selectedWorkflowDetail, setSelectedWorkflowDetail] = useState<WorkflowDetail | null>(null);
   const [selectedWorkflowLoading, setSelectedWorkflowLoading] = useState(false);
   const [workflowHighlight, setWorkflowHighlight] = useState<WorkflowHighlightResult | null>(null);
   const [highlightPulseNodeId, setHighlightPulseNodeId] = useState<string | null>(null);
   const [workflowHighlightFixed, setWorkflowHighlightFixed] = useState(false);
 
+  const clearWorkflowSelection = useCallback(() => {
+    setSelectedWorkflowId(null);
+    setSelectedWorkflowDetail(null);
+    setWorkflowHighlight(null);
+    setSelectedWorkflowIds(new Set());
+  }, []);
+
   // ── Workflow 数据加载 ──────────────────────────────────────
   const fetchWorkflows = useCallback(async () => {
+    clearWorkflowSelection();
     setWorkflowsLoading(true);
     setWorkflowsError(null);
     try {
@@ -1194,7 +1203,7 @@ const TopologyPage: React.FC = () => {
     } finally {
       setWorkflowsLoading(false);
     }
-  }, [workflowTimeWindow]);
+  }, [workflowTimeWindow, clearWorkflowSelection]);
 
   const filteredWorkflows = useMemo(() => {
     if (!workflowFilterOp) return workflows;
@@ -1689,13 +1698,35 @@ const TopologyPage: React.FC = () => {
   }, [topologyData, evidenceMode, focusNodeId, focusDepth, isolateMode, suppressWeakEdges]);
 
   const visibleNodes = useMemo<TopologyNodeEntity[]>(
-    () => (filteredTopology.nodes || []) as TopologyNodeEntity[],
-    [filteredTopology.nodes],
+    () => {
+      let result = (filteredTopology.nodes || []) as TopologyNodeEntity[];
+      // Ensure workflow-highlighted nodes are always visible
+      if (workflowHighlight?.nodeIds.length) {
+        const existingIds = new Set(result.map(n => n.id));
+        const allNodes = (topologyData?.nodes || []) as TopologyNodeEntity[];
+        const missingNodes = allNodes.filter(n =>
+          workflowHighlight.nodeIds.includes(n.id) && !existingIds.has(n.id)
+        );
+        if (missingNodes.length > 0) {
+          result = [...result, ...missingNodes];
+        }
+      }
+      return result;
+    },
+    [filteredTopology.nodes, topologyData?.nodes],
   );
   const visibleEdges = useMemo<TopologyEdgeEntity[]>(
     () => (filteredTopology.edges || []) as TopologyEdgeEntity[],
     [filteredTopology.edges],
   );
+
+  // ── Layout change → re-map workflow highlight ──
+  useEffect(() => {
+    if (selectedWorkflowDetail && visibleNodes.length > 0) {
+      const result = mapWorkflowToTopology(selectedWorkflowDetail, visibleNodes, visibleEdges);
+      setWorkflowHighlight(result);
+    }
+  }, [layoutMode, visibleNodes, visibleEdges, selectedWorkflowDetail]);
 
   // ── Workflow 详情加载（需在 visibleNodes/visibleEdges 之后） ──
   const fetchWorkflowDetail = useCallback(async (executionId: string) => {
@@ -1720,14 +1751,12 @@ const TopologyPage: React.FC = () => {
 
   const handleWorkflowSelect = useCallback(async (executionId: string) => {
     if (selectedWorkflowId === executionId) {
-      setSelectedWorkflowId(null);
-      setSelectedWorkflowDetail(null);
-      setWorkflowHighlight(null);
+      clearWorkflowSelection();
       return;
     }
     setSelectedWorkflowId(executionId);
     await fetchWorkflowDetail(executionId);
-  }, [selectedWorkflowId, fetchWorkflowDetail]);
+  }, [selectedWorkflowId, fetchWorkflowDetail, clearWorkflowSelection]);
 
   useEffect(() => {
     if (isFrozen) return;
