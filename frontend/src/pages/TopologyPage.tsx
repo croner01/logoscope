@@ -1713,7 +1713,7 @@ const TopologyPage: React.FC = () => {
       }
       return result;
     },
-    [filteredTopology.nodes, topologyData?.nodes],
+    [filteredTopology.nodes, topologyData?.nodes, workflowHighlight],
   );
   const visibleEdges = useMemo<TopologyEdgeEntity[]>(
     () => (filteredTopology.edges || []) as TopologyEdgeEntity[],
