@@ -4,6 +4,7 @@ import {
   Activity,
   AlertCircle,
   BrainCircuit,
+  CheckCircle,
   Download,
   ExternalLink,
   FileText,
@@ -49,6 +50,7 @@ import {
 } from '../utils/topologyProblemSummary';
 import { formatDate, formatDuration, formatTime, formatTimeShort, formatTimeWindow, parseTimestamp } from '../utils/formatters';
 import { resolveCanonicalServiceName } from '../utils/serviceName';
+import { mapWorkflowToTopology, type WorkflowHighlightResult, type WorkflowDetail } from '../utils/workflowTopologyMapper';
 
 type LayoutMode = 'swimlane' | 'grid' | 'free';
 type EvidenceMode = 'all' | 'observed' | 'inferred';
@@ -147,6 +149,19 @@ type TopologyEdgeEntity = TopologyEntity & {
 type TopProblemEdge = TopologyEdgeEntity & {
   issueScore: number;
 };
+
+interface WorkflowSummary {
+  execution_id: string;
+  operation_type: string;
+  resource_id: string;
+  global_request_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  error_message: string;
+  step_count: number;
+}
 
 type EdgeSortMode = 'anomaly' | 'error_rate' | 'timeout_rate' | 'p99';
 type PanelKey = 'control' | 'issues' | 'detail' | 'workflow';
@@ -284,6 +299,7 @@ const PANEL_DEFAULTS: Record<PanelKey, PanelPos> = {
   control: { x: 20, y: 18 },
   issues: { x: 20, y: 290 },
   detail: { x: 0, y: 18 },
+  workflow: { x: 20, y: 100 },
 };
 
 const getPanelDefaults = (): Record<PanelKey, PanelPos> => {
@@ -1061,6 +1077,34 @@ function enumerateDirectionalPaths(
   return results;
 }
 
+// ── Workflow 面板辅助函数 ──────────────────────────────────
+const STATUS_CONFIGS: Record<string, { bg: string; text: string; label: string }> = {
+  completed: { bg: 'bg-emerald-500/15', text: 'text-emerald-300', label: '完成' },
+  failed: { bg: 'bg-red-500/15', text: 'text-red-300', label: '失败' },
+  running: { bg: 'bg-cyan-500/15', text: 'text-cyan-300', label: '运行中' },
+  pending: { bg: 'bg-slate-500/15', text: 'text-slate-300', label: '等待中' },
+};
+
+function getStatusConfig(status: string): { bg: string; text: string; icon: React.ReactNode; label: string } {
+  const base = STATUS_CONFIGS[status] || { bg: 'bg-slate-500/15', text: 'text-slate-300', label: status };
+  const icon = status === 'failed' ? React.createElement(XCircle, { size: 10 }) : React.createElement(CheckCircle, { size: 10 });
+  return { ...base, icon };
+}
+
+const OPERATION_LABELS: Record<string, string> = {
+  CreateVolume: '创建卷',
+  DeleteVolume: '删除卷',
+  AttachVolume: '挂载卷',
+  DetachVolume: '卸载卷',
+  ExtendVolume: '扩容卷',
+  CreateSnapshot: '创建快照',
+  DeleteSnapshot: '删除快照',
+};
+
+function getOperationLabel(op: string): string {
+  return OPERATION_LABELS[op] || op;
+}
+
 const TopologyPage: React.FC = () => {
   const location = useLocation();
   const navigation = useNavigation();
@@ -1129,6 +1173,39 @@ const TopologyPage: React.FC = () => {
   const [draggingPanel, setDraggingPanel] = useState<DraggingPanel | null>(null);
   const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
   const [savedFreeLayoutPositions, setSavedFreeLayoutPositions] = useState<Record<string, FreeLayoutPoint>>({});
+
+  // ── Workflow 面板状态 ────────────────────────────────────
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
+  const [workflowsLoading, setWorkflowsLoading] = useState(false);
+  const [workflowsError, setWorkflowsError] = useState<string | null>(null);
+  const [workflowTimeWindow, setWorkflowTimeWindow] = useState<number>(1);
+  const [workflowFilterOp, setWorkflowFilterOp] = useState('');
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  const [selectedWorkflowDetail, setSelectedWorkflowDetail] = useState<WorkflowDetail | null>(null);
+  const [selectedWorkflowLoading, setSelectedWorkflowLoading] = useState(false);
+  const [workflowHighlight, setWorkflowHighlight] = useState<WorkflowHighlightResult | null>(null);
+
+  // ── Workflow 数据加载 ──────────────────────────────────────
+  const fetchWorkflows = useCallback(async () => {
+    setWorkflowsLoading(true);
+    setWorkflowsError(null);
+    try {
+      const resp = await fetch(`/api/v1/workflows?limit=50&since_hours=${workflowTimeWindow}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setWorkflows(data.workflows || []);
+    } catch (err: unknown) {
+      setWorkflowsError(err instanceof Error ? err.message : '加载失败');
+    } finally {
+      setWorkflowsLoading(false);
+    }
+  }, [workflowTimeWindow]);
+
+  const filteredWorkflows = useMemo(() => {
+    if (!workflowFilterOp) return workflows;
+    return workflows.filter((w: WorkflowSummary) => w.operation_type === workflowFilterOp);
+  }, [workflows, workflowFilterOp]);
+
   const confidenceThreshold = 0.3;
   const messageTargetPatternsParam = useMemo(
     () => Array.from(new Set(messageTargetPatterns)).sort().join(','),
@@ -1475,6 +1552,11 @@ const TopologyPage: React.FC = () => {
     void fetchClusters();
   }, []);
 
+  // 首次加载 Workflow 数据
+  useEffect(() => {
+    fetchWorkflows();
+  }, [fetchWorkflows]);
+
   const filteredTopology = useMemo(() => {
     const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const baseNodes = topologyData?.nodes || [];
@@ -1619,6 +1701,43 @@ const TopologyPage: React.FC = () => {
     () => (filteredTopology.edges || []) as TopologyEdgeEntity[],
     [filteredTopology.edges],
   );
+
+  // ── Workflow 详情加载（需在 visibleNodes/visibleEdges 之后） ──
+  const fetchWorkflowDetail = useCallback(async (executionId: string) => {
+    setSelectedWorkflowLoading(true);
+    setSelectedWorkflowDetail(null);
+    try {
+      const resp = await fetch(`/api/v1/workflows/${encodeURIComponent(executionId)}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setSelectedWorkflowDetail(data);
+      if (visibleNodes.length && visibleEdges.length) {
+        const result = mapWorkflowToTopology(data, visibleNodes, visibleEdges);
+        setWorkflowHighlight(result);
+      }
+    } catch (err: unknown) {
+      console.error('Failed to load workflow detail:', err);
+      setWorkflowsError(err instanceof Error ? err.message : '加载详情失败');
+    } finally {
+      setSelectedWorkflowLoading(false);
+    }
+  }, [visibleNodes, visibleEdges]);
+
+  const handleWorkflowSelect = useCallback(async (executionId: string) => {
+    if (selectedWorkflowId === executionId) {
+      setSelectedWorkflowId(null);
+      setSelectedWorkflowDetail(null);
+      setWorkflowHighlight(null);
+      return;
+    }
+    setSelectedWorkflowId(executionId);
+    await fetchWorkflowDetail(executionId);
+  }, [selectedWorkflowId, fetchWorkflowDetail]);
+
+  // 保留引用，供后续 Workflow 详情展示和拓扑高亮（Task 3）
+  void selectedWorkflowDetail;
+  void selectedWorkflowLoading;
+  void workflowHighlight;
 
   useEffect(() => {
     if (isFrozen) return;
@@ -5463,6 +5582,121 @@ const TopologyPage: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* ════════════════════ Workflow 执行面板 ════════════════════ */}
+          <div
+            data-floating-panel
+            className="pointer-events-auto absolute w-[320px] rounded-2xl border border-cyan-500/30 bg-slate-900/85 shadow-[0_0_38px_rgba(56,189,248,0.18)] backdrop-blur"
+            style={{ left: panelPositions.workflow.x, top: panelPositions.workflow.y, maxHeight: '50vh' }}
+          >
+            {/* 标题栏 */}
+            <div
+              className="flex cursor-move items-center justify-between border-b border-slate-700 px-3 py-2"
+              onMouseDown={(e) => startPanelDrag('workflow', e)}
+            >
+              <div className="flex items-center gap-2 text-xs font-semibold text-cyan-200">
+                <Activity size={14} /> Workflow 执行
+              </div>
+              <button
+                onClick={fetchWorkflows}
+                disabled={workflowsLoading}
+                className="rounded border border-slate-600 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={workflowsLoading ? 'animate-spin' : ''} />
+              </button>
+            </div>
+
+            {/* 工具栏 */}
+            <div className="flex items-center gap-2 border-b border-slate-700/50 px-3 py-1.5">
+              <select
+                value={workflowTimeWindow}
+                onChange={(e) => setWorkflowTimeWindow(Number(e.target.value))}
+                className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-[10px] text-slate-200"
+              >
+                <option value={1}>近 1 小时</option>
+                <option value={6}>近 6 小时</option>
+                <option value={24}>近 24 小时</option>
+              </select>
+              {workflows.length > 0 && (
+                <select
+                  value={workflowFilterOp}
+                  onChange={(e) => setWorkflowFilterOp(e.target.value)}
+                  className="max-w-[140px] rounded border border-slate-600 bg-slate-900 px-2 py-1 text-[10px] text-slate-200"
+                >
+                  <option value="">全部操作</option>
+                  {Array.from(new Set(workflows.map((w: WorkflowSummary) => w.operation_type))).sort().map((t: string) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            {/* 内容区 */}
+            <div className="max-h-[calc(50vh-80px)] space-y-0.5 overflow-auto p-2">
+              {/* 错误状态 */}
+              {workflowsError && (
+                <div className="rounded-lg border border-red-800/40 bg-red-900/20 px-3 py-2 text-[11px] text-red-400">
+                  {workflowsError}
+                  <button onClick={fetchWorkflows} className="ml-2 underline">重试</button>
+                </div>
+              )}
+
+              {/* 加载状态 */}
+              {workflowsLoading && workflows.length === 0 && (
+                <div className="space-y-2 p-2">
+                  {[1,2,3].map(i => (
+                    <div key={i} className="h-14 animate-pulse rounded-lg bg-slate-800/60" />
+                  ))}
+                </div>
+              )}
+
+              {/* 空状态 */}
+              {!workflowsLoading && !workflowsError && filteredWorkflows.length === 0 && (
+                <div className="flex flex-col items-center py-8 text-slate-500">
+                  <Activity size={24} className="mb-2 opacity-40" />
+                  <p className="text-xs">暂无 Workflow 执行记录</p>
+                  <button onClick={fetchWorkflows} className="mt-2 rounded bg-slate-800 px-3 py-1 text-[10px] text-slate-300 hover:bg-slate-700">
+                    重新扫描
+                  </button>
+                </div>
+              )}
+
+              {/* 列表 */}
+              {filteredWorkflows.map((wf: WorkflowSummary) => {
+                const isSelected = selectedWorkflowId === wf.execution_id;
+                const sConfig = getStatusConfig(wf.status);
+                return (
+                  <div
+                    key={wf.execution_id}
+                    onClick={() => handleWorkflowSelect(wf.execution_id)}
+                    className={`cursor-pointer rounded-lg border px-3 py-2 text-xs transition-all ${
+                      isSelected
+                        ? 'border-cyan-500/50 bg-cyan-900/20'
+                        : 'border-slate-700/50 bg-slate-800/40 hover:border-slate-600/60 hover:bg-slate-800/70'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-slate-200">
+                          {getOperationLabel(wf.operation_type)}
+                        </span>
+                        <span className={`flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] ${sConfig.bg} ${sConfig.text}`}>
+                          {sConfig.icon}
+                          {sConfig.label}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 text-[10px] text-slate-500">
+                      <span>{formatDate(wf.started_at)}</span>
+                      <span>{formatDuration(wf.duration_ms)}</span>
+                      <span>{wf.step_count} 步</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
         </div>
       </div>
 
