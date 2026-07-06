@@ -5603,7 +5603,12 @@ const TopologyPage: React.FC = () => {
             <div className="flex items-center gap-2 border-b border-slate-700/50 px-3 py-1.5">
               <select
                 value={workflowTimeWindow}
-                onChange={(e) => setWorkflowTimeWindow(Number(e.target.value))}
+                onChange={(e) => {
+                  setWorkflowTimeWindow(Number(e.target.value));
+                  setSelectedWorkflowId(null);
+                  setSelectedWorkflowDetail(null);
+                  setWorkflowHighlight(null);
+                }}
                 className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-[10px] text-slate-200"
               >
                 <option value={1}>近 1 小时</option>
