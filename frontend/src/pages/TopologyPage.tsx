@@ -50,7 +50,7 @@ import {
 } from '../utils/topologyProblemSummary';
 import { formatDate, formatDuration, formatTime, formatTimeWindow, parseTimestamp } from '../utils/formatters';
 import { resolveCanonicalServiceName } from '../utils/serviceName';
-import { mapWorkflowToTopology, type WorkflowHighlightResult, type WorkflowDetail } from '../utils/workflowTopologyMapper';
+import { mapWorkflowToTopology, type WorkflowHighlightResult, type WorkflowDetail, type TopoNode, type TopoEdge } from '../utils/workflowTopologyMapper';
 
 type LayoutMode = 'swimlane' | 'grid' | 'free';
 type EvidenceMode = 'all' | 'observed' | 'inferred';
@@ -1738,11 +1738,15 @@ const TopologyPage: React.FC = () => {
 
   // ── Layout change → re-map workflow highlight ──
   useEffect(() => {
-    if (selectedWorkflowDetail && visibleNodes.length > 0) {
-      const result = mapWorkflowToTopology(selectedWorkflowDetail, visibleNodes, visibleEdges);
-      setWorkflowHighlight(result);
+    if (selectedWorkflowDetail) {
+      const allNodes = (topologyData?.nodes || []) as TopoNode[];
+      const allEdges = (topologyData?.edges || []) as TopoEdge[];
+      if (allNodes.length && allEdges.length) {
+        const result = mapWorkflowToTopology(selectedWorkflowDetail, allNodes, allEdges);
+        setWorkflowHighlight(result);
+      }
     }
-  }, [layoutMode, visibleNodes, visibleEdges, selectedWorkflowDetail]);
+  }, [layoutMode, topologyData, selectedWorkflowDetail]);
 
   // ── Workflow 详情加载（需在 visibleNodes/visibleEdges 之后） ──
   const fetchWorkflowDetail = useCallback(async (executionId: string) => {
@@ -1753,8 +1757,14 @@ const TopologyPage: React.FC = () => {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       setSelectedWorkflowDetail(data);
-      if (visibleNodes.length && visibleEdges.length) {
-        const result = mapWorkflowToTopology(data, visibleNodes, visibleEdges);
+
+      // 使用 topologyData 全量节点匹配（不用 visibleNodes），
+      // 防止被 suppressWeakEdges 等过滤掉的节点无法匹配。
+      // 高亮设置后 visibleNodes 会自动把匹配上的节点加回可见集。
+      const matchNodes = (topologyData?.nodes || []) as TopoNode[];
+      const matchEdges = (topologyData?.edges || []) as TopoEdge[];
+      if (matchNodes.length && matchEdges.length) {
+        const result = mapWorkflowToTopology(data, matchNodes, matchEdges);
         setWorkflowHighlight(result);
       }
     } catch (err: unknown) {
@@ -1764,7 +1774,7 @@ const TopologyPage: React.FC = () => {
     } finally {
       setSelectedWorkflowLoading(false);
     }
-  }, [visibleNodes, visibleEdges, clearWorkflowSelection]);
+  }, [topologyData, clearWorkflowSelection]);
 
   const handleWorkflowSelect = useCallback(async (executionId: string) => {
     if (selectedWorkflowId === executionId) {
@@ -3075,7 +3085,7 @@ const TopologyPage: React.FC = () => {
     applyZoomBy(wheelStep, clientX, clientY);
   }, [applyZoomBy]);
 
-  const handleCanvasWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+  const handleCanvasWheel = useCallback((event: WheelEvent) => {
     if ((event.target as HTMLElement).closest('[data-floating-panel], [data-no-canvas-wheel]')) {
       return;
     }
@@ -3083,6 +3093,15 @@ const TopologyPage: React.FC = () => {
     event.stopPropagation();
     applyWheelZoomByDelta(event.deltaY, event.deltaMode, event.clientX, event.clientY);
   }, [applyWheelZoomByDelta]);
+
+  // 使用原生 addEventListener 并标记 passive:false，
+  // 绕过 React 17+ 对 onWheel 默认 passive 的限制
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleCanvasWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleCanvasWheel);
+  }, [handleCanvasWheel]);
 
   useEffect(() => {
     viewStateHydratedRef.current = false;
@@ -4305,7 +4324,6 @@ const TopologyPage: React.FC = () => {
           onMouseMove={handleCanvasMouseMove}
           onMouseUp={stopCanvasInteractions}
           onMouseLeave={stopCanvasInteractions}
-          onWheel={handleCanvasWheel}
           style={{
             backgroundColor: '#020617',
             backgroundImage:
