@@ -356,9 +356,12 @@ class WorkflowEngine:
         按 service_name 前缀过滤（nova-%, cinder-%, neutron-% 等），
         不需要 openstack_global_request_id 字段，捕获所有可能参与
         workflow 的日志行。
+
+        注意：OpenStack 日志量很大（~270K 行/小时），为控制内存使用，
+        设置 max_total 上限为 500K 行，超出部分跳过。
         """
         all_rows: List[Dict] = []
-        max_total = since_hours * 500000  # 比 legacy 略高
+        max_total = 500000  # 安全上限：最多处理 500K 行
 
         # 构建 service filter: service_name LIKE 'nova-%' OR 'cinder-%' OR ...
         service_filters = " OR ".join(
@@ -367,6 +370,7 @@ class WorkflowEngine:
 
         for i in range(since_hours):
             if len(all_rows) >= max_total:
+                logger.info("Reached max_rows=%d for multi-dim query, stopping at hour %d", max_total, i)
                 break
 
             query = f"""
