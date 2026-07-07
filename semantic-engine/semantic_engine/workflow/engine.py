@@ -67,9 +67,8 @@ INSERT INTO {_TABLE_NAME} (
 
 _EXISTS_SQL = f"""
 SELECT count() AS cnt
-FROM {_TABLE_NAME}
+FROM {_TABLE_NAME} FINAL
 WHERE execution_id = {{execution_id}}
-FINAL
 """
 
 # ── 操作类型检测模式 ─────────────────────────────────────────────────────────
@@ -151,6 +150,9 @@ _ACTION_KEYWORDS = [
     (re.compile(r'\bresize\b', re.IGNORECASE), "ResizeServer"),
     (re.compile(r'\bsnapshot\b', re.IGNORECASE), "CreateSnapshot"),
     (re.compile(r'\bbackup\b', re.IGNORECASE), "CreateBackup"),
+    # DeleteVM 关键词回退（当 HTTP 模式因数据不完整未命中时兜底）
+    # 匹配: "Deleted allocation for instance", "Deleting server", "delete instance" 等
+    (re.compile(r'\b(?:delet\w+|terminat\w+)\b.*\b(?:instance|server|allocation|vm)\b', re.IGNORECASE), "DeleteVM"),
 ]
 
 
@@ -234,23 +236,43 @@ class WorkflowEngine:
     # ── 数据查询 ────────────────────────────────────────────────────────────
 
     def _query_log_rows(self, since_hours: int) -> List[Dict]:
-        """从 logs.logs 查询有 openstack_global_request_id 的行。"""
-        query = f"""
-        SELECT
-            service_name,
-            openstack_request_id,
-            openstack_global_request_id,
-            timestamp,
-            level,
-            message,
-            source_cluster
-        FROM logs.logs
-        WHERE openstack_global_request_id != ''
-          AND timestamp > now() - INTERVAL {since_hours} HOUR
-        ORDER BY timestamp
-        LIMIT 300000
+        """从 logs.logs 分批查询有 openstack_global_request_id 的行。
+
+        每 12h 窗口约有 1.3–1.5M 行，单次 LIMIT 300000 会截断 ~78% 数据。
+        改为按小时分批查询，每批少量数据确保全部捕获。
         """
-        return self.storage.execute_query(query) or []
+        all_rows: List[Dict] = []
+        max_total = since_hours * 300000  # 安全上限（实际 ~100K/小时）
+
+        for i in range(since_hours):
+            if len(all_rows) >= max_total:
+                break
+
+            query = f"""
+            SELECT
+                service_name,
+                openstack_request_id,
+                openstack_global_request_id,
+                timestamp,
+                level,
+                message,
+                source_cluster
+            FROM logs.logs
+            WHERE openstack_global_request_id != ''
+              AND timestamp > now() - INTERVAL {i + 1} HOUR
+              AND timestamp <= now() - INTERVAL {i} HOUR
+            ORDER BY timestamp
+            LIMIT 300000
+            """
+            rows = self.storage.execute_query(query) or []
+            all_rows.extend(rows)
+
+        # 合并后重新按时间排序
+        all_rows.sort(key=lambda r: (
+            r.get("timestamp", "") if isinstance(r, dict)
+            else (r[3] if isinstance(r, (list, tuple)) and len(r) > 3 else "")
+        ))
+        return all_rows
 
     # ── 分组 ────────────────────────────────────────────────────────────────
 
