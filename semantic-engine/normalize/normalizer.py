@@ -382,10 +382,13 @@ def extract_openstack_request_ids(log_data: Dict[str, Any]) -> Dict[str, str]:
             "openstack_global_request_id": req_ids[0],
         }
     elif len(req_ids) == 1:
-        # 单 req-id 格式，检查 bracket 内是否有 32hex
-        # oslo.log: [req-request_id <32hex_global_id> <32hex_user_id> ...]
-        #        或 [req-request_id <user_id> <project_id> - default default]
-        global_id = hex32_ids[0] if hex32_ids else ""
+        # 单 req-id 格式: [req-request_id <project_id> <user_id> - ...]
+        # 第一个 32hex 是 project_id，不是 global_request_id。
+        # 在标准 oslo.log 中，无 global_request_id 传播时 bracket 内格式为:
+        #   [req-<UUID> <project_id> <user_id> <project_name> <user_name>]
+        # 只有显式启用了 OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID=true，
+        # 才将第一个 32hex 视为 global_request_id（兼容某些特殊部署）。
+        global_id = hex32_ids[0] if hex32_ids and _is_32hex_global_enabled() else ""
         return {
             "openstack_request_id": req_ids[0],
             "openstack_global_request_id": global_id,
@@ -395,6 +398,19 @@ def extract_openstack_request_ids(log_data: Dict[str, Any]) -> Dict[str, str]:
 
 def _is_pseudo_trace_fallback_enabled() -> bool:
     raw = str(os.getenv("ENABLE_PSEUDO_TRACE_ID_FALLBACK", "true") or "true").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _is_32hex_global_enabled() -> bool:
+    """是否将 bracket 内第一个 32hex 视为 openstack_global_request_id。
+
+    标准 oslo.log 格式：单 req-* 时，bracket 内第一个 32hex 是 project_id，
+    不是 global_request_id。但对于某些特殊部署，global_request_id 以 32hex
+    形式（无 req- 前缀）传递，此时可通过此开关选择旧行为。
+
+    默认关闭（False），避免 project_id 污染 workflow 分组。
+    """
+    raw = str(os.getenv("OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID", "false") or "false").strip().lower()
     return raw not in {"0", "false", "off", "no"}
 
 

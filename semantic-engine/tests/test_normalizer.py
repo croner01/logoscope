@@ -442,7 +442,7 @@ class TestExtractOpenstackRequestIds:
         return {"message": message}
 
     def test_old_format_single_req_id(self):
-        """旧格式：1 个 req-id + 32hex → 第一个 32hex 是 global_request_id"""
+        """旧格式：1 个 req-id + 32hex → 默认不提取为 global_request_id（第一个 32hex 是 project_id）"""
         msg = ('2026-06-22 16:10:47.797 12 INFO nova.api.openstack.wsgi '
                '[req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c '
                'c5f2666761c24ec3a4ad4f14fe75f6cd '
@@ -450,7 +450,27 @@ class TestExtractOpenstackRequestIds:
                "Action: 'create'")
         result = extract_openstack_request_ids(self._make_log_data(msg))
         assert result["openstack_request_id"] == "req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c"
-        assert result["openstack_global_request_id"] == "c5f2666761c24ec3a4ad4f14fe75f6cd"
+        assert result["openstack_global_request_id"] == ""
+
+    def test_old_format_32hex_global_enabled(self):
+        """旧格式 + OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID=true → 第一个 32hex 视为 global_request_id"""
+        import os
+        old_val = os.environ.get("OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID")
+        os.environ["OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID"] = "true"
+        try:
+            msg = ('2026-06-22 16:10:47.797 12 INFO nova.api.openstack.wsgi '
+                   '[req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c '
+                   'c5f2666761c24ec3a4ad4f14fe75f6cd '
+                   '4b3634c206414deb85e65c292b78951d - default default] '
+                   "Action: 'create'")
+            result = extract_openstack_request_ids(self._make_log_data(msg))
+            assert result["openstack_request_id"] == "req-dcad8c91-32e7-4560-ba5d-8d1d51d0194c"
+            assert result["openstack_global_request_id"] == "c5f2666761c24ec3a4ad4f14fe75f6cd"
+        finally:
+            if old_val is None:
+                del os.environ["OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID"]
+            else:
+                os.environ["OPENSTACK_32HEX_AS_GLOBAL_REQUEST_ID"] = old_val
 
     def test_single_req_no_32hex(self):
         """1 个 req-id 且括号内无 32hex → global_request_id 为空"""
