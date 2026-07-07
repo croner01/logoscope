@@ -20,6 +20,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from .multi_dim_correlator import MultiDimCorrelator, OPENSTACK_SERVICE_PREFIXES
+
 logger = logging.getLogger(__name__)
 
 # ── 表定义 ──────────────────────────────────────────────────────────────────
@@ -167,6 +169,16 @@ def _include_32hex_global_request_id() -> bool:
     return raw.strip().lower() not in {"0", "false", "off", "no"}
 
 
+def _use_multi_dim_correlator() -> bool:
+    """是否启用多维关联引擎替代单 key (global_request_id) 分组。
+
+    默认 False。开启后 WorkflowEngine 使用 MultiDimCorrelator 对
+    OpenStack 日志做 UUID 图聚类，而非仅依赖 openstack_global_request_id。
+    """
+    raw = os.getenv("WORKFLOW_USE_MULTI_DIM_CORRELATOR", "false") or "false"
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class WorkflowEngine:
     """
     WorkflowEngine — 从 logs.logs 重建 OpenStack Workflow Execution。
@@ -187,7 +199,11 @@ class WorkflowEngine:
 
     def build_workflows(self, since_hours: int = 6) -> Dict[str, Any]:
         """
-        扫描最近 since_hours 小时内有 global_request_id 的日志，重建 Workflow。
+        扫描最近 since_hours 小时的日志，重建 Workflow。
+
+        根据 WORKFLOW_USE_MULTI_DIM_CORRELATOR 环境变量选择分组策略:
+        - False (默认): 使用 openstack_global_request_id 单 key 分组
+        - True: 使用 MultiDimCorrelator 多维 UUID 图聚类
 
         Args:
             since_hours: 回溯小时数
@@ -203,29 +219,30 @@ class WorkflowEngine:
         safe_hours = max(1, min(168, int(since_hours)))  # 1h ~ 7d
         logger.info("Building workflows from last %d hours of logs...", safe_hours)
 
-        # Step 1: 从 logs.logs 查询有 global_request_id 的行
+        if _use_multi_dim_correlator():
+            return self._build_workflows_multidim(safe_hours)
+        else:
+            return self._build_workflows_legacy(safe_hours)
+
+    def _build_workflows_legacy(self, safe_hours: int) -> Dict[str, Any]:
+        """传统路径：按 openstack_global_request_id 分组。"""
         rows = self._query_log_rows(safe_hours)
         if not rows:
             logger.info("No log entries with global_request_id found in the last %d hours", safe_hours)
             return {"built": 0, "skipped": 0, "errors": 0, "scanned_requests": 0, "groups_total": 0}
 
-        # Step 2: 按 global_request_id 分组
         groups = self._group_by_global_request_id(rows)
         logger.debug("Found %d unique global_request_id groups from %d log rows", len(groups), len(rows))
 
-        # Step 3: 逐组重建 Workflow
         result = {"built": 0, "skipped": 0, "errors": 0, "scanned_requests": len(rows), "groups_total": len(groups)}
         for rid, records in groups.items():
             if len(records) < 2:
                 result["skipped"] += 1
                 continue
-
-            # 检查是否已经存在（execution_id 确定性，支持重入）
             eid = _execution_id(rid)
             if self._workflow_exists(eid):
                 result["skipped"] += 1
                 continue
-
             try:
                 workflow = self._reconstruct_workflow(rid, eid, records)
                 if workflow is None:
@@ -239,6 +256,50 @@ class WorkflowEngine:
 
         logger.info(
             "Workflow build complete: %d built, %d skipped, %d errors (from %d groups, %d rows)",
+            result["built"], result["skipped"], result["errors"],
+            result["groups_total"], result["scanned_requests"],
+        )
+        return result
+
+    def _build_workflows_multidim(self, safe_hours: int) -> Dict[str, Any]:
+        """多维关联路径：使用 MultiDimCorrelator 做 UUID 图聚类。"""
+        rows = self._query_openstack_log_rows(safe_hours)
+        scanned = len(rows)
+        if not rows:
+            logger.info("No OpenStack log entries found in the last %d hours", safe_hours)
+            return {"built": 0, "skipped": 0, "errors": 0, "scanned_requests": 0, "groups_total": 0}
+
+        # 聚类
+        correlator = MultiDimCorrelator()
+        groups = correlator.cluster_entries(rows)
+        logger.debug("MultiDimCorrelator: %d groups from %d log rows", len(groups), scanned)
+
+        result = {"built": 0, "skipped": 0, "errors": 0, "scanned_requests": scanned, "groups_total": len(groups)}
+        for group in groups:
+            indices = group.entry_indices
+            if len(indices) < 2:
+                result["skipped"] += 1
+                continue
+
+            group_entries = [rows[i] for i in indices]
+            cid = self._group_md5(group_entries)
+            eid = _execution_id(cid)
+            if self._workflow_exists(eid):
+                result["skipped"] += 1
+                continue
+            try:
+                workflow = self._reconstruct_workflow(cid, eid, group_entries)
+                if workflow is None:
+                    result["skipped"] += 1
+                    continue
+                self._save_workflow(workflow)
+                result["built"] += 1
+            except Exception as e:
+                logger.error("Error building workflow for cluster %s: %s", cid[:20], e)
+                result["errors"] += 1
+
+        logger.info(
+            "MultiDim workflow build complete: %d built, %d skipped, %d errors (from %d groups, %d rows)",
             result["built"], result["skipped"], result["errors"],
             result["groups_total"], result["scanned_requests"],
         )
@@ -288,6 +349,59 @@ class WorkflowEngine:
             else (r[3] if isinstance(r, (list, tuple)) and len(r) > 3 else "")
         ))
         return all_rows
+
+    def _query_openstack_log_rows(self, since_hours: int) -> List[Dict]:
+        """从 logs.logs 查询 OpenStack 服务日志（多维关联用）。
+
+        按 service_name 前缀过滤（nova-%, cinder-%, neutron-% 等），
+        不需要 openstack_global_request_id 字段，捕获所有可能参与
+        workflow 的日志行。
+        """
+        all_rows: List[Dict] = []
+        max_total = since_hours * 500000  # 比 legacy 略高
+
+        # 构建 service filter: service_name LIKE 'nova-%' OR 'cinder-%' OR ...
+        service_filters = " OR ".join(
+            f"service_name LIKE '{pfx}%'" for pfx in OPENSTACK_SERVICE_PREFIXES
+        )
+
+        for i in range(since_hours):
+            if len(all_rows) >= max_total:
+                break
+
+            query = f"""
+            SELECT
+                service_name,
+                openstack_request_id,
+                openstack_global_request_id,
+                timestamp,
+                level,
+                message,
+                source_cluster
+            FROM logs.logs
+            WHERE ({service_filters})
+              AND timestamp > now() - INTERVAL {i + 1} HOUR
+              AND timestamp <= now() - INTERVAL {i} HOUR
+            ORDER BY timestamp
+            LIMIT 300000
+            """
+            rows = self.storage.execute_query(query) or []
+            all_rows.extend(rows)
+
+        all_rows.sort(key=lambda r: (
+            r.get("timestamp", "") if isinstance(r, dict)
+            else (r[3] if isinstance(r, (list, tuple)) and len(r) > 3 else "")
+        ))
+        return all_rows
+
+    @staticmethod
+    def _group_md5(records: List[Dict]) -> str:
+        """从一组记录生成确定性 group ID。"""
+        raw = "|".join([
+            str(r.get("id", str(r.get("timestamp", ""))))
+            for r in sorted(records, key=lambda x: str(x.get("timestamp", "")))[:10]
+        ])
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
 
     # ── 分组 ────────────────────────────────────────────────────────────────
 
