@@ -1,10 +1,24 @@
 // ── 轻量类型（来自拓扑图，避免依赖 TopologyPage 的内部类型）────
 // TopologyPage 中 TopologyNodeEntity/TopologyEdgeEntity 是 TopologyEntity 的扩展，
 // 本模块只使用 id/service_name/source/target/edge_key 字段。
+// 注意：拓扑节点的顶层 service_name 可能为空，实际存储在 service.name 或
+// metrics.service_name 中（由 transformTopologyGraph 填充）。
 
 export interface TopoNode {
   id: string;
   service_name?: string;
+  name?: string;
+  label?: string;
+  service?: { name?: string; namespace?: string };
+  metrics?: { service_name?: string; node_key?: string };
+}
+
+/** 从拓扑节点对象获取服务名（兼容多种字段位置） */
+function resolveNodeServiceName(node: TopoNode): string {
+  const svc = node.service?.name ?? '';
+  const metricsSvc = node.metrics?.service_name ?? '';
+  const topSvc = node.service_name ?? '';
+  return (topSvc || svc || metricsSvc || node.name || node.label || '').toLowerCase().trim();
 }
 
 export interface TopoEdge {
@@ -71,19 +85,22 @@ export function findBestMatch(
   if (!name) return null;
 
   // 精确匹配
-  let match = nodes.find(n => n.service_name?.toLowerCase() === name);
+  let match = nodes.find(n => resolveNodeServiceName(n) === name);
   if (match) return match;
 
   // 前缀匹配
-  match = nodes.find(n => n.service_name?.toLowerCase().startsWith(name));
+  match = nodes.find(n => resolveNodeServiceName(n).startsWith(name));
   if (match) return match;
 
   // 包含匹配
-  match = nodes.find(n => n.service_name?.toLowerCase().includes(name));
+  match = nodes.find(n => resolveNodeServiceName(n).includes(name));
   if (match) return match;
 
   // 反向包含匹配（拓扑名较短但包含在步骤服务名中）
-  match = nodes.find(n => n.service_name && name.includes(n.service_name.toLowerCase()));
+  match = nodes.find(n => {
+    const nodeName = resolveNodeServiceName(n);
+    return nodeName && name.includes(nodeName);
+  });
   return match ?? null;
 }
 
