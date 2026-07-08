@@ -70,7 +70,7 @@ _REQ_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
-# EasyStack 日志 Python 列表格式: [u'uuid', u'uuid', ...] 或 Parameter node: uuid
+# EasyStack 日志 Python 列表格式: [u'uuid', u'uuid', ...]
 _EASYSTACK_UUID_RE = re.compile(
     r"u'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})'",
     re.IGNORECASE,
@@ -373,6 +373,8 @@ class MultiDimCorrelator:
     def cluster_entries(self, entries: List[Dict]) -> List[CorrelatedGroup]:
         """对日志条目列表进行多维关联聚类。
 
+        内存优化：先提取 UUID 并过滤无关联信息的条目，再聚类。
+
         Args:
             entries: 日志条目列表，每条须包含 message 等字段
 
@@ -382,29 +384,42 @@ class MultiDimCorrelator:
         if not entries:
             return []
 
-        # 1. 提取每条日志的所有 UUID
-        extracted = [extract_resource_uuids(e) for e in entries]
+        # 1. 提取每条日志的所有 UUID，过滤无关联信息的条目
+        extracted_pairs: List[Tuple[int, UUIDSet]] = []
+        for i, e in enumerate(entries):
+            uuids = extract_resource_uuids(e)
+            if not uuids.is_empty() or uuids.request_ids:
+                extracted_pairs.append((i, uuids))
 
-        # 2. 构建倒排索引: (dim, uuid) → [entry_indices]
+        if len(extracted_pairs) < 2:
+            return []
+
+        orig_indices, extracted = zip(*extracted_pairs)  # type: ignore
+        n = len(extracted)
+
+        # 2. 构建倒排索引: (dim, uuid) → [new_indices]
         inverted = self._build_inverted_index(extracted)
 
-        # 3. Union-Find 聚类
-        uf = UnionFind(len(entries))
+        # 3. Union-Find 聚类（在压缩后的索引空间上）
+        uf = UnionFind(n)
         self._cluster(uf, inverted)
         raw_clusters = uf.clusters()
 
-        # 4. 构建 CorrelatedGroup
+        # 4. 构建 CorrelatedGroup（映射回原始索引）
         groups: List[CorrelatedGroup] = []
-        for root, indices in raw_clusters.items():
-            if len(indices) < self.min_cluster_size:
+        for root, new_indices in raw_clusters.items():
+            if len(new_indices) < self.min_cluster_size:
                 continue
 
-            group = CorrelatedGroup(entry_indices=sorted(indices))
+            # 映射到原始索引
+            group_indices = sorted([orig_indices[i] for i in new_indices])
+
+            group = CorrelatedGroup(entry_indices=group_indices)
             group.shared_dimensions = self._compute_shared_dimensions(
-                extracted, indices
+                extracted, new_indices
             )
             group.confidence = self._compute_confidence(
-                entries, extracted, indices
+                entries, extracted, group_indices, new_indices
             )
             groups.append(group)
 
@@ -476,20 +491,30 @@ class MultiDimCorrelator:
         self, entries: List[Dict],
         extracted: List[UUIDSet],
         indices: List[int],
+        extracted_indices: Optional[List[int]] = None,
     ) -> float:
-        """计算聚类置信度 (0.0 - 1.0)。
+        """计算聚类置信度 (0.0 - 1.0).
 
         因子:
         - 占权重比: 共享维度的总权重 / 所有维度的总权重
         - 时间连贯性: 时间跨度越短置信度越高 (指数衰减)
         - 服务多样性: 组内不同服务数量（更多服务 = 更完整的 workflow）
+
+        Args:
+            entries: 原始日志条目列表
+            extracted: UUIDSet 列表（已过滤无关联信息条目）
+            indices: 在 entries 中的原始索引
+            extracted_indices: 在 extracted 中的索引（如不传则 = indices）
         """
         if len(indices) < 2:
             return 0.0
 
+        # 共享维度计算用 extracted_indices，时间/服务用 indices
+        ei = extracted_indices if extracted_indices is not None else indices
+
         # 1. 权重占比
         total_weight = sum(CORRELATION_WEIGHTS.values())
-        shared = self._compute_shared_dimensions(extracted, indices)
+        shared = self._compute_shared_dimensions(extracted, ei)
         earned = sum(CORRELATION_WEIGHTS.get(dim, 0) for dim in shared)
         weight_ratio = earned / total_weight if total_weight > 0 else 0
 
@@ -520,7 +545,7 @@ class MultiDimCorrelator:
                     span_seconds = span if span > 0 else 0
             except Exception:
                 pass
-            # 典型 workflow < 300s → 高置信度; > 3600s → 衰减到低置信度
+            # 典型 workflow < 300s -> 高置信度; > 3600s -> 衰减到低置信度
             temporal_score = math.exp(-span_seconds / 600.0)
 
         # 3. 服务多样性
