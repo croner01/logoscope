@@ -6,8 +6,8 @@
 
 关联评分模型：
     P0 (5.0): Instance UUID, Volume UUID, Port UUID
-    P1 (4.0): Migration UUID, Image UUID
-    P2 (2.0): Request ID（仅补充，不参与聚类）
+    P1 (4.0): Migration UUID, Image UUID, Snapshot UUID, Volume Attach UUID
+    P2 (3.0): Request ID / Global Request ID（参与聚类，桥接跨服务调用链）
     P3 (1.0): Host（仅补充，不参与聚类）
     聚类阈值: >= 3.0
 """
@@ -70,6 +70,12 @@ _REQ_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# EasyStack 日志 Python 列表格式: [u'uuid', u'uuid', ...] 或 Parameter node: uuid
+_EASYSTACK_UUID_RE = re.compile(
+    r"u'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})'",
+    re.IGNORECASE,
+)
+
 # ── HTTP 路径中的 resource type → dimension 映射 ──────────────────────────────
 
 # 从右向左匹配: 找到 /{resource}/{uuid} 模式
@@ -91,6 +97,7 @@ _RESOURCE_TYPE_TO_DIM: Dict[str, str] = {
 OPENSTACK_SERVICE_PREFIXES = (
     'nova-', 'cinder-', 'neutron-', 'glance-', 'heat-',
     'keystone-', 'ironic-', 'manila-', 'designate-',
+    'proton-', 'easystack-', 'gnocchi-',
 )
 
 # ── 关联权重配置 ──────────────────────────────────────────────────────────────
@@ -103,8 +110,7 @@ CORRELATION_WEIGHTS: Dict[str, float] = {
     'image': 4.0,         # P1
     'snapshot': 3.0,      # P1
     'volume_attachment': 3.0,  # P1
-    # 以下维度不参与聚类（weight < 3.0），仅用于补充元信息
-    'request_id': 2.0,    # P2
+    'request_id': 3.0,    # P2 — 参与聚类，桥接跨服务调用链
     'host': 1.0,          # P3
 }
 
@@ -147,7 +153,14 @@ class UUIDSet:
             pairs.append(('image', uuid))
         for uuid in self.snapshot:
             pairs.append(('snapshot', uuid))
+        for rid in self.request_ids:
+            pairs.append(('request_id', rid))
         return pairs
+
+    def has_resource_uuid(self) -> bool:
+        """是否有任何 resource UUID（不含 request_id）。"""
+        return any([self.instance, self.volume, self.port,
+                    self.migration, self.image, self.snapshot])
 
 
 @dataclass
@@ -300,7 +313,15 @@ def extract_resource_uuids(entry: Dict) -> UUIDSet:
                         dim = _RESOURCE_TYPE_TO_DIM[part]
                         getattr(result, dim).add(candidate)
 
-    # ── 3. Request ID ──────────────────────────────────────────────────────
+    # ── 3. EasyStack Python 列表格式 ─────────────────────────────────────────
+    # easystack-vmm: "Parameter except instances: [u'uuid', u'uuid', ...]"
+    # 这些 UUID 是 instance UUID，加入 instance 维度
+    for m in _EASYSTACK_UUID_RE.finditer(message):
+        val = m.group(1).strip()
+        if _is_valid_uuid(val):
+            result.instance.add(val)
+
+    # ── 4. Request ID ──────────────────────────────────────────────────────
     for m in _REQ_ID_RE.finditer(message):
         result.request_ids.add(m.group(1))
 
@@ -308,6 +329,11 @@ def extract_resource_uuids(entry: Dict) -> UUIDSet:
     rid = _get_field(entry, "openstack_request_id")
     if rid and rid.startswith("req-"):
         result.request_ids.add(rid)
+
+    # 补充：从行的 openstack_global_request_id 字段（仅 req-* 格式）
+    gid = _get_field(entry, "openstack_global_request_id")
+    if gid and gid.startswith("req-"):
+        result.request_ids.add(gid)
 
     return result
 

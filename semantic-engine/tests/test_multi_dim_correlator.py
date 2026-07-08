@@ -129,6 +129,52 @@ class TestExtractResourceUuids:
         })
         assert "req-0837809d-9796-4765-9981-6a5a39298fce" in uuids.request_ids
 
+    def test_global_request_id_from_field(self):
+        """openstack_global_request_id 字段为 req-* 格式时应提取。"""
+        uuids = extract_resource_uuids({
+            "message": "Cinder volume op",
+            "openstack_global_request_id": "req-e43f2748-55b1-462a-8773-dcc8a7452745",
+        })
+        assert "req-e43f2748-55b1-462a-8773-dcc8a7452745" in uuids.request_ids
+
+    def test_32hex_global_request_id_not_extracted(self):
+        """32hex 格式的 global_request_id（project_id）不应被提取。"""
+        uuids = extract_resource_uuids({
+            "message": "Keystone auth",
+            "openstack_global_request_id": "c5f2666761c24ec3a4ad4f14fe75f6cd",
+        })
+        assert not any(rid.startswith("c5f2") for rid in uuids.request_ids)
+
+    def test_easystack_uuid_list_format(self):
+        """easystack-vmm 的 u'uuid' 列表格式应提取为 instance UUID。"""
+        uuids = extract_resource_uuids({
+            "message": (
+                "Parameter except instances: [u'5c1b4362-1856-4186-a72f-20d251b65918', "
+                "u'6a82c5ba-7d48-43cb-8bac-5c4984f90648']"
+            )
+        })
+        assert "5c1b4362-1856-4186-a72f-20d251b65918" in uuids.instance
+        assert "6a82c5ba-7d48-43cb-8bac-5c4984f90648" in uuids.instance
+
+    def test_easystack_node_uuid_format(self):
+        """easystack-vmm 的 'Parameter node: uuid' 格式（不在 u'' 内）→ 不提取。"""
+        uuids = extract_resource_uuids({
+            "message": "Parameter node: 9ce92216-e2e5-4e61-8cf1-c89e2aa6a8e5"
+        })
+        # standalone UUID after "Parameter node:" is not in u'uuid' format
+        assert "9ce92216-e2e5-4e61-8cf1-c89e2aa6a8e5" not in uuids.instance
+
+    def test_iter_clusterable_includes_request_ids(self):
+        """iter_clusterable 现在应包含 request_ids。"""
+        uuids = UUIDSet(
+            instance={"bee3d355-e656-4ee5-9d3f-694a7a68aa81"},
+            request_ids={"req-abc", "req-def"},
+        )
+        pairs = uuids.iter_clusterable()
+        assert ('instance', 'bee3d355-e656-4ee5-9d3f-694a7a68aa81') in pairs
+        assert ('request_id', 'req-abc') in pairs
+        assert ('request_id', 'req-def') in pairs
+
     def test_non_openstack_log_returns_empty(self):
         uuids = extract_resource_uuids({
             "message": "query-service: Starting up",
@@ -279,8 +325,8 @@ class TestMultiDimCorrelator:
         groups = MultiDimCorrelator().cluster_entries(entries)
         assert len(groups) == 0
 
-    def test_request_id_does_not_trigger_clustering(self):
-        """仅共享 request_id（权重 2.0 < 3.0）→ 不聚类。"""
+    def test_request_id_triggers_clustering(self):
+        """共享 request_id（权重 3.0 >= 3.0）→ 聚类。"""
         entries = [
             _entry("nova-api", "2026-07-07T10:00:00Z",
                    message="[req-b6272aeb-57c6-4af2-b4c0-5ee43ad47e2e req-xxx] API call",
@@ -290,7 +336,7 @@ class TestMultiDimCorrelator:
                    request_id="req-xxx"),
         ]
         groups = MultiDimCorrelator().cluster_entries(entries)
-        assert len(groups) == 0, "Request ID alone should not trigger clustering"
+        assert len(groups) == 1, "Request ID alone should trigger clustering now"
 
     def test_single_entry_with_uuid_no_cluster(self):
         """只有一条日志有 UUID → 不聚类。"""
@@ -385,18 +431,25 @@ class TestOpenStackServicePrefixes:
         assert "heat-" in OPENSTACK_SERVICE_PREFIXES
         assert "keystone-" in OPENSTACK_SERVICE_PREFIXES
 
+    def test_easystack_prefixes(self):
+        """EasyStack 发行版新增前缀。"""
+        assert "proton-" in OPENSTACK_SERVICE_PREFIXES, "proton-server (neutron)"
+        assert "easystack-" in OPENSTACK_SERVICE_PREFIXES, "easystack-vmm"
+        assert "gnocchi-" in OPENSTACK_SERVICE_PREFIXES, "gnocchi-api"
+
 
 class TestCorrelationWeights:
     def test_cluster_dims_above_threshold(self):
         """聚类维度权重应 >= threshold。"""
-        cluster_dims = ["instance", "volume", "port", "migration", "image", "snapshot"]
+        cluster_dims = ["instance", "volume", "port", "migration", "image",
+                        "snapshot", "volume_attachment", "request_id"]
         for dim in cluster_dims:
             assert CORRELATION_WEIGHTS.get(dim, 0) >= CLUSTER_WEIGHT_THRESHOLD, \
                 f"{dim} should be clusterable"
 
     def test_non_cluster_dims_below_threshold(self):
         """非聚类维度权重应 < threshold。"""
-        non_cluster_dims = ["request_id", "host"]
+        non_cluster_dims = ["host"]
         for dim in non_cluster_dims:
             assert CORRELATION_WEIGHTS.get(dim, 0) < CLUSTER_WEIGHT_THRESHOLD, \
                 f"{dim} should NOT be clusterable"
